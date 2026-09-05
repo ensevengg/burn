@@ -149,14 +149,22 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
   const events: DemoEvent[] = [];
   const todayUtcMidnight = Math.floor(now / DAY) * DAY;
   const revisions: Record<string, number> = { cachyos: 1, windows: 1, wsl: 1 };
+  // 120 days with a growth curve: older days are sparser so the 30d/90d/1y
+  // windows are visibly different in the app.
+  const HISTORY_DAYS = 120;
 
-  for (let dayOffset = 29; dayOffset >= 0; dayOffset--) {
+  for (let dayOffset = HISTORY_DAYS - 1; dayOffset >= 0; dayOffset--) {
     const dayStartUtc = todayUtcMidnight - dayOffset * DAY;
     const weekday = new Date(dayStartUtc).getUTCDay();
     const weekendFactor = weekday === 0 || weekday === 6 ? 0.35 : 1;
+    const growth = 0.3 + 0.7 * (1 - dayOffset / (HISTORY_DAYS - 1));
 
     for (const env of ENVIRONMENTS) {
-      const sessionCount = Math.max(1, Math.round((1 + rand() * 4) * weekendFactor * ENV_WEIGHTS[env.slug]!));
+      const sessionCount = Math.max(
+        0,
+        Math.round((1 + rand() * 4) * weekendFactor * growth * ENV_WEIGHTS[env.slug]!),
+      );
+      if (sessionCount === 0) continue;
       for (let s = 0; s < sessionCount; s++) {
         const model = MODELS[Math.floor(rand() * MODELS.length)]!;
         const sessionId = `demo-${env.slug}-${dayOffset}-${s}`;
