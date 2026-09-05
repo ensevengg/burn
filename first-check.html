@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>first-check — burn architecture review</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0e14; --panel: #121722; --panel-2: #171e2b; --border: #2a3445;
+    --text: #e8edf5; --muted: #9aa7ba; --blue: #72a7ff; --green: #7ee2a8;
+    --yellow: #f3c969; --red: #ff8d8d; --purple: #c6a0ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.65 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 42px 24px 84px; }
+  h1, h2, h3 { line-height: 1.25; letter-spacing: -0.02em; }
+  h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 2.4rem); }
+  h1 code { color: var(--yellow); }
+  h2 { margin: 46px 0 14px; padding-bottom: 9px; border-bottom: 1px solid var(--border); font-size: 1.3rem; }
+  h3 { margin: 24px 0 6px; font-size: 1.02rem; color: var(--green); }
+  p { margin: 8px 0 12px; }
+  a { color: var(--blue); }
+  code { padding: 1px 6px; border: 1px solid var(--border); border-radius: 5px;
+    background: #202838; color: #d9e7ff; font-size: 0.88em; }
+  pre { overflow-x: auto; margin: 14px 0; padding: 14px 16px; border: 1px solid var(--border);
+    border-radius: 10px; background: #0d121b; color: #d7e2f3; line-height: 1.5; }
+  pre code { padding: 0; border: 0; background: transparent; }
+  ul, ol { padding-left: 24px; } li { margin: 6px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th, td { padding: 9px 11px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+  th { background: var(--panel-2); }
+  tr:nth-child(even) td { background: #0f141e; }
+  .subtitle { max-width: 820px; margin-top: 8px; color: var(--muted); }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 28px; }
+  .chip { padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px;
+    background: var(--panel); color: var(--muted); font-size: 0.78rem; }
+  .chip.green { color: var(--green); border-color: #2e6846; }
+  .chip.red { color: var(--red); border-color: #6b3a3a; }
+  .callout { margin: 18px 0; padding: 14px 17px; border-left: 4px solid var(--blue);
+    border-radius: 0 9px 9px 0; background: var(--panel-2); }
+  .callout.warn { border-left-color: var(--yellow); }
+  .callout.danger { border-left-color: var(--red); }
+  .callout.ok { border-left-color: var(--green); }
+  .sev { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 0.7rem;
+    font-weight: 750; letter-spacing: 0.06em; text-transform: uppercase; margin-right: 7px; vertical-align: 1px; }
+  .sev.high { background: #412323; color: var(--red); }
+  .sev.med { background: #41371d; color: var(--yellow); }
+  .sev.low { background: #173524; color: var(--green); }
+  .muted { color: var(--muted); }
+  footer { margin-top: 52px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.84rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1><code>first-check</code> — full architecture review</h1>
+<p class="subtitle">Every source file re-read, all three contract layers compared field-by-field, decision table D1–D12 checked against the implementation, and the rendered app re-walked on the OnePlus 10R (Android 15) with a logcat sweep. Findings only — no code changes were made.</p>
+
+<div class="meta">
+  <span class="chip green">Verdict: architecture holds</span>
+  <span class="chip red">2 real bugs</span>
+  <span class="chip">3 contract drifts · 6 hygiene items</span>
+  <span class="chip">Reviewed 2026-09-06</span>
+  <span class="chip">Reviewer: GLM / ZCode</span>
+</div>
+
+<div class="callout ok">
+  <strong>Scope covered:</strong> <code>packages/sync-api</code> (6 files), <code>apps/reporter</code> (7 src files + tests + fixtures), <code>apps/mobile/src</code> (25 files), <code>supabase/migrations</code> (3) + seed, root scaffold, and the running app on-device. Grep-verified boundaries, field-level schema diff across the three layers, and a live screen-by-screen walkthrough.
+</div>
+
+<h2>What holds up (verified, not assumed)</h2>
+<ul>
+  <li><strong>D3 — the SyncApi boundary is real.</strong> Grep-proven: exactly one <code>@supabase/supabase-js</code> import exists in the entire repo (<code>packages/sync-api/src/supabase.ts</code>). The reporter and the phone go through <code>ReporterSyncApi</code>/<code>MobileSyncApi</code>; a PocketBase backend is genuinely a second implementation file.</li>
+  <li><strong>Revision sync survives contact.</strong> Server-side event identity (<code>sha256(slug|client|dedup_key)</code>), immutable identity columns with content-only upserts, revision-keyed watermarks, and page-atomic phone pulls were pglite-verified earlier and re-checked in source. The phone advances its watermark only after a SQLite transaction commits.</li>
+  <li><strong>Reporter boundary discipline.</strong> No provider credentials are stored; tokscale output is zod-validated against a checked-in fixture (drift fails loudly per D2); token hashing on the phone/reporter side matches the SQL recipe byte-for-byte (tested).</li>
+  <li><strong>Conventions hold everywhere.</strong> D8 (UTC + offset stored, never pre-bucketed; phone buckets at render), D6 freshness model in the UI layer, humanize() applied across all identifier surfaces, monochrome theme tokens with semantic colors only for status.</li>
+  <li><strong>Machine dynamics.</strong> Nothing in the schema or app hardcodes the machine count; the + add-machine sheet and − confirm-and-cascade removal keep the matrix open (updated matrix is in AGENTS.md).</li>
+</ul>
+
+<h2>Real bugs (ranked)</h2>
+
+<h3><span class="sev high">high</span>B1 — D6 quota semantics broken server-side</h3>
+<p><code>burn_fetch_quota_latest</code> (0002) returns the freshest snapshot per (provider, account, metric) <em>regardless of status</em> — error rows included. The phone's sync then <strong>deletes and replaces</strong> its quota mirror from that result, and <code>queryQuotas</code> filters <code>status = 'ok'</code>. Consequence: the first failed vendor fetch (expired token, rate limit) <strong>evicts the last good numbers from the UI</strong> until a machine succeeds again. This contradicts D6 and the Supabase README ("freshest successful snapshot … diagnostics retained").</p>
+<p><strong>Fix shape (SQL-only):</strong> <code>distinct on</code> restricted to <code>status = 'ok'</code> for the display channel, plus a separate latest-error query (or an <code>errors</code> array in the same payload) for the diagnostics the UI may surface later.</p>
+
+<h3><span class="sev med">med</span>B2 — resetDb wipes user preferences</h3>
+<p><code>resetDb</code> runs <code>delete from kv</code>, and it is called by <code>connect</code>, <code>disconnect</code>, and "Clear demo data". So every backend reconnect silently resets <code>reporting_timezone</code> (D8: "persisted, stable until changed") and <code>theme_mode</code> back to system defaults. Preferences are not data — the wipe should exempt preference keys (or preferences should live outside <code>kv</code>).</p>
+
+<h3><span class="sev low">low</span>B3 — streaks break on zero-session days (by design?)</h3>
+<p>The 120-day demo yields a 97-day streak because the sparse-start generator emits occasional zero-session days. Defensible semantics (a day with zero AI usage is a break) — recorded so nobody "fixes" it accidentally.</p>
+
+<h2>Contract drift (server SQL ↔ mirror schema ↔ SyncApi types)</h2>
+
+<h3><span class="sev med">med</span>C1 — <code>export_schema</code> is half-wired and silently dropped</h3>
+<p>The server column exists, <code>EnvironmentInfo</code> carries it, <code>parseEnvironmentRow</code> reads it — then the mirror insert throws it away (<code>db.ts</code>'s <code>environments</code> table has no such column). The local <code>quota_snapshots</code> mirror lacks its column too. Either persist it or trim it from the type until the <code>burn-events</code> exporter (D2) exists.</p>
+
+<h3><span class="sev med">med</span>C2 — quota <code>row_key</code> schemes differ between demo and cloud</h3>
+<p>Demo seed keys <code>env|provider|account|metric</code>; cloud sync keys <code>provider|account|metric</code>. No collision today because the server pre-dedups per metric — but if <code>fetch_quota_latest</code> ever returns per-environment rows, cloud mode collides silently. One scheme should win (demo's env-scoped key is the more precise one).</p>
+
+<h3><span class="sev low">low</span>C3 — the export-schema pipeline is aspirational</h3>
+<p><code>quotaToWire</code> hardcodes <code>export_schema: 1</code>, the reporter heartbeats <code>exportSchema: null</code>, and <code>EVENT_EXPORT_SCHEMA</code> is exported and never used. Dead until D2's exporter exists — fine, but mark it so nobody trusts it.</p>
+
+<h3><span class="sev low">low</span>C4 — the tokscale pin exists in 4 places</h3>
+<p><code>version.ts</code> (canonical, used by <code>burn-report init</code> ✓), the reporter <code>configSchema</code> default string, the demo generator's <code>parserVersion</code> literal, and the demo seed's <code>tokscale_version</code> literal. Config default should import the canonical constant; the generator/seed literals are data, acceptable.</p>
+
+<h2>Duplication (accepted today, tracked)</h2>
+<ul>
+  <li><strong>Per-day bucketing written 4×</strong>: <code>buildSeries</code>, <code>queryGranularityMax</code>, <code>queryRecords</code>, <code>queryDailyTotals</code> all walk <code>loadEvents</code> + <code>bucketKey</code>. A single <code>bucketEvents(events, tz)</code> helper collapses them — and time intelligence (roadmap idea #1) will want a 5th copy, so consolidate then.</li>
+  <li><strong>The 28-column <code>usage_events</code> insert exists in 3 shapes</strong>: the SQL migration, sync.ts's parameterized cloud insert, and sync.ts's string-built demo insert — plus the mirror schema in <code>db.ts</code>. Adding one column means touching four places with <strong>no parity test</strong>. Highest-value place for a schema-drift test.</li>
+  <li><strong>History mounts ~3 full-table scans</strong> (granularity max, records, daily totals all walk every event in JS). Correct at demo scale; at 100k+ events it needs SQLite-side aggregation or maintained rollups — matching Sol's "profile before materializing" note.</li>
+</ul>
+
+<h2>Dead code / hygiene</h2>
+<table>
+  <tr><th>Item</th><th>Status</th></tr>
+  <tr><td><code>HitRateArea</code> (charts.tsx)</td><td>Dead export — History's hit-rate strip moved to <code>ScrollableAreaChart</code>.</td></tr>
+  <tr><td><code>formatDuration</code> (lib/format.ts)</td><td>Dead export — last consumer removed.</td></tr>
+  <tr><td><code>EVENT_EXPORT_SCHEMA</code> (version.ts)</td><td>Dead export — see C3.</td></tr>
+  <tr><td>Reporter <code>commands.ts</code>: <code>saveCursor</code>, <code>backendFor</code></td><td>Imported, never called — the cursor file exists but is only exercised by the future exporter.</td></tr>
+  <tr><td><code>@supabase/supabase-js</code> in both app package.jsons</td><td>Redundant — neither app imports it directly; it belongs to sync-api only.</td></tr>
+  <tr><td><code>navigation.tsx</code> trailing bottom-of-file import (<code>useApp</code>)</td><td>Works via hoisting, unconventional placement.</td></tr>
+  <tr><td><code>heatmap.tsx</code> <code>weeks</code> prop</td><td>Unused by its only caller (kept as component API after the grid was made window-independent).</td></tr>
+</table>
+
+<h2>Test gap</h2>
+<p>Per AGENTS.md, "tests follow the code" — but the <strong>repository layer has zero tests</strong>, and it is the largest pure-logic surface in the app (bucketing, streaks, records, share math, the fixed-Y max, quota grouping). It is also exactly where the mirror-drift risk (duplication item 2) lives. A <code>repository.test.ts</code> with an in-memory SQLite (or pglite-fixture) harness would close both gaps at once.</p>
+
+<h2>Rendered app — re-verified this session</h2>
+<ul>
+  <li><strong>Dashboard</strong>: one-card-per-subscription (Codex with Session 5h + Weekly rows inside), humanized "GLM Coding Plan", monochrome meters, machine freshness strip — all rendering per spec.</li>
+  <li><strong>History</strong>: contribution grid on 120-day demo data with the growth curve clearly visible, records (biggest day / 97d streak / priciest session), ranked top-5 with "… show more (2)" expanding to all 7 models, single window selector, fixed Y ceiling.</li>
+  <li><strong>Explore / Machines / Settings</strong>: verified in earlier passes — add-machine sheet with prefilled command, − confirmation dialog, appearance toggle, About detail.</li>
+  <li><strong>Logcat: zero fatal exceptions</strong> across every session. The one toast observed — "Error from the WebSocket connection" — is the Metro dev-socket dropping when the USB tunnel re-established after the phone reconnected; the app kept rendering from SQLite through it. Dev-only noise, and exactly the stale-while-revalidate design working as intended.</li>
+</ul>
+
+<h2>Recommended fix order</h2>
+<ol>
+  <li><strong>B1</strong> — SQL-only, real correctness bug (small commit: <code>fix(supabase): quota freshness filters errors</code>).</li>
+  <li><strong>B2</strong> — preserve preference keys across resets (small: <code>fix(mobile): keep preferences across cache resets</code>).</li>
+  <li><strong>Duplication 1+2 + test gap</strong> as one consolidation commit: <code>refactor(mobile): single event bucketing + repository tests</code>.</li>
+  <li><strong>Hygiene sweep</strong> for C-items and dead code in one pass: <code>chore: dead exports, pin dedup, quota key scheme</code>.</li>
+</ol>
+
+<div class="callout warn">
+  <strong>Completion note:</strong> none of the non-negotiables (D1–D12) were violated by the implementation. The findings above are correctness (B1), preference hygiene (B2), and consistency/hygiene items — all small, all sequenced, none blocking the dashboard restructure that remains the next milestone.
+</div>
+
+<footer>
+  first-check · architecture review by GLM / ZCode · 2026-09-06 · findings only, no code changes · companion to AGENTS.md, GLM-questionnaire.html, sol-thoughts.html
+</footer>
+
+</main>
+</body>
+</html>
