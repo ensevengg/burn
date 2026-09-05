@@ -6,7 +6,7 @@
 import { createBurnBackend } from "@burn/sync-api";
 import { kvGet, kvSet, resetDb, type SQLiteDatabase } from "./db";
 import { loadConnection } from "./settings";
-import { generateDemoDataset } from "../data/demo-generator";
+import { generateDemoDataset, MODELS } from "../data/demo-generator";
 
 const WATERMARK_KEY = "watermark_revision";
 const MAX_PAGES = 8;
@@ -93,6 +93,24 @@ export async function seedDemoData(db: SQLiteDatabase): Promise<void> {
           quota.error,
           new Date(dataset.now - quota.ageMinutes * 60_000).toISOString(),
         ],
+      );
+    }
+
+    // Unique-model price list (USD per million tokens) — cache savings math.
+    // Already inside the seed transaction: no nested withTransactionAsync here
+    // (expo-sqlite rejects nested transactions).
+    const prices: Record<string, { input: number; output: number; cacheRead: number }> = {};
+    for (const model of MODELS) {
+      prices[model.modelId] = {
+        input: model.input,
+        output: model.output,
+        cacheRead: model.cacheRead,
+      };
+    }
+    for (const [modelId, price] of Object.entries(prices)) {
+      await db.runAsync(
+        "insert or replace into model_prices (model_id, input_cost_per_m, cache_read_cost_per_m, output_cost_per_m) values (?, ?, ?, ?)",
+        [modelId, price.input, price.cacheRead, price.output],
       );
     }
 

@@ -82,6 +82,12 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           fetched_at text not null
         );
         create table if not exists kv (key text primary key, value text not null);
+        create table if not exists model_prices (
+          model_id text primary key,
+          input_cost_per_m real not null,
+          cache_read_cost_per_m real not null,
+          output_cost_per_m real
+        );
       `);
       // C1 parity: installs created before export_schema existed get the column
       // added here; fresh installs already have it from the create block.

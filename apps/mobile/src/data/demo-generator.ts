@@ -67,6 +67,8 @@ export interface DemoDataset {
   environments: DemoEnvironment[];
   events: DemoEvent[];
   quotas: DemoQuota[];
+  /** USD per million tokens, per unique model — powers cache savings. */
+  prices: Record<string, { input: number; output: number; cacheRead: number }>;
 }
 
 const DAY = 86_400_000;
@@ -97,7 +99,7 @@ interface ModelSpec {
   providerReportedChance: number;
 }
 
-const MODELS: ModelSpec[] = [
+export const MODELS: ModelSpec[] = [
   { client: "codex", providerId: "openai", modelId: "gpt-5.2-codex", input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0, providerReportedChance: 0.7 },
   { client: "codex", providerId: "openai", modelId: "gpt-5.2-mini", input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0, providerReportedChance: 0.4 },
   { client: "codex", providerId: "openai", modelId: "gpt-5.2", input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0, providerReportedChance: 0.5 },
@@ -241,5 +243,15 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
     { environmentSlug: "wsl", provider: "Codex", accountKey: "acct_9f2c1e", accountLabel: "Personal (Plus)", plan: "chatgpt_plus", metric: "session_5h", usedPercent: 52.8, remainingPercent: 47.2, remainingLabel: "resets in 3h 05m", resetsAt: null, status: "ok", error: null, ageMinutes: 61 },
   ];
 
-  return { now, environments: ENVIRONMENTS, events, quotas };
+  // Unique-model price list (USD per million tokens) — cache savings math.
+  const prices: Record<string, { input: number; output: number; cacheRead: number }> = {};
+  for (const model of MODELS) {
+    prices[model.modelId] = {
+      input: model.input,
+      output: model.output,
+      cacheRead: model.cacheRead,
+    };
+  }
+
+  return { now, environments: ENVIRONMENTS, events, quotas, prices };
 }
