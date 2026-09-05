@@ -1,0 +1,17 @@
+# Research clones — read-only reference material, never commit
+reference/
+
+# Node / Expo
+node_modules/
+.expo/
+dist/
+*.tsbuildinfo
+
+# Secrets — Supabase keys must never be committed
+.env
+.env.*
+*.local.json
+
+# OS / editor
+.DS_Store
+.idea/
