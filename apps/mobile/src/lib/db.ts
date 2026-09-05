@@ -100,11 +100,18 @@ export async function kvSet(db: SQLite.SQLiteDatabase, key: string, value: strin
   ]);
 }
 
+/**
+ * Wipes synced data + sync state. Preference keys (reporting_timezone,
+ * theme_mode) survive — they are user settings, not data (B2, first-check);
+ * callers set `mode` explicitly after a reset.
+ */
 export async function resetDb(db: SQLite.SQLiteDatabase): Promise<void> {
   await db.withTransactionAsync(async () => {
     await db.runAsync("delete from usage_events");
     await db.runAsync("delete from environments");
     await db.runAsync("delete from quota_snapshots");
-    await db.runAsync("delete from kv");
+    await db.runAsync(
+      "delete from kv where key not in ('reporting_timezone', 'theme_mode')",
+    );
   });
 }
