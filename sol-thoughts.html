@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>burn — Sol architecture review and reconciliation notes</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0e14;
+      --panel: #121722;
+      --panel-2: #171e2b;
+      --border: #2a3445;
+      --text: #e8edf5;
+      --muted: #9aa7ba;
+      --blue: #72a7ff;
+      --green: #7ee2a8;
+      --yellow: #f3c969;
+      --red: #ff8d8d;
+      --purple: #c6a0ff;
+      --code: #202838;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.65 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1040px; margin: 0 auto; padding: 42px 24px 84px; }
+    h1, h2, h3 { line-height: 1.25; letter-spacing: -0.02em; }
+    h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 2.55rem); }
+    h1 code { color: var(--yellow); }
+    h2 { margin: 50px 0 16px; padding-bottom: 9px; border-bottom: 1px solid var(--border); font-size: 1.35rem; }
+    h3 { margin: 26px 0 8px; font-size: 1.05rem; color: var(--green); }
+    p { margin: 8px 0 12px; }
+    a { color: var(--blue); }
+    code {
+      padding: 1px 6px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--code);
+      color: #d9e7ff;
+      font-size: 0.9em;
+    }
+    pre {
+      overflow-x: auto;
+      margin: 14px 0;
+      padding: 15px 18px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #0d121b;
+      color: #d7e2f3;
+      line-height: 1.5;
+    }
+    pre code { padding: 0; border: 0; background: transparent; }
+    ul, ol { padding-left: 24px; }
+    li { margin: 5px 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { padding: 9px 11px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { background: var(--panel-2); }
+    tr:nth-child(even) td { background: #0f141e; }
+    .subtitle { max-width: 820px; margin-top: 8px; color: var(--muted); }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0 30px; }
+    .chip {
+      padding: 3px 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+    .chip.green { color: var(--green); border-color: #2e6846; }
+    .chip.yellow { color: var(--yellow); border-color: #705f33; }
+    .card {
+      margin: 14px 0;
+      padding: 17px 20px;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: var(--panel);
+    }
+    .card h3 { margin-top: 0; }
+    .callout {
+      margin: 16px 0;
+      padding: 14px 17px;
+      border-left: 4px solid var(--blue);
+      border-radius: 0 9px 9px 0;
+      background: var(--panel-2);
+    }
+    .callout.warn { border-left-color: var(--yellow); }
+    .callout.danger { border-left-color: var(--red); }
+    .label {
+      display: inline-block;
+      margin-right: 7px;
+      padding: 1px 7px;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: 750;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      vertical-align: 1px;
+    }
+    .label.accept { background: #173524; color: var(--green); }
+    .label.correct { background: #41371d; color: var(--yellow); }
+    .label.block { background: #412323; color: var(--red); }
+    .label.recommend { background: #262344; color: var(--purple); }
+    .muted { color: var(--muted); }
+    .question { border-color: #695d32; }
+    .question strong:first-child { color: var(--yellow); }
+    footer { margin-top: 54px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.84rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1><code>burn</code> — Sol’s architecture review</h1>
+  <p class="subtitle">A reconciliation handoff for GLM after reading <code>GLM-questionnaire.html</code>, inspecting the local T3Code and Tokscale repositories, and running the real Tokscale CLI/TUI against the current CachyOS environment.</p>
+
+  <div class="meta">
+    <span class="chip green">Most GLM decisions accepted</span>
+    <span class="chip yellow">Three user decisions still need reconciliation</span>
+    <span class="chip">Written 2026-09-05</span>
+    <span class="chip">Reader: GLM / ZCode</span>
+  </div>
+
+  <div class="callout">
+    <strong>Instruction to GLM:</strong> treat this as a correction layer over your questionnaire, not a competing questionnaire. Preserve the settled choices below. Reopen only the items explicitly marked <em>User decision</em>. Fold confirmed corrections into the next specification before declaring the architecture complete.
+  </div>
+
+  <h2>Executive conclusion</h2>
+
+  <p>Your report establishes a coherent product direction: a BYO Supabase deployment receives incremental usage from an npm-installed reporter on each environment; an Expo Android app reads and caches that data; the app ships by GitHub Release rather than Play Store. I accept this direction and withdraw my earlier preference for direct phone-to-machine pulls and native Kotlin.</p>
+
+  <p>The remaining issues are implementation contradictions rather than a different product vision:</p>
+
+  <ol>
+    <li>A ten-minute scheduled process cannot react eagerly to a phone-written <code>sync_requested</code> flag. Near-immediate refresh needs a resident listener or a clearly bounded delay.</li>
+    <li>Tokscale’s public CLI does not currently export raw per-message usage rows. “Wrap the existing CLI only” and “store raw per-message rows” cannot both be true without a small Tokscale export addition.</li>
+    <li>Bucketing all history in the phone’s current timezone will reshape historical calendar days when the phone changes timezone. The report’s claim that travel will not reshape charts is incorrect.</li>
+  </ol>
+
+  <p>There are also two design corrections that do not require the user to choose a product direction: Supabase access needs real read/write scoping rather than anonymous table reads, and privacy-preserving pseudonyms need a plan for readable workspace/session drill-downs.</p>
+
+  <h2>Settled decisions I accept</h2>
+
+  <table>
+    <thead>
+      <tr><th>Area</th><th>Accepted direction</th><th>Implementation interpretation</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Product boundary</td><td>Independent open-source product</td><td>Reuse Tokscale’s parsing logic; own Burn’s schema, synchronization contract, Android UX, and releases.</td></tr>
+      <tr><td>Primary data flow</td><td>Machines push to a cloud store</td><td>Supabase is authoritative for synchronized usage. The phone reads locally cached data first, then pulls backend deltas.</td></tr>
+      <tr><td>Backend</td><td>BYO Supabase first</td><td>Every user supplies their own project. Burn operates no central account system or hosted database in v1.</td></tr>
+      <tr><td>Backend portability</td><td><code>SyncApi</code> boundary from day one</td><td>UI and reporter depend on Burn domain operations, not Supabase calls scattered throughout features.</td></tr>
+      <tr><td>Reporter</td><td>TypeScript CLI distributed through npm</td><td><code>npx burn-report</code> orchestrates Tokscale, local cursor state, validation, upload, diagnostics, and service installation.</td></tr>
+      <tr><td>Tokscale updates</td><td>Known-good version pin</td><td>Renovate proposes bumps; contract fixtures and integration tests gate them. Runtime <code>@latest</code> is diagnostic/manual, not production default.</td></tr>
+      <tr><td>Environments</td><td>Windows, Ubuntu-on-WSL, and CachyOS are separate reporters</td><td>Windows and WSL may share a physical-host group, but their data and health remain independently addressable.</td></tr>
+      <tr><td>Quota deduplication</td><td>Freshest provider-account snapshot wins</td><td>Codex’s quota is account-level; preserve source environment and staleness. Ambiguous identities stay separate.</td></tr>
+      <tr><td>Privacy</td><td>Usage metadata only</td><td>Prompts, responses, file contents, provider secrets, and OAuth/API credentials remain on the originating machine.</td></tr>
+      <tr><td>Mobile stack</td><td>Expo SDK 57 / React Native 0.86 / React 19</td><td>Borrow T3Code’s platform patterns selectively; omit its terminal, markdown, widgets, relay, Clerk, Effect orchestration, and other unrelated weight.</td></tr>
+      <tr><td>v1 UX scope</td><td>Full analytics surface</td><td>Dashboard/limits, histories, models, clients, providers, agents, workspaces, sessions, machine comparison, cost, cache, and settings all belong to v1. Build order can still be incremental.</td></tr>
+      <tr><td>Distribution</td><td>GitHub Release APKs</td><td>No Play Store. Keep local/reproducible Android build instructions even if EAS produces official artifacts.</td></tr>
+      <tr><td>Future connectivity</td><td>Tailscale direct pull deferred</td><td>Keep transport/domain boundaries compatible with a later direct-source adapter; avoid making it part of v1.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Facts verified against the environment</h2>
+
+  <div class="card">
+    <h3>Real Tokscale surface</h3>
+    <p>I ran <code>npx tokscale@latest</code> through its non-interactive JSON commands and opened its TUI. On the current CachyOS environment it discovered active Codex, OpenCode, Pi, and ZCode histories. It did not discover a subscription-quota provider in <code>usage --json</code> on that environment.</p>
+    <p>The current TUI declares these views: Overview, Usage, Models, Daily, Hourly, optional Minutely, Monthly, Sessions, Stats, and Agents. See <code>reference/tokscale/crates/tokscale-cli/src/tui/app.rs:60</code>.</p>
+    <p>The reusable normalized record is <code>UnifiedMessage</code>: client, model, provider, session, workspace identity/label, UTC timestamp and derived date, input/output/cache-read/cache-write/reasoning tokens, cost and cost provenance, duration, message count, agent, deduplication key, title, turn marker, and attribution-conflict marker. See <code>reference/tokscale/crates/tokscale-core/src/sessions/mod.rs:69</code>.</p>
+  </div>
+
+  <div class="card">
+    <h3>Current public export shapes</h3>
+    <ul>
+      <li>Default <code>--json</code>: aggregate rows grouped by client/model (or another requested grouping), including performance and token buckets.</li>
+      <li><code>graph</code>: summary, years, daily contributions, per-day client/model breakdown, token buckets, and time metrics.</li>
+      <li><code>monthly --json</code>: monthly aggregate rows.</li>
+      <li><code>hourly --json</code>: hourly aggregate rows; the current public shape does not include every internal field.</li>
+      <li><code>time-metrics --json</code>: total active/wall time, longest continuous activity, maximum concurrency, and session count.</li>
+      <li><code>usage --json</code>: successful live quota snapshots; failures/absence require separate diagnostics if the app must explain them.</li>
+      <li><code>report --json</code>: task-attributed report output, not a general raw-message event feed.</li>
+    </ul>
+  </div>
+
+  <div class="callout warn">
+    <strong>Consequence:</strong> Burn can achieve aggregate parity by invoking several existing commands, but it cannot achieve raw per-message storage, one-pass collection, complete diagnostics, and full Tokscale-field parity through <code>tokscale report --json</code> alone.
+  </div>
+
+  <h2>Correction 1 — sync rendezvous needs a listener</h2>
+
+  <p><span class="label correct">Correction</span>The questionnaire combines these behaviours:</p>
+
+  <ol>
+    <li>Each reporter runs every ten minutes through cron or Task Scheduler.</li>
+    <li>The phone writes <code>sync_requested</code>.</li>
+    <li>An online reporter responds eagerly.</li>
+  </ol>
+
+  <p>The first two do not produce the third. A scheduled reporter cannot see a new flag until its next scheduled run. Writing a flag adds no immediacy when the same job was already going to push on that schedule.</p>
+
+  <h3>Recommended resolution</h3>
+
+  <p>Keep scheduled push as the reliable baseline and add an optional resident mode:</p>
+
+  <pre><code>burn-report daemon
+  ├─ maintains a lightweight control subscription/poll
+  ├─ observes a newer sync-request generation
+  ├─ runs one coalesced collection/upload job
+  ├─ publishes heartbeat + completion/error state
+  └─ performs a scheduled fallback push every 10 minutes
+</code></pre>
+
+  <p>The app should never present one global blocking refresh. It renders SQLite immediately, creates one sync request, and updates machine cards independently as new backend revisions arrive. Offline reporters remain stale. Multiple taps coalesce through a monotonically increasing request generation rather than queueing duplicate scans.</p>
+
+  <div class="card question">
+    <strong>User decision 1:</strong> choose between near-immediate online-machine refresh through a resident daemon, or schedule-only synchronization with up to ten minutes of expected staleness.
+    <p><span class="label recommend">Sol recommendation</span>Resident daemon plus scheduled fallback. It matches the already-locked rendezvous UX. If maintenance simplicity wins instead, remove the promise of eager refresh and label the button “Check for updates.”</p>
+  </div>
+
+  <h2>Correction 2 — raw message rows require a Tokscale export seam</h2>
+
+  <p><span class="label block">Contradiction</span>D2 selects “wrap existing Tokscale CLI; reimplement nothing.” D5 selects “raw per-message usage rows.” The internal Rust library has the records, but the current stable CLI exports aggregates rather than a complete stream of those records.</p>
+
+  <h3>Recommended resolution</h3>
+
+  <p>Preserve the TypeScript reporter and every Tokscale parser, but create a narrow native export seam. Preferred order:</p>
+
+  <ol>
+    <li>Contribute an upstream Tokscale command such as <code>tokscale events --jsonl</code> with a versioned schema and incremental/cache support.</li>
+    <li>Until accepted upstream, maintain the smallest possible pinned patch or companion Rust binary that calls <code>tokscale-core</code> and emits the same contract.</li>
+    <li>Have <code>burn-report</code> invoke that native exporter, validate every row, manage the local cursor, and upload batches.</li>
+  </ol>
+
+  <p>This is not parser reimplementation. It exposes data Tokscale already normalizes. The patch should remain deliberately boring: no Burn backend code in Tokscale, no Supabase dependency, and no mobile assumptions—only a stable local data export.</p>
+
+  <p>A first prototype may invoke <code>graph</code>, <code>models</code>, <code>hourly</code>, <code>time-metrics</code>, and <code>usage</code>, but that is a tracer implementation rather than the final ingestion architecture. It will rescan repeatedly, duplicate concepts across payloads, and still omit some internal fields.</p>
+
+  <div class="card question">
+    <strong>User decision 2:</strong> choose aggregate-only ingestion through today’s public CLI, or raw normalized event ingestion through a small pinned/upstream Tokscale export addition.
+    <p><span class="label recommend">Sol recommendation</span>Choose the export addition. Full v1 analytics, durable incremental synchronization, future rollups, and honest “whatever Tokscale sees” parity justify this small seam.</p>
+  </div>
+
+  <h2>Correction 3 — timezone semantics</h2>
+
+  <p><span class="label correct">Correction</span>Storing UTC plus the source offset is correct. Re-bucketing in the phone’s <em>current</em> timezone is also technically possible. However, the latter necessarily changes historical day boundaries when the phone’s timezone changes. An event near midnight can move to a different calendar day after travel.</p>
+
+  <h3>Recommended row fields</h3>
+
+  <ul>
+    <li><code>occurred_at_utc</code>: authoritative instant.</li>
+    <li><code>source_offset_minutes</code>: offset observed when the event was recorded.</li>
+    <li><code>source_timezone</code>: IANA zone when discoverable.</li>
+    <li><code>source_local_date</code>: optional audit value matching the source/Tokscale view.</li>
+  </ul>
+
+  <p>The app should own a persisted <code>reporting_timezone</code>. Initialize it from the phone during setup, then keep it stable until the user changes it. A later “Use device timezone” mode can explicitly advertise that it re-buckets history.</p>
+
+  <div class="card question">
+    <strong>User decision 3:</strong> decide whether travel should reshape all historical calendar buckets.
+    <p><span class="label recommend">Sol recommendation</span>Fixed, configurable reporting timezone; default <code>Asia/Kolkata</code> for this deployment. Preserve UTC and source offset so alternate views remain possible.</p>
+  </div>
+
+  <h2>Security correction — scope access instead of opening tables</h2>
+
+  <p><span class="label correct">Correction</span>A Supabase publishable key is intended to be present in clients; it is not an access secret. RLS can provide read-only anonymous access, but without an authenticated/scoped identity it cannot distinguish the owner from any other caller who has the project URL and publishable key. That is weak even for a BYO single-user deployment.</p>
+
+  <h3>Required security properties</h3>
+
+  <ul>
+    <li>The Android app receives a read-scoped deployment credential and stores it in Expo SecureStore.</li>
+    <li>Each reporter receives a write-scoped credential; compromise of one reporter does not grant arbitrary database administration.</li>
+    <li>Base tables reject direct anonymous reads and writes.</li>
+    <li>Provider OAuth tokens, API keys, Tokscale auth files, and the Supabase administrative/service credential never enter the APK.</li>
+    <li>Credential rotation can revoke one phone or reporter without deleting usage data.</li>
+  </ul>
+
+  <p>The exact Supabase implementation can be selected during the spec: authenticated RLS, narrowly scoped RPC/Edge Functions with separate read/write tokens, or an equivalent pattern. “No central Burn account” remains intact; any identity belongs to the user’s own backend.</p>
+
+  <div class="callout">
+    <strong>Suggested v1 bias:</strong> optimize onboarding only after the secure permission boundary works. A BYO setup wizard can generate and transfer scoped credentials by QR; this is preferable to treating a service-role key as a general reporter API key or allowing anonymous table reads.
+  </div>
+
+  <h2>Privacy correction — pseudonyms versus useful drill-downs</h2>
+
+  <p>The questionnaire accepts both of these:</p>
+
+  <ul>
+    <li>Only numeric metadata and pseudonymous workspace/session identifiers leave machines.</li>
+    <li>v1 includes workspace drill-down and a sessions list.</li>
+  </ul>
+
+  <p>Those screens will be technically functional but unpleasant if every row is an opaque hash. Resolve this explicitly in the spec:</p>
+
+  <table>
+    <thead><tr><th>Mode</th><th>Cloud content</th><th>Mobile UX</th></tr></thead>
+    <tbody>
+      <tr><td>Strict pseudonymous</td><td>Hashes only</td><td>User-created local aliases; new phone must recreate them.</td></tr>
+      <tr><td>Readable metadata</td><td>Workspace/session labels in plaintext</td><td>Best UX; BYO owner’s server can read labels.</td></tr>
+      <tr><td>Encrypted labels</td><td>Hashes plus ciphertext</td><td>Best privacy/UX balance; reporters and phone share an encryption key.</td></tr>
+    </tbody>
+  </table>
+
+  <p><span class="label recommend">Sol recommendation</span>Numeric rows and identifiers remain plaintext for SQL aggregation; optional human labels are end-to-end encrypted with a deployment key shared during setup. Prompts, responses, file contents, and full paths remain excluded.</p>
+
+  <p>This can be treated as a fourth user decision if GLM’s original “A” answer explicitly meant that no readable labels may ever leave a machine. If “A” meant “usage metadata but no conversation content,” encrypted labels satisfy the intent without reopening the question.</p>
+
+  <h2>Recommended merged architecture</h2>
+
+  <pre><code>┌──────────────────────────────────────────────────────────────────────┐
+│ Windows / Ubuntu WSL / CachyOS — one reporter identity each        │
+│                                                                      │
+│ scheduled task + optional resident control listener                 │
+│      ↓                                                               │
+│ burn-report (TypeScript)                                             │
+│      ├─ invokes pinned Tokscale event exporter                       │
+│      ├─ invokes live quota collectors                                │
+│      ├─ validates versioned schemas                                  │
+│      ├─ persists source cursors/revisions locally                    │
+│      └─ uploads idempotent batches through ReporterSyncApi           │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │ HTTPS
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ User-owned Supabase                                                  │
+│                                                                      │
+│ scoped ingestion/read boundary                                       │
+│      ├─ environments + heartbeats                                    │
+│      ├─ normalized usage events                                      │
+│      ├─ quota snapshots                                              │
+│      ├─ sync request generations                                     │
+│      └─ monotonic change revisions / explicit rebuild tombstones     │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │ incremental pull
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ Android — Expo / React Native                                        │
+│                                                                      │
+│ MobileSyncApi → transactional expo-sqlite mirror → UI projections    │
+│ SecureStore holds scoped credential + optional label encryption key  │
+│ UI always renders SQLite first; synchronization never blocks browse  │
+└──────────────────────────────────────────────────────────────────────┘
+</code></pre>
+
+  <h2>Sync contract recommendations</h2>
+
+  <h3>Identity and deduplication</h3>
+
+  <p>Every normalized usage event needs a stable <code>event_id</code> derived from the environment ID, client, and Tokscale/upstream deduplication identity. Avoid including mutable calculated fields such as cost or model attribution in the primary identity; parser/pricing corrections must update the same event rather than create a duplicate.</p>
+
+  <p>Where a provider lacks a stable upstream key, the exporter should define and version a deterministic fallback from session identity, event timestamp, and source-local ordinal. Collision handling belongs at the Tokscale adapter boundary.</p>
+
+  <h3>Incremental changes</h3>
+
+  <p>Use synchronization revision rather than event time as the mobile watermark. Old events may be corrected after a parser or pricing upgrade. One successful reporter batch creates a monotonically increasing environment revision; every inserted or updated row carries it. The phone asks for <code>revision &gt; last_revision</code> and advances its cursor only after one SQLite transaction commits.</p>
+
+  <p>Missing source files should not silently delete historical usage. Preserve ingested history by default. Explicit rebuild/purge operations may emit deletion tombstones so every cache converges intentionally.</p>
+
+  <h3>Money</h3>
+
+  <p>Avoid floating-point money in the synchronization schema. Tokscale calculates with <code>f64</code>, but Burn should serialize a decimal string or fixed integer unit and store Postgres <code>numeric</code>. Preserve <code>cost_source</code> and completeness so the UI can distinguish provider-reported spend, estimated API-equivalent cost, zero-priced/free models, and incomplete pricing.</p>
+
+  <h3>Quota</h3>
+
+  <p>Quota snapshots are not historical token events. Store them separately with provider, stable account key when available, plan metadata, metric/window label, used/remaining percent, reset time, credit/spend controls, fetched time, source environment, success/error state, and schema version. The app selects the freshest successful snapshot per reliable provider-account identity while retaining diagnostics from failed environments.</p>
+
+  <h2>Proposed core tables</h2>
+
+  <table>
+    <thead><tr><th>Table</th><th>Purpose</th><th>Critical fields</th></tr></thead>
+    <tbody>
+      <tr><td><code>environments</code></td><td>Reporter identity and health</td><td>ID, physical-host group, OS kind, display name, reporter/Tokscale versions, last heartbeat, last success/error, latest revision.</td></tr>
+      <tr><td><code>usage_events</code></td><td>Normalized numerical event ledger</td><td>Stable ID, environment, client/provider/model, session/workspace hashes, agent, UTC/offset/zone, five token buckets, turns/messages, duration, cost value/source/completeness, parser version, revision.</td></tr>
+      <tr><td><code>quota_snapshots</code></td><td>Vendor-reported limit state</td><td>Provider/account identity, metric, remaining/used, reset, plan/credits, fetched time, status/error, source environment, revision.</td></tr>
+      <tr><td><code>sync_requests</code></td><td>Phone-to-reporter rendezvous</td><td>Generation, requested time, target environment/all, acknowledged time, completed revision/status.</td></tr>
+      <tr><td><code>environment_cursors</code></td><td>Server-side ingestion continuity</td><td>Environment, source/client, cursor/schema generation, last batch, update time.</td></tr>
+      <tr><td><code>encrypted_labels</code></td><td>Optional readable workspace/session metadata</td><td>Entity hash, ciphertext, algorithm/key version, revision.</td></tr>
+    </tbody>
+  </table>
+
+  <p>Monthly/yearly totals do not need separate source-of-truth rows initially. Postgres can aggregate events and the phone can maintain derived SQLite rollups. Add materialized rollups only after profiling proves event-range queries are expensive.</p>
+
+  <h2>Mobile implementation thoughts</h2>
+
+  <p>Expo is a sound choice because the app is mostly networking, SQLite, filters, and charts. T3Code is useful as a pattern source, not a dependency template.</p>
+
+  <ul>
+    <li>Use React Navigation native-stack and adaptive layouts.</li>
+    <li>Use Expo SQLite in WAL mode; all screens query local data rather than waiting on Supabase.</li>
+    <li>Use Expo SecureStore for scoped backend credentials and encryption keys.</li>
+    <li>Keep synchronization and chart shaping as pure, separately tested modules.</li>
+    <li>Represent partial sync honestly per environment. One failed reporter cannot mark the combined dashboard fully fresh.</li>
+    <li>Virtualize sessions and workspace lists; query by page rather than loading the event corpus into JavaScript memory.</li>
+    <li>Compute chart rollups in SQL or worker/native-friendly paths, not repeated React renders.</li>
+    <li>Use semantic color tokens and dark/light themes. Avoid continuously repainting animations.</li>
+    <li>Benchmark chart-library APK and frame-time cost before committing. Burn does not need T3Code’s heavy native modules.</li>
+  </ul>
+
+  <h3>Suggested information architecture</h3>
+
+  <table>
+    <thead><tr><th>Surface</th><th>Contents</th></tr></thead>
+    <tbody>
+      <tr><td>Dashboard</td><td>Cost/token headline toggle, limit cards, current period chart, cache efficiency, freshness summary.</td></tr>
+      <tr><td>Explore</td><td>Clients, providers, models, agents, workspaces, sessions; every row supports machine and period filters.</td></tr>
+      <tr><td>History</td><td>Hourly/daily/monthly/yearly views, contribution heatmap, active-time and concurrency statistics.</td></tr>
+      <tr><td>Machines</td><td>Windows/WSL/CachyOS cards, physical-host grouping, versions, latest revision, last sync/error, manual request.</td></tr>
+      <tr><td>Settings</td><td>BYO backend setup, reporting timezone, retention, privacy/label mode, theme, export/purge, diagnostics.</td></tr>
+    </tbody>
+  </table>
+
+  <p>“Everything on day one” should mean v1 acceptance criteria, not a big-bang implementation. Build vertical slices in this order: setup and one machine; event ingestion and offline cache; dashboard; filters/drill-down; quotas; remaining analytics surfaces; multi-machine failure states; release packaging.</p>
+
+  <h2>Reporter implementation thoughts</h2>
+
+  <ul>
+    <li><code>burn-report doctor</code> verifies Node/runtime compatibility, pinned Tokscale availability, exporter schema, config permissions, backend connectivity, write scope, clock/timezone, and scheduler/daemon health.</li>
+    <li><code>burn-report push</code> performs one idempotent incremental batch and exits with machine-readable diagnostics.</li>
+    <li><code>burn-report usage</code> refreshes quota snapshots separately from historical ingestion.</li>
+    <li><code>burn-report daemon</code> is required only if user decision 1 chooses eager rendezvous.</li>
+    <li><code>burn-report install-service</code> may later generate systemd-user and Windows Task Scheduler/service configuration; manual commands remain documented.</li>
+    <li>Config follows XDG on Linux/WSL and the proper application-data directory on Windows rather than hardcoding <code>~/.config</code> everywhere.</li>
+    <li>The reporter stores no provider credentials. It lets Tokscale discover existing local credentials and sends only normalized usage/quota output.</li>
+    <li>Every upload reports reporter version, Tokscale version, export schema, parser generation, timezone evidence, scan scope, and completion status.</li>
+  </ul>
+
+  <h2>Risks worth preserving in the specification</h2>
+
+  <table>
+    <thead><tr><th>Risk</th><th>Failure mode</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr><td>Upstream Tokscale change</td><td>Silent schema drift or altered attribution</td><td>Pin version; fixture-test exporter contract; reject unknown schema; surface upgrade status.</td></tr>
+      <tr><td>Clock misconfiguration</td><td>Events appear in the wrong period</td><td>Store UTC, source offset/zone, observed clock diagnostics; never mutate timestamps silently.</td></tr>
+      <tr><td>Reporter duplication</td><td>Same environment installed twice and double-counted</td><td>Stable environment identity, explicit replacement flow, event-level idempotency.</td></tr>
+      <tr><td>Windows/WSL overlap</td><td>Both scan the same mounted history</td><td>Separate default roots; provenance; duplicate fingerprints; warn through <code>doctor</code>.</td></tr>
+      <tr><td>Partial backend sync</td><td>Phone advances cursor before all rows commit</td><td>Atomic batch/revision; advance mobile cursor only after SQLite transaction success.</td></tr>
+      <tr><td>Provider quota failure</td><td>Missing entry is mistaken for unlimited/no subscription</td><td>Persist success/error diagnostics and last known good snapshot independently.</td></tr>
+      <tr><td>Source log deletion</td><td>Yearly history unexpectedly shrinks</td><td>Append-preserving ledger; explicit rebuild/purge semantics.</td></tr>
+      <tr><td>Unpriced/free models</td><td><code>$0</code> conflates free with unknown</td><td>Cost provenance and completeness fields; distinct UI states.</td></tr>
+      <tr><td>Raw-event growth</td><td>Slow range scans and oversized phone cache</td><td>Indexes, paged sync, local rollups, retention for minute-level caches, profile before materializing server rollups.</td></tr>
+      <tr><td>BYO setup complexity</td><td>Users paste administrative secrets into the phone</td><td>Bootstrap/setup wizard creates scoped credentials; administrative key stays outside mobile storage.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>What GLM should do next</h2>
+
+  <ol>
+    <li>Ask the user only the three numbered decisions above, plus the label-privacy decision only if their previous answer truly excludes encrypted readable labels.</li>
+    <li>Update the decision record so the synchronization trigger, Tokscale export boundary, timezone semantics, and permission model are internally consistent.</li>
+    <li>Produce one implementation specification containing the domain model, versioned wire contracts, Supabase schema/policies or scoped API, reporter commands/lifecycle, mobile screens/states, phased build order, and acceptance tests.</li>
+    <li>Mark the planning phase complete only when every v1 screen can be traced to stored fields, every stored field has an authoritative producer, every sync transition has an offline/failure outcome, and every credential has an explicit scope and storage location.</li>
+  </ol>
+
+  <div class="callout warn">
+    <strong>Completion test:</strong> the final spec must explain—without hand-waving—how a phone refresh reaches an online reporter, how a raw event leaves Tokscale, how an old corrected event reaches a phone whose watermark is newer than the event timestamp, how travel affects day buckets, and who can read/write each backend resource. If any answer is missing, shared understanding has not yet been reached.
+  </div>
+
+  <footer>
+    Sol / Codex handoff for GLM · Based on the local repositories at <code>reference/tokscale</code> and <code>reference/t3code</code>, the real Tokscale CLI/TUI output, and <code>GLM-questionnaire.html</code>. No reference repository files were modified.
+  </footer>
+</main>
+</body>
+</html>

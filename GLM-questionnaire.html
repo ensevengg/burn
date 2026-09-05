@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>burn — Planning Questionnaire (GLM)</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2128; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #f78166; --accent2: #7ee787;
+    --link: #58a6ff; --warn: #d29922; --chip: #21262d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.65 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 1.9rem; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h1 code { color: var(--accent); }
+  h2 { font-size: 1.25rem; margin: 48px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.02rem; margin: 28px 0 8px; color: var(--accent2); }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 28px; }
+  .chip { background: var(--chip); border: 1px solid var(--border); border-radius: 999px;
+    padding: 3px 12px; font-size: 0.8rem; color: var(--muted); }
+  .chip.ok { color: var(--accent2); border-color: #2ea04340; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); font-weight: 600; }
+  tr:nth-child(even) td { background: var(--panel); }
+  td code, p code, li code { background: var(--chip); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 6px; font-size: 0.85em; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; margin: 14px 0; }
+  .card .q { font-weight: 600; margin: 0 0 8px; }
+  .label { display: inline-block; font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.06em; border-radius: 4px; padding: 1px 8px; margin-right: 6px; vertical-align: 1px; }
+  .label.user { background: #1f3a2b; color: var(--accent2); }
+  .label.agent { background: #25314a; color: var(--link); }
+  .label.fact { background: #3a2f1f; color: var(--warn); }
+  blockquote { margin: 8px 0; padding: 8px 14px; border-left: 3px solid var(--accent);
+    background: var(--panel2); border-radius: 0 8px 8px 0; color: var(--text); }
+  ul { padding-left: 22px; }
+  li { margin: 4px 0; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .muted { color: var(--muted); }
+  footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 0.82rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1><code>burn</code> — Planning Questionnaire</h1>
+<p class="sub">Grill-me interview record: an Android app that tracks AI token usage across Windows, WSL, and CachyOS, built on tokscale's data-fetching logic.</p>
+<div class="meta">
+  <span class="chip ok">Status: shared understanding reached — awaiting go for full spec</span>
+  <span class="chip">Interviewed: 2026-09-05</span>
+  <span class="chip">Interviewer: ZCode / GLM</span>
+  <span class="chip">Rounds: 3 · Questions: 15</span>
+</div>
+
+<h2>Decision record (TL;DR)</h2>
+<table>
+  <tr><th>#</th><th>Decision</th><th>Choice</th></tr>
+  <tr><td>D1</td><td>Data flow</td><td><strong>Machines push</strong> on schedule (cron / Task Scheduler, 10 min + run-on-wake catch-up) to a cloud store; phone reads the store. Phone flipping a <code>sync_requested</code> flag triggers eager pushes (rendezvous pattern). Tailscale direct-pull deferred to v2.</td></tr>
+  <tr><td>D2</td><td>Parser source</td><td><strong>Wrap tokscale CLI</strong> (<code>tokscale report --json</code>, <code>tokscale usage --json</code>); reimplement nothing. Version pinned, Renovate bumps, JSON schema validated before push.</td></tr>
+  <tr><td>D3</td><td>Backend</td><td><strong>Supabase</strong> (Postgres + RLS) as implementation #1, behind a thin <code>SyncApi</code> module so PocketBase / self-hosted VPS can be swapped in later.</td></tr>
+  <tr><td>D4</td><td>Hosting model</td><td><strong>BYO backend</strong> — each open-source user pastes their own Supabase URL + keys in a first-run setup screen. No hosted instance, no accounts in v1.</td></tr>
+  <tr><td>D5</td><td>Uploaded granularity</td><td><strong>Raw per-message usage rows</strong>, idempotent upserts keyed for dedup. Phone fetches incrementally from its last watermark; machines push only new rows since their cursor.</td></tr>
+  <tr><td>D6</td><td>Quota dedup</td><td>Quota is account-level; every machine may report it, app shows the <strong>freshest report per provider-account</strong> with a staleness indicator.</td></tr>
+  <tr><td>D7</td><td>Reporter packaging</td><td><strong>TypeScript CLI on npm</strong>, run via <code>npx burn-report push</code>; config at <code>~/.config/burn/reporter.json</code>; <code>burn-report doctor</code> self-check.</td></tr>
+  <tr><td>D8</td><td>Keys &amp; security</td><td>Machines hold the Supabase <strong>secret key</strong> (write); phone uses the <strong>publishable key</strong> with read-only RLS. Full auth only if ever multi-tenant.</td></tr>
+  <tr><td>D9</td><td>Android stack</td><td><strong>Expo SDK 57 / React Native 0.86 / React 19</strong> (New Architecture), following t3code's mobile stack patterns.</td></tr>
+  <tr><td>D10</td><td>Timezone</td><td>Store <strong>UTC + machine-local offset</strong> per row; phone buckets days/months/years in <strong>its current timezone at render time</strong>.</td></tr>
+  <tr><td>D11</td><td>v1 scope</td><td><strong>All screens day one</strong>: dashboard + limits, daily/monthly/yearly charts with model/agent stacking, cost view, per-machine, per-workspace, sessions list, settings.</td></tr>
+  <tr><td>D12</td><td>Distribution</td><td>Repo <code>burn</code>, <strong>APKs via GitHub Releases</strong> (EAS build). <strong>No Play Store</strong> — decided firmly.</td></tr>
+</table>
+
+<h2>Research facts established (agent findings)</h2>
+<div class="card">
+  <p><span class="label fact">tokscale</span> Rust-core CLI (<code>crates/tokscale-core</code>) supporting ~50 AI clients by reading their local files — e.g. Claude Code <code>~/.claude/projects/*.jsonl</code>, OpenCode <code>~/.local/share/opencode/opencode.db</code>, Codex <code>~/.codex/sessions/</code>, ZCode <code>~/.zcode/cli/db/db.sqlite</code>. Pricing via LiteLLM data with tiered + cache-discount support. Day bucketing via <code>bucket_tz</code> (machine-local). Key commands: <code>report --json</code>, <code>usage --json</code>, <code>--group-by workspace,model</code>, <code>--merge-worktrees</code>. MIT-licensed; distributed via npx with per-platform binaries.</p>
+  <p><span class="label fact">codex "sync" mystery</span> Solved in source: session/token data is <em>local per machine</em> (<code>~/.codex/sessions/</code>). The cross-machine "synced" numbers the user saw are the <em>quota view</em>: tokscale reads the OAuth token from <code>~/.codex/auth.json</code> and calls OpenAI's account-level endpoint <code>https://chatgpt.com/backend-api/wham/usage</code> (see <code>crates/tokscale-cli/src/commands/usage/codex.rs:260</code>). Consequence: sessions need no cross-machine dedup; quota dedupes by freshness per account.</p>
+  <p><span class="label fact">t3code mobile stack</span> Expo SDK 57, RN 0.86, React 19, <code>@react-navigation</code> native-stack, Clerk auth, expo-sqlite + expo-secure-store, Uniwind (Tailwind for RN), Effect-based shared workspace packages, EAS builds with CNG prebuild, Nitro native modules. Borrowed for stack patterns; the app itself is unrelated.</p>
+  <p><span class="label fact">tailscale free tier</span> Personal plan: free at 6 users, unlimited user-owned devices (old 3-user/100-device caps removed, 2026 pricing update). MagicDNS, ACLs, subnet routing included; 180-day device key expiry is the main annoyance. Sources: <a href="https://tailscale.com/pricing">tailscale.com/pricing</a>, <a href="https://tailscale.com/docs/account/manage-plans/free-plans-discounts">free plans doc</a>, <a href="https://tailscale.com/blog/pricing-v4">pricing-v4 blog</a>. Verdict: fine for 1 user / ~4 devices; also already planned for T3code remote access. <a href="https://github.com/juanfont/headscale">Headscale</a> exists as the self-hosted escape hatch.</p>
+  <p><span class="label fact">self-host cloud options</span> Ranked for the "own server someday" goal: (1) self-hosted Supabase via Docker on a VPS (Hetzner ~€4/mo) — zero app changes; (2) PocketBase — single ~15MB Go binary, SQLite, REST + auth + realtime, Raspberry-Pi-capable; (3) raw VPS + Postgres + thin API; (4) Fly.io/Railway. The <code>SyncApi</code> abstraction (D3) is what keeps all four reachable.</p>
+</div>
+
+<h2>Round 1 — data flow, parser, backend, granularity, quotas</h2>
+
+<div class="card">
+  <p class="q">❓ Q1 — Data flow: push or pull?</p>
+  <blockquote><span class="label user">User</span> Machines pushing is better, I think. What do you say? Or we do a refresh on mobile, it sends a signal to every available machine, and they send the data over. This also seems nice. If a machine is not active, we show that and of course we store and keep piling onto the data we have loaded since previous runs. Also asked: what are the cloud options for my own server? What kinds of cloud?</blockquote>
+  <p><span class="label agent">Agent notes</span> Merged the user's two instincts: <strong>scheduled push</strong> is the backbone (NAT makes phone→machine pulls impossible on cellular), and the user's "phone signals machines" idea ships as the <strong>rendezvous pattern</strong> — the phone flips a <code>sync_requested</code> flag in the central store; each machine's job (10-min cron + run-on-wake catch-up so sleep-missed runs don't vanish) pushes eagerly when it sees it. Machines that are offline show "last synced Xh ago" — exactly the staleness display requested. Data accumulates via idempotent upserts, so nothing is refetched or lost. Tailscale direct-pull accepted as v2 bolt-on (user confirmed free-tier worries resolved: 6 users / unlimited devices). Cloud options for the own-server future documented above.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q2 — Wrap tokscale or reimplement parsers?</p>
+  <blockquote><span class="label user">User</span> Do tokscale then, I guess. It does seem a lot of work to implement providers, especially if someday a new one pops up. My only question: how often do we update the tokscale implementation inside this, depending on when tokscale itself gets updated?</blockquote>
+  <p><span class="label agent">Agent notes</span> Clarified the update question: tokscale never ships inside the app — it runs on machines, so "updating" is just the reporter's version pin. Policy: pin a known-good tokscale version, Renovate bumps weekly, and the reporter validates the JSON shape before pushing so an upstream schema change fails loudly on the machine instead of silently corrupting the DB. <code>@latest</code> stays available for manual runs.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q3 — Backend: Supabase, Convex, or Firebase?</p>
+  <blockquote><span class="label user">User</span> Sure then, Supabase I guess. I recommended Convex since a lot of people I know use it and a few great YouTubers mentioned it.</blockquote>
+  <p><span class="label agent">Agent notes</span> Supabase wins on substance here: Postgres group-bys do the daily/monthly/yearly rollups, RLS secures the BYO model, free tier is ample for MB-scale data, and self-hosting keeps the open-source story clean. Convex's DX reputation is deserved but its aggregation is JS-side and the runtime is lockier. With the <code>SyncApi</code> abstraction the choice stays reversible anyway.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q4 — Open-source hosting model</p>
+  <blockquote><span class="label user">User</span> BYOK. I really do want to implement my own server someday, hence in Q1 I'm asking it.</blockquote>
+  <p><span class="label agent">Agent notes</span> BYO confirmed twice now — this is the strongest signal in the whole interview. It directly mandates the thin <code>SyncApi</code> data-layer module (see Q8) so "own server someday" is a weekend swap, not a rewrite.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q5 — Uploaded granularity</p>
+  <blockquote><span class="label user">User</span> B sure, plus we stack, so we can have it so that the already available data in the DB is not fetched again, hence saving memory too. All fetch from the last update.</blockquote>
+  <p><span class="label agent">Agent notes</span> Raw per-message usage rows confirmed, with incremental sync made explicit as a requirement in <em>both</em> directions: machines keep a cursor and push only new rows; the phone fetches from its last watermark and mirrors the schema in local expo-sqlite. Upsert keys make every push idempotent, so "fetch from the last update" can never double-count.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q6 — Quota reporting across machines</p>
+  <blockquote><span class="label user">User</span> Only my Codex is shared across Windows, WSL and CachyOS, I think. I don't use Claude, zai is different. So yeah, no issues with shared quota cuz it will be the same.</blockquote>
+  <p><span class="label agent">Agent notes</span> Confirmed by source later (see codex fact box): shared-sub quota is account-level and identical from any machine, so freshest-wins dedup per provider-account is correct and trivially safe. Session rows remain per-machine with no dedup needed. NOTE for spec: WSL and Windows are the same physical machine — worth giving each reporter a distinct <code>machine_id</code> (e.g. <code>windows</code> / <code>wsl</code>) while knowing they share hardware; also consider a machine-level "same host" grouping in the per-machine screen.</p>
+</div>
+
+<h2>Round 2 — sync trigger, abstraction, stack, timezone, scope, matrix</h2>
+
+<div class="card">
+  <p class="q">❓ Q7 — Lock the rendezvous sync design?</p>
+  <blockquote><span class="label user">User</span> Yup, lock that in. (Also asked how good Tailscale is on the free tier — mentioned plans to use it for T3code from the phone anyway.)</blockquote>
+  <p><span class="label agent">Agent notes</span> Locked. Tailscale answered with current facts (see fact box): free tier comfortably covers this use case; Headscale is the self-host fallback. v2 direct-sync add-on therefore costs the user nothing extra.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q8 — Backend abstraction now or later?</p>
+  <blockquote><span class="label user">User</span> Sure, we go for a process which takes less time for maintenance and changes later down the line.</blockquote>
+  <p><span class="label agent">Agent notes</span> Thin <code>SyncApi</code> from day one, on both sides: the phone has one module for all reads, the reporter has one for all writes. Supabase becomes implementation detail #1; PocketBase/own-server #2. Slightly more code now, drastically cheaper maintenance later — the user's stated priority.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q9 — Expo/React Native vs native Kotlin?</p>
+  <blockquote><span class="label user">User</span> Expo then, I guess.</blockquote>
+  <p><span class="label agent">Agent notes</span> Expo SDK 57 / RN 0.86 / React 19 chosen. Native Kotlin was the smaller-APK (~4–6MB vs ~20–25MB) / faster-cold-start option, but Expo wins on the user's other priorities: iOS-someday is nearly free, the TS contributor pool for an open-source project is far bigger, and t3code provides proven patterns for exactly this stack.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q10 — Timezone and day boundaries</p>
+  <blockquote><span class="label user">User</span> I think tokscale fetches data as per what the machine's time is set to. I remember misconfiguring time and seeing it reflected in tokscale, then correcting it to see normal time. So dynamic?</blockquote>
+  <p><span class="label agent">Agent notes</span> Confirmed dynamic, and made the semantics precise because of the user's clock-misconfiguration anecdote: machines record <strong>UTC + their local offset</strong> per row (auditable — a misconfigured clock is visible, not silent), and the phone buckets days/months/years in <strong>its current timezone at render time</strong>. "Today" is always the user's today; travel never scrambles charts; historical data re-buckets cleanly since everything is UTC underneath. Tokscale's <code>bucket_tz</code> behavior matches the user's observation.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q11 — v1 screen scope</p>
+  <blockquote><span class="label user">User</span> I'm down for everything from day 1.</blockquote>
+  <p><span class="label agent">Agent notes</span> Full scope accepted knowingly: dashboard + remaining limits, daily/monthly/yearly toggle charts with per-model/per-agent stacking, input/output/cache breakdown + cache hit rate, dollar cost view, per-machine comparison, per-workspace drill-down, sessions list, settings. Build order in the spec should still sequence these — "day one" refers to v1 scope, not commit #1.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q12 — Agent × machine matrix</p>
+  <blockquote><span class="label user">User</span> How does tokscale do it here? Because when I run it on different devices with the same Codex sub, it shows the synced Codex usage. It uses the subscription info, I guess? Gotta see.</blockquote>
+  <p><span class="label agent">Agent notes</span> Answered from source rather than assumed (see codex fact box): subscription info is exactly right — account-level quota endpoint, identical from every machine. The user's known matrix: <strong>Codex on all three machines (shared sub)</strong>, <strong>ZCode (z.ai) on at least one machine</strong>, <strong>no Claude</strong>. OpenCode mentioned in the original request; exact machine placement of OpenCode/ZCode still to confirm when writing the spec's test matrix, but all are tokscale-supported so reporter risk is low.</p>
+</div>
+
+<h2>Round 3 — reporter, keys, distribution</h2>
+
+<div class="card">
+  <p class="q">❓ Q13 — Reporter packaging</p>
+  <blockquote><span class="label user">User</span> A, yes.</blockquote>
+  <p><span class="label agent">Agent notes</span> TypeScript CLI on npm via <code>npx burn-report</code> locked: <code>push</code> (sync since cursor), <code>usage</code> (push quota JSON), <code>doctor</code> (verify tokscale version, config, DB connectivity), <code>daemon</code>-style cron instructions per OS in the README. Config at <code>~/.config/burn/reporter.json</code>. Default cadence 10 min + run-on-wake catch-up, both configurable.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q14 — Keys and who can write</p>
+  <blockquote><span class="label user">User</span> A, I guess.</blockquote>
+  <p><span class="label agent">Agent notes</span> Locked with the rationale recorded for contributors: secret key only ever lives on machines the user controls; RLS denies anonymous writes outright; phone reads with publishable key through read-only policies. Threat model is "mess with my own usage data in my own project" — low stakes, zero onboarding friction. Upgrade path to Supabase Auth only if the project ever becomes multi-tenant.</p>
+</div>
+
+<div class="card">
+  <p class="q">❓ Q15 — Name and distribution</p>
+  <blockquote><span class="label user">User</span> We're not going the Play Store route. No.</blockquote>
+  <p><span class="label agent">Agent notes</span> Firm no on Play Store (no fee, no review gate — right call for a self-hosted tracker). Repo name <code>burn</code> (burn rate) unobjected — treat as accepted. Distribution: GitHub Releases APKs via EAS build profiles + local <code>expo run:android</code> path for contributors.</p>
+</div>
+
+<h2>Defaults set by the agent (unobjected → accepted)</h2>
+<ul>
+  <li><strong>Phone data layer:</strong> TanStack Query; stale-while-revalidate (local SQLite renders instantly, background revalidation on open).</li>
+  <li><strong>Charts:</strong> victory-native (Skia, GPU-drawn) for daily/monthly/yearly toggle charts.</li>
+  <li><strong>Local cache:</strong> expo-sqlite mirroring the server schema; first sync does a full paginated backfill, then watermark-incremental.</li>
+  <li><strong>UI:</strong> dark-mode-first with system-follow toggle; USD only in v1; Android 8.0+ min.</li>
+  <li><strong>Reporter:</strong> cadence 10 min default; JSON-schema validation before push; per-machine <code>machine_id</code> in config.</li>
+</ul>
+
+<h2>Open items for the full spec</h2>
+<ul>
+  <li>Exact placement of ZCode / OpenCode per machine (test matrix detail; all tokscale-supported, no architectural impact).</li>
+  <li>DB schema DDL (machines, sessions/messages, quotas, sync cursors, <code>sync_requested</code> flag) — next artifact.</li>
+  <li><code>SyncApi</code> interface definition (read + write contracts) so the Supabase→own-server swap is provable.</li>
+  <li>Screen-by-screen UX plan and build order for the all-screens-day-one scope.</li>
+</ul>
+
+<h2>Reconciliation addendum — Sol review (2026-09-05)</h2>
+<div class="card">
+  <p><span class="label agent">Agent notes</span> A second agent ("Sol", GPT 5.6) reviewed this questionnaire, the reference repos, and the real tokscale CLI (<a href="./sol-thoughts.html">sol-thoughts.html</a>). Its three corrections were verified against the tokscale source and <strong>accepted</strong>, with the user delegating the final calls ("do what you think is best"):</p>
+  <ul>
+    <li><strong>Q16 → (a)</strong> Resident <code>burn-report daemon</code> (~30s poll of <code>sync_requests</code>) + scheduled fallback. Schedule-only cannot deliver eager refresh — the original rendezvous wording was contradictory and is amended.</li>
+    <li><strong>Q17 → (a)</strong> Raw per-message rows require an export seam: tokscale's CLI is aggregate-only (verified: <code>report --json</code> is task-attributed; no session-row export). A small pinned Rust exporter (<code>burn-events</code>) will call <code>tokscale-core</code> and emit versioned JSONL of <code>UnifiedMessage</code>; an upstream <code>tokscale events --jsonl</code> PR is the intended replacement. "Wrap tokscale, reimplement nothing" survives — the seam serializes tokscale's own normalized records.</li>
+    <li><strong>Q18 → (a)</strong> Fixed, persisted <code>reporting_timezone</code> (default <code>Asia/Kolkata</code>) instead of dynamic device-tz bucketing. The original claim that travel "won't scramble charts" was wrong; UTC + source offset stay stored either way.</li>
+    <li><strong>Q19 → (a)</strong> Plaintext readable metadata (workspace labels, session titles) — consistent with the user's "see quite literally everything"; encrypted-label mode remains a future option via a separate table.</li>
+    <li><strong>Security (no user call needed)</strong> The D7 "publishable key + anon-read RLS" model is replaced by scoped tokens: RLS denies all direct table access; all access flows through token-gated <code>burn_api.*</code> security-definer RPCs (read token for the phone in SecureStore, per-environment ingest tokens for reporters, SHA-256-hashed at rest, revocable). No Supabase Auth, no central accounts.</li>
+  </ul>
+  <p class="muted">Everything else in Sol's review (revision-based watermarks, numeric money, quota snapshot diagnostics, core tables, information architecture, vertical-slice build order, risk register) is adopted as spec guidance without user decisions.</p>
+</div>
+
+<footer>
+  Generated by the grill-me interview (ZCode / GLM) · 2026-09-05 · All user quotes paraphrased from chat, decisions verbatim in meaning.
+</footer>
+
+</main>
+</body>
+</html>
