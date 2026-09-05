@@ -20,6 +20,12 @@
         "backgroundColor": "#0c0d10"
       },
       "softwareKeyboardLayoutMode": "pan"
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "81ce3728-e9d0-4ad1-8d7e-bdacc817b30c"
+      }
+    },
+    "owner": "ensevengg"
   }
 }
