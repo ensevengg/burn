@@ -3,7 +3,6 @@ import type { Granularity } from "../lib/format";
 import {
   queryClients,
   queryDailyTotals,
-  queryDashboard,
   queryEnvironments,
   queryGranularityMax,
   queryHistory,
@@ -11,6 +10,7 @@ import {
   queryQuotas,
   queryRecords,
   querySessions,
+  queryWindowOverview,
   queryWorkspaces,
 } from "./repository";
 import type { SQLiteDatabase } from "expo-sqlite";
@@ -29,11 +29,6 @@ function useDbQuery<T>(key: readonly unknown[], loader: (db: SQLiteDatabase) => 
   });
 }
 
-export function useDashboardQuery() {
-  const { reportingTimezone } = useApp();
-  return useDbQuery(["dashboard", reportingTimezone], (db) => queryDashboard(db, reportingTimezone, null));
-}
-
 export function useHistoryQuery(granularity: Granularity, groupBy: "model" | "client" | "none", days: number) {
   const { reportingTimezone } = useApp();
   return useDbQuery(
@@ -43,10 +38,18 @@ export function useHistoryQuery(granularity: Granularity, groupBy: "model" | "cl
 }
 
 /** Historical peak bucket for the granularity — the fixed Y ceiling (user direction). */
-export function useGranularityMaxQuery(granularity: Granularity) {
+export function useGranularityMaxQuery(granularity: Granularity, metric: "cost" | "tokens" = "tokens") {
   const { reportingTimezone } = useApp();
-  return useDbQuery(["granularity-max", reportingTimezone, granularity], (db) =>
-    queryGranularityMax(db, reportingTimezone, granularity),
+  return useDbQuery(["granularity-max", reportingTimezone, granularity, metric], (db) =>
+    queryGranularityMax(db, reportingTimezone, granularity, metric),
+  );
+}
+
+/** The restructured dashboard's single source: totals, sessions, series, client shares, cache savings. */
+export function useWindowOverviewQuery(days: number) {
+  const { reportingTimezone } = useApp();
+  return useDbQuery(["window-overview", reportingTimezone, days], (db) =>
+    queryWindowOverview(db, reportingTimezone, days, "cost"),
   );
 }
 

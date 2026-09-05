@@ -206,12 +206,32 @@ export function computeGranularityMax(
   events: EventRow[],
   timeZone: string,
   granularity: Granularity,
+  metric: "cost" | "tokens" = "tokens",
 ): number {
   let max = 0;
   for (const agg of bucketEvents(events, timeZone, granularity).values()) {
-    if (agg.tokens > max) max = agg.tokens;
+    const value = metric === "cost" ? agg.cost : agg.tokens;
+    if (value > max) max = value;
   }
   return max;
+}
+
+/**
+ * Cache savings: what the cache-read discount saved vs paying uncached input
+ * prices. Null when no price reference is loaded (cloud pricing payload is a
+ * spec'd follow-up — AGENTS.md).
+ */
+export function computeCacheSavings(
+  events: EventRow[],
+  prices: Record<string, { input: number; cacheRead: number }>,
+): number {
+  let savings = 0;
+  for (const e of events) {
+    const price = prices[e.modelId];
+    if (price === undefined) continue;
+    savings += (e.cacheReadTokens / 1e6) * Math.max(0, price.input - price.cacheRead);
+  }
+  return savings;
 }
 
 export interface DailyTotals {
@@ -360,9 +380,10 @@ export async function queryGranularityMax(
   db: SQLiteDatabase,
   timeZone: string,
   granularity: Granularity,
+  metric: "cost" | "tokens" = "tokens",
 ): Promise<number> {
   const events = await loadEvents(db, 0, Date.now() + DAY_MS, null);
-  return computeGranularityMax(events, timeZone, granularity);
+  return computeGranularityMax(events, timeZone, granularity, metric);
 }
 
 /** Local mirror deletion for machine removal (server row is deleted separately). */
@@ -426,34 +447,6 @@ function breakdownFrom(
     rows.push({ key, title: meta.title, subtitle: meta.subtitle, ...summarizeEvents(list) });
   }
   return rows.sort((a, b) => b.cost - a.cost || b.outputTokens - a.outputTokens);
-}
-
-export async function queryDashboard(
-  db: SQLiteDatabase,
-  timeZone: string,
-  environmentId: string | null,
-): Promise<{
-  today: Totals;
-  week: Totals;
-  series: SeriesBucket[];
-  hitRateYesterday: number | null;
-}> {
-  const now = Date.now();
-  const events48h = await loadEvents(db, now - 2 * DAY_MS, now + DAY_MS, environmentId);
-  const todayKey = bucketKey(now, timeZone, "daily");
-  const todayEvents = events48h.filter((e) => bucketKey(e.occurredAtMs, timeZone, "daily") === todayKey);
-  const yesterdayEvents = events48h.filter((e) => {
-    const key = bucketKey(e.occurredAtMs, timeZone, "daily");
-    return key !== todayKey && key === bucketKey(now - DAY_MS, timeZone, "daily");
-  });
-  const events7d = await loadEvents(db, now - 7 * DAY_MS, now + DAY_MS, environmentId);
-  return {
-    today: summarizeEvents(todayEvents),
-    week: summarizeEvents(events7d),
-    series: buildSeries(events7d, timeZone, "daily", "none"),
-    hitRateYesterday:
-      yesterdayEvents.length === 0 ? null : summarizeEvents(yesterdayEvents).hitRate,
-  };
 }
 
 export async function queryHistory(
@@ -541,6 +534,66 @@ export interface QuotaCard {
   remainingLabel: string | null;
   resetsAt: string | null;
   fetchedAt: string;
+}
+
+export interface ClientShare {
+  key: string;
+  tokens: number;
+  cost: number;
+  sessions: number;
+}
+
+export interface WindowOverview {
+  totals: Totals;
+  /** Distinct sessions in the window. */
+  sessions: number;
+  series: SeriesBucket[];
+  byClient: ClientShare[];
+  /** Null when no model price reference exists (cloud pricing payload pending). */
+  cacheSavings: number | null;
+}
+
+/** Everything the restructured dashboard headline/strip/table needs, per window. */
+export async function queryWindowOverview(
+  db: SQLiteDatabase,
+  timeZone: string,
+  days: number,
+  metric: "cost" | "tokens",
+): Promise<WindowOverview> {
+  const now = Date.now();
+  const events = await loadEvents(db, now - days * DAY_MS, now + DAY_MS, null);
+  const totals = summarizeEvents(events);
+  const sessions = new Set(events.map((e) => e.sessionId)).size;
+  const series = buildSeries(events, timeZone, "daily", "none");
+
+  const byClientMap = new Map<string, { tokens: number; cost: number; sessions: Set<string> }>();
+  for (const e of events) {
+    const entry = byClientMap.get(e.client) ?? {
+      tokens: 0,
+      cost: 0,
+      sessions: new Set<string>(),
+    };
+    entry.tokens += eventTokens(e);
+    entry.cost += e.cost;
+    entry.sessions.add(e.sessionId);
+    byClientMap.set(e.client, entry);
+  }
+  const byClient: ClientShare[] = [...byClientMap.entries()]
+    .map(([key, value]) => ({ key, tokens: value.tokens, cost: value.cost, sessions: value.sessions.size }))
+    .sort((a, b) => (metric === "cost" ? b.cost - a.cost : b.tokens - a.tokens));
+
+  const priceRows = await db.getAllAsync<{
+    model_id: string;
+    input_cost_per_m: number;
+    cache_read_cost_per_m: number;
+  }>("select model_id, input_cost_per_m, cache_read_cost_per_m from model_prices");
+  const prices: Record<string, { input: number; cacheRead: number }> = {};
+  for (const row of priceRows) {
+    prices[row.model_id] = { input: row.input_cost_per_m, cacheRead: row.cache_read_cost_per_m };
+  }
+  const cacheSavings = priceRows.length === 0 ? null : computeCacheSavings(events, prices);
+
+  return { totals, sessions, series, byClient, cacheSavings };
 }
 
 export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
