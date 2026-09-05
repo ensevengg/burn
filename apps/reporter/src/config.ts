@@ -6,6 +6,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { TOKSCALE_PIN } from "@burn/sync-api";
 import { z } from "zod";
 
 export const configSchema = z.object({
@@ -22,7 +23,7 @@ export const configSchema = z.object({
   reportingTimezone: z.string().default("Asia/Kolkata"),
   /** Minutes between scheduled pushes. */
   intervalMinutes: z.number().int().min(1).max(1440).default(10),
-  tokscalePin: z.string().default("4.15.1"),
+  tokscalePin: z.string().default(TOKSCALE_PIN),
 });
 
 export type BurnConfig = z.infer<typeof configSchema>;

@@ -178,56 +178,6 @@ export function AreaChart({
     </View>
   );
 }
-
-/** Cache-hit-rate strip: same smooth area shape, fixed 0–100% domain. */
-export function HitRateArea({ points }: { points: ChartPoint[] }) {
-  const { C } = useTheme();
-  const gradientId = useId();
-  const width = Math.max(320, points.length * 34);
-  const padLeft = 30;
-  const plotWidth = width - padLeft - 8;
-  const plotHeight = 110 - 24 - 8;
-  const plotTop = 8;
-  const plotBottom = plotTop + plotHeight;
-  if (points.length === 0) return null;
-
-  const coords = points.map((p, i) => ({
-    x: padLeft + (i + 0.5) * (plotWidth / Math.max(1, points.length)),
-    y: plotBottom - Math.min(1, Math.max(0, p.value)) * plotHeight,
-  }));
-  const labelEvery = Math.ceil(points.length / 6);
-
-  return (
-    <View style={{ marginHorizontal: spacing.l, marginTop: spacing.xs }}>
-      <Svg width="100%" height={110} viewBox={`0 0 ${width} 110`}>
-        <Defs>
-          <LinearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0" stopColor={C.text} stopOpacity="0.25" />
-            <Stop offset="1" stopColor={C.text} stopOpacity="0.02" />
-          </LinearGradient>
-        </Defs>
-        <Line x1={padLeft} x2={width - 8} y1={plotTop} y2={plotTop} stroke={C.border} strokeDasharray="3 4" />
-        <Line x1={padLeft} x2={width - 8} y1={plotBottom} y2={plotBottom} stroke={C.border} />
-        <SvgText x={padLeft - 5} y={plotTop + 3} fontSize={FONT} fill={C.muted} textAnchor="end">
-          100%
-        </SvgText>
-        <SvgText x={padLeft - 5} y={plotBottom + 3} fontSize={FONT} fill={C.muted} textAnchor="end">
-          0%
-        </SvgText>
-        <Path d={areaFrom(coords, plotBottom)} fill={`url(#${gradientId})`} />
-        <Path d={smoothPath(coords)} fill="none" stroke={C.text} strokeWidth={2} strokeLinecap="round" />
-        {points.map((p, i) =>
-          i % labelEvery === 0 ? (
-            <SvgText key={`${p.label}-${i}`} x={coords[i]!.x} y={110 - 6} fontSize={FONT} fill={C.muted} textAnchor="middle">
-              {p.label}
-            </SvgText>
-          ) : null,
-        )}
-      </Svg>
-    </View>
-  );
-}
-
 function Legend({ stackKeys, colorFor }: { stackKeys: string[]; colorFor: (key: string) => string }) {
   const { C } = useTheme();
   return (

@@ -1,6 +1,6 @@
 import { BurnBackendError, type IngestQuotaInput } from "@burn/sync-api";
-import { backendFor, reporterApiFor } from "./backend.js";
-import { loadConfig, loadCursor, saveConfig, saveCursor, configPath, setupSqlPath, type BurnConfig } from "./config.js";
+import { reporterApiFor } from "./backend.js";
+import { loadConfig, loadCursor, saveConfig, configPath, setupSqlPath, type BurnConfig } from "./config.js";
 import { renderSetupSql } from "./setup-sql.js";
 import { generateToken } from "./tokens.js";
 import { fetchUsage, tokscaleVersion, TokscaleError } from "./tokscale.js";

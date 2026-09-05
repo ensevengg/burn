@@ -79,11 +79,3 @@ export function formatRelative(iso: string | null, now = Date.now()): string {
   if (hours < 48) return `${hours}h ago`;
   return `${Math.round(hours / 24)}d ago`;
 }
-
-export function formatDuration(ms: number | null): string {
-  if (ms === null || ms <= 0) return "—";
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ${seconds % 60}s`;
-}

@@ -14,6 +14,7 @@ import type { DailyTotals } from "../data/repository";
 const DAY_MS = 86_400_000;
 const CELL = 13;
 const GAP = 2.5;
+const WEEKS = 53;
 
 function intensity(tokens: number, max: number, C: { panelAlt: string; text: string }): string {
   // Monotonic brightness on the dark card: empty cells stay faint, data cells
@@ -36,12 +37,9 @@ function withAlpha(hex: string, alpha: number): string {
 export function ContributionGrid({
   totals,
   timeZone,
-  weeks = 53,
 }: {
   totals: DailyTotals | undefined;
   timeZone: string;
-  /** Column count — scoped to the selected window by the caller. */
-  weeks?: number | undefined;
 }) {
   const { C } = useTheme();
   const [selected, setSelected] = useState<string | null>(null);
@@ -52,7 +50,7 @@ export function ContributionGrid({
     // column to the reporting-timezone calendar day.
     const todayUtc = new Date();
     const today = Date.UTC(todayUtc.getUTCFullYear(), todayUtc.getUTCMonth(), todayUtc.getUTCDate(), 12);
-    const start = today - (weeks - 1) * 7 * DAY_MS;
+    const start = today - (WEEKS - 1) * 7 * DAY_MS;
     const weekday = new Date(start).getUTCDay(); // align columns to Sunday
     const aligned = start - weekday * DAY_MS;
 

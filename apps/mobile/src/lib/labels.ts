@@ -28,6 +28,7 @@ const EXACT: Record<string, string> = {
   "glm-4.7": "GLM-4.7",
   "glm-4.7-air": "GLM-4.7 Air",
   "glm-4.6": "GLM-4.6",
+  "kimi-k2.5": "Kimi K2.5",
   "gpt-5.2-codex": "GPT-5.2 Codex",
   "gpt-5.2-mini": "GPT-5.2 Mini",
   "gpt-5.2": "GPT-5.2",

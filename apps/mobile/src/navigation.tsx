@@ -6,6 +6,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-cont
 import Svg, { Circle, Path, Rect, Line } from "react-native-svg";
 import { darkColors, lightColors } from "./theme";
 import { useTheme } from "./lib/theme-context";
+import { useApp } from "./lib/app-context";
 import { DashboardScreen } from "./screens/DashboardScreen";
 import { HistoryScreen } from "./screens/HistoryScreen";
 import { ExploreScreen } from "./screens/ExploreScreen";
@@ -155,5 +156,3 @@ export default function Navigation() {
     </NavigationContainer>
   );
 }
-
-import { useApp } from "./lib/app-context";
