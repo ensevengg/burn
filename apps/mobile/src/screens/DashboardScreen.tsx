@@ -1,57 +1,56 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useDashboardQuery, useGranularityMaxQuery, useMachinesQuery, useQuotasQuery } from "../data/queries";
+import { useGranularityMaxQuery, useMachinesQuery, useQuotasQuery, useWindowOverviewQuery } from "../data/queries";
+import type { QuotaCard } from "../data/repository";
 import { formatCost, formatPercent, formatRelative, formatTokens } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
 import { spacing, type } from "../theme";
-import { Card, Chip, Dot, Empty, MeterBar, SectionTitle, Stat } from "../ui/primitives";
+import { Card, Chip, Dot, Empty, MeterBar, SectionTitle, Segmented, Stat } from "../ui/primitives";
 import { ScrollableAreaChart } from "../ui/charts";
-import type { QuotaCard } from "../data/repository";
+
+type Metric = "cost" | "tokens";
+type WindowDays = 1 | 7 | 30 | 90;
+
+const METRICS = [
+  { label: "Cost", value: "cost" },
+  { label: "Tokens", value: "tokens" },
+] as const;
+
+const WINDOWS = [
+  { label: "Past 24h", value: "1" },
+  { label: "7 days", value: "7" },
+  { label: "30 days", value: "30" },
+  { label: "90 days", value: "90" },
+] as const;
 
 export function DashboardScreen() {
   const { mode, reportingTimezone, sync, lastSync, syncError, requestSync } = useApp();
   const { C } = useTheme();
-  const dashboard = useDashboardQuery();
+  const [metric, setMetric] = useState<Metric>("cost");
+  const [days, setDays] = useState<WindowDays>(30);
+  const overview = useWindowOverviewQuery(days);
+  const dailyMax = useGranularityMaxQuery("daily", metric);
   const quotas = useQuotasQuery();
   const machines = useMachinesQuery();
-  const granularityMax = useGranularityMaxQuery("daily");
-  const refreshing = dashboard.isFetching || quotas.isFetching;
+  const refreshing = overview.isFetching || quotas.isFetching;
 
-  const today = dashboard.data?.today;
-  const week = dashboard.data?.week;
+  const totals = overview.data?.totals;
+  const headlineValue =
+    totals === undefined
+      ? "—"
+      : metric === "cost"
+        ? formatCost(totals.cost)
+        : formatTokens(
+            totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens,
+          );
 
-  // One subscription card per provider-account, metric windows as rows inside
-  // (user feedback: 5h + weekly are one subscription, not two cards).
-  const subscriptions = useMemo(() => {
-    const groups = new Map<string, { key: string; provider: string; accountLabel: string | null; plan: string | null; fetchedAt: string; metrics: QuotaCard[] }>();
-    for (const quota of quotas.data ?? []) {
-      const key = `${quota.provider}|${quota.accountLabel ?? ""}`;
-      const group = groups.get(key);
-      if (group === undefined) {
-        groups.set(key, {
-          key,
-          provider: quota.provider,
-          accountLabel: quota.accountLabel,
-          plan: quota.plan,
-          fetchedAt: quota.fetchedAt,
-          metrics: [quota],
-        });
-      } else {
-        group.metrics.push(quota);
-        if (quota.fetchedAt > group.fetchedAt) group.fetchedAt = quota.fetchedAt;
-      }
-    }
-    return [...groups.values()];
-  }, [quotas.data]);
-
-  // Pull-to-refresh = request an eager push from every online machine (the
-  // rendezvous signal, D1) + pull whatever landed since our watermark.
+  // Pull-to-refresh = request an eager push from every online machine (D1) + pull delta.
   const onRefresh = () => {
     if (mode === "cloud") void requestSync(null);
-    void dashboard.refetch();
+    void overview.refetch();
     void quotas.refetch();
     void sync();
   };
@@ -63,130 +62,186 @@ export function DashboardScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.muted} />}
       >
         <View style={styles.header}>
-          <Text style={[type.title, { color: C.text }]}>Today</Text>
+          <Text style={[type.title, { color: C.text }]}>Overview</Text>
           <Chip tone={mode === "demo" ? "yellow" : mode === "cloud" ? "green" : "muted"}>
             {mode === "demo" ? "demo data" : mode === "cloud" ? "live" : "not connected"}
           </Chip>
         </View>
-        <Text style={[type.muted, { color: C.muted, marginHorizontal: spacing.l, marginBottom: spacing.s }]}>
-          {reportingTimezone} · synced {lastSync === null ? "—" : formatRelative(lastSync.toISOString())}
-        </Text>
+
+        <Segmented options={METRICS} value={metric} onChange={setMetric} />
+        <Segmented options={WINDOWS} value={String(days)} onChange={(value) => setDays(Number(value) as WindowDays)} />
+
+        {overview.data !== undefined && overview.data.byClient.length > 0 ? (
+          <View style={styles.providerRows}>
+            {overview.data.byClient.slice(0, 3).map((client) => {
+              const total = metric === "cost" ? overview.data!.totals.cost : overview.data!.totals.inputTokens + overview.data!.totals.outputTokens + overview.data!.totals.cacheReadTokens + overview.data!.totals.cacheWriteTokens;
+              const share = total === 0 ? 0 : (metric === "cost" ? client.cost : client.tokens) / total;
+              return (
+                <View key={client.key} style={styles.providerRow}>
+                  <View style={[styles.providerDot, { backgroundColor: C.text }]} />
+                  <Text style={[type.body, { color: C.text, fontWeight: "600" }]}>{humanize(client.key)}</Text>
+                  <Text style={[type.muted, { color: C.muted, marginLeft: spacing.s, flex: 1 }]}>
+                    {`${client.sessions} sessions`}
+                  </Text>
+                  <Text style={[type.muted, { color: C.muted }]}>
+                    {`${formatPercent(share)} of ${metric} · ${formatTokens(client.tokens)}`}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
+
+        <Card>
+          <Text style={[type.headline, { color: C.text }]}>{headlineValue}</Text>
+          <Text style={[type.muted, { color: C.muted }]}>
+            {`${overview.data?.totals.messages ?? 0} messages · API estimate`}
+          </Text>
+        </Card>
+
         {syncError !== null && (
           <Card>
             <Text style={{ color: C.err }}>{syncError}</Text>
           </Card>
         )}
 
-        {today === undefined ? (
-          <Empty message="Loading local cache…" />
+        <SectionTitle trailing={`${metric} / day`}>Daily</SectionTitle>
+        {overview.data === undefined || overview.data.series.length === 0 ? (
+          <Empty message={`No usage in the last ${days}d.`} />
         ) : (
-          <>
-            <Card>
-              <View style={{ flexDirection: "row" }}>
-                <Stat label="Spend today" value={formatCost(today.cost)} sub={`${today.messages} messages`} />
-                <Stat
-                  label="Tokens today"
-                  value={formatTokens(
-                    today.inputTokens + today.outputTokens + today.cacheReadTokens + today.cacheWriteTokens,
-                  )}
-                  sub={`cache hit ${formatPercent(today.hitRate)}`}
-                />
+          <Card>
+            <ScrollableAreaChart
+              points={overview.data.series.map((bucket) => ({
+                label: bucket.label,
+                value: metric === "cost" ? bucket.cost : bucket.tokens,
+              }))}
+              yMax={dailyMax.data === undefined ? undefined : dailyMax.data}
+              height={230}
+              formatY={metric === "cost" ? formatCost : formatTokens}
+            />
+          </Card>
+        )}
+
+        <SectionTitle>Totals</SectionTitle>
+        {totals === undefined ? null : (
+          <Card>
+            <View style={styles.stripRow}>
+              <StripStat label="Processed" value={formatTokens(totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens + totals.reasoningTokens)} />
+              <StripStat label="Cached input" value={formatTokens(totals.cacheReadTokens)} />
+              <StripStat label="Uncached input" value={formatTokens(totals.inputTokens)} />
+            </View>
+            <View style={styles.stripRow}>
+              <StripStat label="Output" value={formatTokens(totals.outputTokens)} />
+              <StripStat label="Cache hit" value={formatPercent(totals.hitRate)} />
+              <StripStat
+                label="Cache savings"
+                value={overview.data?.cacheSavings === null || overview.data?.cacheSavings === undefined ? "—" : formatCost(overview.data.cacheSavings)}
+              />
+            </View>
+          </Card>
+        )}
+
+        <SectionTitle>Subscriptions</SectionTitle>
+        {quotas.data === undefined || quotas.data.length === 0 ? (
+          <Empty message="No quota snapshots yet. Run `npx burn-report usage` on a machine." />
+        ) : (
+          groupSubscriptions(quotas.data).map((sub) => (
+            <Card key={sub.key}>
+              <View style={styles.quotaHeader}>
+                <Text style={[type.h2, { color: C.text }]}>{humanize(sub.provider)}</Text>
+                <Chip tone="muted">{formatRelative(sub.fetchedAt)}</Chip>
               </View>
-            </Card>
-
-            <Card>
-              <View style={{ flexDirection: "row" }}>
-                <Stat
-                  label="Spend · 7 days"
-                  value={formatCost(week?.cost ?? 0)}
-                  sub={week === undefined ? undefined : `${formatTokens(week.outputTokens)} output`}
-                />
-                <Stat
-                  label="Cache hits · 7d"
-                  value={formatTokens(week?.cacheReadTokens ?? 0)}
-                  sub={dashboard.data?.hitRateYesterday === null || dashboard.data?.hitRateYesterday === undefined
-                    ? "—"
-                    : `yesterday ${formatPercent(dashboard.data.hitRateYesterday)}`}
-                />
-              </View>
-            </Card>
-
-            <SectionTitle trailing="tokens / day · 7 days">Burn rate</SectionTitle>
-            {dashboard.data === undefined || dashboard.data.series.length === 0 ? (
-              <Empty message="No usage in the last 7 days." />
-            ) : (
-              <Card>
-                <DashboardChart
-                  points={dashboard.data.series.map((bucket) => ({ label: bucket.label, value: bucket.tokens }))}
-                  yMax={granularityMax.data}
-                />
-              </Card>
-            )}
-
-            <SectionTitle trailing="freshest per account">Subscriptions</SectionTitle>
-            {subscriptions.length === 0 ? (
-              <Empty message="No quota snapshots yet. Run `npx burn-report usage` on a machine." />
-            ) : (
-              subscriptions.map((sub) => (
-                <Card key={sub.key}>
-                  <View style={styles.quotaHeader}>
-                    <Text style={[type.h2, { color: C.text }]}>{humanize(sub.provider)}</Text>
-                    <Chip tone="muted">{formatRelative(sub.fetchedAt)}</Chip>
-                  </View>
-                  <Text style={[type.muted, { color: C.muted, marginBottom: spacing.xs }]}>
-                    {[
-                      sub.accountLabel ?? null,
-                      sub.plan === null ? null : humanize(sub.plan),
-                    ]
-                      .filter((part) => part !== null)
-                      .join(" · ")}
-                  </Text>
-                  {sub.metrics.map((metric) => (
-                    <View key={metric.metric} style={{ marginTop: spacing.s }}>
-                      <View style={styles.quotaFooter}>
-                        <Text style={[type.body, { color: C.text, fontWeight: "600" }]}>
-                          {humanize(metric.metric)}
-                        </Text>
-                        <Text style={[type.muted, { color: C.muted }]}>
-                          {metric.usedPercent === null ? "—" : `${metric.usedPercent.toFixed(0)}% used`}
-                          {metric.remainingLabel !== null ? ` · ${metric.remainingLabel}` : ""}
-                        </Text>
-                      </View>
-                      {metric.usedPercent !== null && <MeterBar usedPercent={metric.usedPercent} />}
-                    </View>
-                  ))}
-                </Card>
-              ))
-            )}
-
-            <SectionTitle>Machines</SectionTitle>
-            {machines.data === undefined ? (
-              <Empty message="Loading machines…" />
-            ) : machines.data.length === 0 ? (
-              <Empty message="No machines yet — install burn-report." />
-            ) : (
-              <Card>
-                {machines.data.map((machine) => (
-                  <View key={machine.id} style={styles.machineRow}>
-                    <Dot ok={machine.lastError === null && machine.lastHeartbeatAt !== null} />
-                    <Text style={[type.body, { color: C.text, flex: 1, marginLeft: spacing.s }]} numberOfLines={1}>
-                      {machine.displayName}
+              <Text style={[type.muted, { color: C.muted }]}>
+                {[
+                  sub.accountLabel ?? null,
+                  sub.plan === null ? null : humanize(sub.plan),
+                ]
+                  .filter((part) => part !== null)
+                  .join(" · ")}
+              </Text>
+              {sub.metrics.map((metricQuota) => (
+                <View key={metricQuota.metric} style={{ marginTop: spacing.s }}>
+                  <View style={styles.quotaFooter}>
+                    <Text style={[type.body, { color: C.text, fontWeight: "600" }]}>
+                      {humanize(metricQuota.metric)}
                     </Text>
-                    <Text style={[type.muted, { color: C.muted }]}>{formatRelative(machine.lastHeartbeatAt)}</Text>
+                    <Text style={[type.muted, { color: C.muted }]}>
+                      {metricQuota.usedPercent === null
+                        ? "—"
+                        : `${metricQuota.usedPercent.toFixed(0)}% used`}
+                      {metricQuota.remainingLabel !== null ? ` · ${metricQuota.remainingLabel}` : ""}
+                    </Text>
                   </View>
-                ))}
-              </Card>
-            )}
-          </>
+                  {metricQuota.usedPercent !== null && <MeterBar usedPercent={metricQuota.usedPercent} />}
+                </View>
+              ))}
+            </Card>
+          ))
+        )}
+
+        <SectionTitle>Machines</SectionTitle>
+        {machines.data === undefined ? (
+          <Empty message="Loading machines…" />
+        ) : machines.data.length === 0 ? (
+          <Empty message="No machines yet — install burn-report." />
+        ) : (
+          <Card>
+            {machines.data.map((machine) => (
+              <View key={machine.id} style={styles.machineRow}>
+                <Dot ok={machine.lastError === null && machine.lastHeartbeatAt !== null} />
+                <Text style={[type.body, { color: C.text, flex: 1, marginLeft: spacing.s }]} numberOfLines={1}>
+                  {machine.displayName}
+                </Text>
+                <Text style={[type.muted, { color: C.muted }]}>{formatRelative(machine.lastHeartbeatAt)}</Text>
+              </View>
+            ))}
+          </Card>
         )}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-/** Separate component so the yMax query doesn't rerender the whole screen. */
-function DashboardChart({ points, yMax }: { points: { label: string; value: number }[]; yMax: number | undefined }) {
-  return <ScrollableAreaChart points={points} yMax={yMax} height={210} />;
+function StripStat({ label, value }: { label: string; value: string }) {
+  const { C } = useTheme();
+  return (
+    <View style={{ flex: 1 }}>
+      <Text style={[type.muted, { color: C.muted }]}>{label}</Text>
+      <Text style={{ fontSize: 15, fontWeight: "600", color: C.text, fontVariant: ["tabular-nums"] }}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
+/** One card per provider-account; metric windows (5h, weekly…) live inside. */
+function groupSubscriptions(quotas: QuotaCard[]): {
+  key: string;
+  provider: string;
+  accountLabel: string | null;
+  plan: string | null;
+  fetchedAt: string;
+  metrics: QuotaCard[];
+}[] {
+  const groups = new Map<
+    string,
+    { key: string; provider: string; accountLabel: string | null; plan: string | null; fetchedAt: string; metrics: QuotaCard[] }
+  >();
+  for (const quota of quotas) {
+    const key = `${quota.provider}|${quota.accountLabel ?? ""}`;
+    const group = groups.get(key) ?? {
+      key,
+      provider: quota.provider,
+      accountLabel: quota.accountLabel,
+      plan: quota.plan,
+      fetchedAt: quota.fetchedAt,
+      metrics: [] as QuotaCard[],
+    };
+    group.metrics.push(quota);
+    if (quota.fetchedAt > group.fetchedAt) group.fetchedAt = quota.fetchedAt;
+    groups.set(key, group);
+  }
+  return [...groups.values()];
 }
 
 const styles = StyleSheet.create({
@@ -198,7 +253,11 @@ const styles = StyleSheet.create({
     marginHorizontal: spacing.l,
     marginTop: spacing.m,
   },
+  providerRows: { marginHorizontal: spacing.l, marginTop: spacing.s },
+  providerRow: { flexDirection: "row", alignItems: "center", paddingVertical: 4 },
+  providerDot: { width: 7, height: 7, borderRadius: 4, marginRight: 7 },
   quotaHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  quotaFooter: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  quotaFooter: { flexDirection: "row", justifyContent: "space-between", marginTop: 6 },
+  stripRow: { flexDirection: "row", marginTop: spacing.s, gap: spacing.m },
   machineRow: { flexDirection: "row", alignItems: "center", paddingVertical: 7 },
 });

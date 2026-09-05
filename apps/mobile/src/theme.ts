@@ -65,6 +65,7 @@ export const spacing = { xs: 4, s: 8, m: 12, l: 16, xl: 24, xxl: 32 };
 /** Typography without color — color always comes from the theme. */
 export const type = {
   title: { fontSize: 28, fontWeight: "700" as const },
+  headline: { fontSize: 40, fontWeight: "700" as const },
   h2: { fontSize: 17, fontWeight: "600" as const },
   body: { fontSize: 14 },
   muted: { fontSize: 12.5 },
