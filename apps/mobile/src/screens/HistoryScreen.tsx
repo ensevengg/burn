@@ -1,5 +1,4 @@
-import { useMemo, useState } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { useMemo, useState } from "react";import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useDailyTotalsQuery, useGranularityMaxQuery, useHistoryQuery, useRecordsQuery } from "../data/queries";
 import { buildStackLayers, type RecordStats } from "../data/repository";
@@ -34,6 +33,7 @@ const GROUPINGS = [
 export function HistoryScreen() {
   const [windowValue, setWindowValue] = useState<string>("30");
   const [groupBy, setGroupBy] = useState<"none" | "model" | "client">("none");
+  const [showAllRanked, setShowAllRanked] = useState(false);
   const window = WINDOWS.find((w) => w.value === windowValue) ?? WINDOWS[1]!;
   const history = useHistoryQuery(window.granularity, groupBy, window.days);
   const granularityMax = useGranularityMaxQuery(window.granularity);
@@ -151,31 +151,46 @@ export function HistoryScreen() {
                   Ranked
                 </SectionTitle>
                 <Card>
-                  {ranked.map((row, index) => {
-                    const top = ranked[0]!.tokens || 1;
+                  {(() => {
+                    const visible = showAllRanked ? ranked : ranked.slice(0, 5);
+                    const top = visible[0]!.tokens || 1;
                     return (
-                      <View key={row.key} style={{ marginTop: index === 0 ? 0 : spacing.s }}>
-                        <View style={styles.rankedRow}>
-                          <Text style={[type.body, { color: C.text, flex: 1 }]} numberOfLines={1}>
-                            {`${index + 1}. ${humanize(row.key)}`}
-                          </Text>
-                          <Text style={[type.muted, { color: C.muted }]}>
-                            {`${formatTokens(row.tokens)} · ${formatPercent(totals === undefined ? 0 : row.tokens / (totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens + totals.reasoningTokens))}`}
-                          </Text>
-                        </View>
-                        <View style={[styles.rankTrack, { backgroundColor: C.panelAlt }]}>
+                      <>
+                        {visible.map((row, index) => (
+                          <View key={row.key} style={{ marginTop: index === 0 ? 0 : spacing.s }}>
+                            <View style={styles.rankedRow}>
+                              <Text style={[type.body, { color: C.text, flex: 1 }]} numberOfLines={1}>
+                                {`${index + 1}. ${humanize(row.key)}`}
+                              </Text>
+                              <Text style={[type.muted, { color: C.muted }]}>
+                                {`${formatTokens(row.tokens)} · ${formatPercent(totals === undefined ? 0 : row.tokens / (totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens + totals.reasoningTokens))}`}
+                              </Text>
+                            </View>
+                            <View style={[styles.rankTrack, { backgroundColor: C.panelAlt }]}>
+                              <View
+                                style={{
+                                  width: `${(row.tokens / top) * 100}%`,
+                                  height: "100%",
+                                  backgroundColor: colorFor(row.key),
+                                  borderRadius: 999,
+                                }}
+                              />
+                            </View>
+                          </View>
+                        ))}
+                        {ranked.length > 5 && (
                           <View
-                            style={{
-                              width: `${(row.tokens / top) * 100}%`,
-                              height: "100%",
-                              backgroundColor: colorFor(row.key),
-                              borderRadius: 999,
-                            }}
-                          />
-                        </View>
-                      </View>
+                            style={[styles.showMore, { borderColor: C.border }]}
+                            onTouchEnd={() => setShowAllRanked(!showAllRanked)}
+                          >
+                            <Text style={{ color: C.text, fontWeight: "600" }}>
+                              {showAllRanked ? "show less" : `… show more (${ranked.length - 5})`}
+                            </Text>
+                          </View>
+                        )}
+                      </>
                     );
-                  })}
+                  })()}
                 </Card>
               </>
             )}
@@ -267,5 +282,12 @@ const styles = StyleSheet.create({
   mixTrack: { height: 5, borderRadius: 999, overflow: "hidden", marginTop: 4 },
   rankedRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   rankTrack: { height: 5, borderRadius: 999, overflow: "hidden", marginTop: 4 },
+  showMore: {
+    borderWidth: 1,
+    borderRadius: 10,
+    alignItems: "center",
+    paddingVertical: 10,
+    marginTop: spacing.m,
+  },
   priciestRow: { flexDirection: "row", borderTopWidth: 1, marginTop: spacing.m, paddingTop: spacing.m },
 });
