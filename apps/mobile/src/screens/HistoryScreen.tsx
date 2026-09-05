@@ -37,7 +37,7 @@ export function HistoryScreen() {
   const window = WINDOWS.find((w) => w.value === windowValue) ?? WINDOWS[1]!;
   const history = useHistoryQuery(window.granularity, groupBy, window.days);
   const granularityMax = useGranularityMaxQuery(window.granularity);
-  const dailyTotals = useDailyTotalsQuery(window.days);
+  const dailyTotals = useDailyTotalsQuery();
   const records = useRecordsQuery();
   const { C } = useTheme();
   const { reportingTimezone } = useApp();
@@ -122,13 +122,9 @@ export function HistoryScreen() {
               </View>
             </Card>
 
-            <SectionTitle trailing="tap a day">Contribution</SectionTitle>
+            <SectionTitle trailing="last 365 days · tap a day">Contribution</SectionTitle>
             <Card>
-              <ContributionGrid
-                totals={dailyTotals.data}
-                timeZone={reportingTimezone}
-                weeks={Math.min(Math.ceil(window.days / 7), 53)}
-              />
+              <ContributionGrid totals={dailyTotals.data} timeZone={reportingTimezone} />
             </Card>
 
             <SectionTitle>Records</SectionTitle>

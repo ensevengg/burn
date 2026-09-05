@@ -50,11 +50,10 @@ export function useGranularityMaxQuery(granularity: Granularity) {
   );
 }
 
-export function useDailyTotalsQuery(days: number) {
+/** Contribution grid always feeds on a trailing year, independent of the window selector. */
+export function useDailyTotalsQuery() {
   const { reportingTimezone } = useApp();
-  return useDbQuery(["daily-totals", reportingTimezone, days], (db) =>
-    queryDailyTotals(db, reportingTimezone, days),
-  );
+  return useDbQuery(["daily-totals", reportingTimezone], (db) => queryDailyTotals(db, reportingTimezone, 365));
 }
 
 export function useRecordsQuery() {
