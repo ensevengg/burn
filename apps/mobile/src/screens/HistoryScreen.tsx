@@ -1,15 +1,17 @@
 import { useMemo, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useGranularityMaxQuery, useHistoryQuery } from "../data/queries";
-import { buildStackLayers } from "../data/repository";
+import { useDailyTotalsQuery, useGranularityMaxQuery, useHistoryQuery, useRecordsQuery } from "../data/queries";
+import { buildStackLayers, type RecordStats } from "../data/repository";
 import type { Granularity } from "../lib/format";
 import { formatCost, formatPercent, formatTokens } from "../lib/format";
 import { humanize } from "../lib/labels";
+import { useApp } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
 import { spacing, type } from "../theme";
 import { Card, Empty, SectionTitle, Segmented, Stat } from "../ui/primitives";
 import { ScrollableAreaChart } from "../ui/charts";
+import { ContributionGrid } from "../ui/heatmap";
 
 /**
  * One selector picks the window (user feedback: granularity + window rows were
@@ -35,7 +37,10 @@ export function HistoryScreen() {
   const window = WINDOWS.find((w) => w.value === windowValue) ?? WINDOWS[1]!;
   const history = useHistoryQuery(window.granularity, groupBy, window.days);
   const granularityMax = useGranularityMaxQuery(window.granularity);
+  const dailyTotals = useDailyTotalsQuery();
+  const records = useRecordsQuery();
   const { C } = useTheme();
+  const { reportingTimezone } = useApp();
 
   const stackKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -98,6 +103,14 @@ export function HistoryScreen() {
               </View>
             </Card>
 
+            <SectionTitle trailing="last 365 days · tap a day">Contribution</SectionTitle>
+            <Card>
+              <ContributionGrid totals={dailyTotals.data} timeZone={reportingTimezone} />
+            </Card>
+
+            <SectionTitle>Records</SectionTitle>
+            <RecordsCard records={records.data} />
+
             <SectionTitle trailing={`tokens per ${window.granularity === "daily" ? "day" : window.granularity === "monthly" ? "month" : "year"}`}>Usage</SectionTitle>
             {history.data === undefined ? null : (
               <Card>
@@ -142,8 +155,43 @@ export function HistoryScreen() {
   );
 }
 
-function MixRow({ label, value, total, color }: { label: string; value: number; total: number; color: string }) {
+function RecordsCard({ records }: { records: RecordStats | undefined }) {
   const { C } = useTheme();
+  if (records === undefined) return <Empty message="Loading…" />;
+  return (
+    <Card>
+      <View style={{ flexDirection: "row" }}>
+        <Stat
+          label="Biggest day"
+          value={records.biggestDay === null ? "—" : formatTokens(records.biggestDay.tokens)}
+          sub={records.biggestDay === null ? undefined : `${records.biggestDay.key} · ${formatCost(records.biggestDay.cost)}`}
+        />
+        <Stat
+          label="Longest streak"
+          value={`${records.longestStreak}d`}
+          sub={`current ${records.currentStreak}d`}
+        />
+      </View>
+      <View style={[styles.priciestRow, { borderTopColor: C.border }]}>
+        <View style={{ flex: 1 }}>
+          <Text style={[type.muted, { color: C.muted }]}>Priciest session</Text>
+          <Text style={[type.body, { color: C.text, fontWeight: "600" }]} numberOfLines={1}>
+            {records.topSession === null
+              ? "—"
+              : records.topSession.title ?? humanize(records.topSession.sessionId)}
+          </Text>
+          {records.topSession !== null && (
+            <Text style={[type.muted, { color: C.muted }]}>
+              {`${formatCost(records.topSession.cost)} · ${formatTokens(records.topSession.tokens)} · ${humanize(records.topSession.client ?? "")}`.trim()}
+            </Text>
+          )}
+        </View>
+      </View>
+    </Card>
+  );
+}
+
+function MixRow({ label, value, total, color }: { label: string; value: number; total: number; color: string }) {  const { C } = useTheme();
   const fraction = total === 0 ? 0 : value / total;
   return (
     <View style={{ marginTop: spacing.s }}>
@@ -163,4 +211,5 @@ const styles = StyleSheet.create({
   title: { marginHorizontal: spacing.l, marginTop: spacing.m, marginBottom: spacing.s },
   mixRow: { flexDirection: "row", justifyContent: "space-between" },
   mixTrack: { height: 5, borderRadius: 999, overflow: "hidden", marginTop: 4 },
+  priciestRow: { flexDirection: "row", borderTopWidth: 1, marginTop: spacing.m, paddingTop: spacing.m },
 });
