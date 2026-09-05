@@ -221,6 +221,112 @@ export async function removeEnvironmentLocal(db: SQLiteDatabase, environmentId: 
   });
 }
 
+export interface DailyTotals {
+  /** Day key (reporting-tz "YYYY-MM-DD") → tokens/cost. Missing key = no usage. */
+  byKey: Record<string, { tokens: number; cost: number }>;
+  max: number;
+}
+
+/** Per-day totals over the trailing `days` window — the contribution grid's feed. */
+export async function queryDailyTotals(
+  db: SQLiteDatabase,
+  timeZone: string,
+  days: number,
+): Promise<DailyTotals> {
+  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, null);
+  const byKey: Record<string, { tokens: number; cost: number }> = {};
+  let max = 0;
+  for (const e of events) {
+    const key = bucketKey(e.occurredAtMs, timeZone, "daily");
+    const entry = byKey[key] ?? { tokens: 0, cost: 0 };
+    entry.tokens +=
+      e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens + e.reasoningTokens;
+    entry.cost += e.cost;
+    byKey[key] = entry;
+    if (entry.tokens > max) max = entry.tokens;
+  }
+  return { byKey, max };
+}
+
+export interface RecordStats {
+  biggestDay: { key: string; tokens: number; cost: number } | null;
+  longestStreak: number;
+  currentStreak: number;
+  topSession: { sessionId: string; title: string | null; client: string; cost: number; tokens: number } | null;
+}
+
+/** All-time records: biggest day, longest + current streak, priciest session. */
+export async function queryRecords(db: SQLiteDatabase, timeZone: string): Promise<RecordStats> {
+  const events = await loadEvents(db, 0, Date.now() + DAY_MS, null);
+  const perDay = new Map<string, { tokens: number; cost: number }>();
+  const perSession = new Map<string, { title: string | null; cost: number; tokens: number; client: string }>();
+  for (const e of events) {
+    const key = bucketKey(e.occurredAtMs, timeZone, "daily");
+    const day = perDay.get(key) ?? { tokens: 0, cost: 0 };
+    day.tokens +=
+      e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens + e.reasoningTokens;
+    day.cost += e.cost;
+    perDay.set(key, day);
+
+    const session =
+      perSession.get(e.sessionId) ??
+      { title: e.sessionTitle, cost: 0, tokens: 0, client: e.client };
+    session.cost += e.cost;
+    session.tokens +=
+      e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens + e.reasoningTokens;
+    if (session.title === null && e.sessionTitle !== null) session.title = e.sessionTitle;
+    perSession.set(e.sessionId, session);
+  }
+
+  let biggestDay: RecordStats["biggestDay"] = null;
+  for (const [key, day] of perDay) {
+    if (biggestDay === null || day.tokens > biggestDay.tokens) {
+      biggestDay = { key, tokens: day.tokens, cost: day.cost };
+    }
+  }
+
+  // Streaks walk real calendar ordinals so gaps break them correctly.
+  const activeOrdinals = new Set(
+    [...perDay.keys()].map((key) => Math.floor(Date.parse(`${key}T12:00:00Z`) / DAY_MS)),
+  );
+  let longestStreak = 0;
+  let run = 0;
+  let cursor = Math.floor(Date.parse("2000-01-01T12:00:00Z") / DAY_MS);
+  const lastOrdinal = Math.floor(Date.now() / DAY_MS);
+  let currentStreak = 0;
+  for (let ordinal = cursor; ordinal <= lastOrdinal; ordinal++) {
+    if (activeOrdinals.has(ordinal)) {
+      run += 1;
+      if (run > longestStreak) longestStreak = run;
+    } else {
+      run = 0;
+    }
+  }
+  // Current streak counts back from today; an inactive today doesn't break it
+  // until tomorrow (GitHub convention).
+  cursor = lastOrdinal;
+  if (!activeOrdinals.has(cursor)) cursor -= 1;
+  while (activeOrdinals.has(cursor)) {
+    currentStreak += 1;
+    cursor -= 1;
+  }
+
+  let topSession: RecordStats["topSession"] = null;
+  for (const [sessionId, session] of perSession) {
+    if (topSession === null || session.cost > topSession.cost) {
+      topSession = {
+        sessionId,
+        title: session.title,
+        client: session.client,
+        cost: session.cost,
+        tokens: session.tokens,
+      };
+    }
+  }
+
+  return { biggestDay, longestStreak, currentStreak, topSession };
+}
+
 export interface BreakdownRow extends Totals {
   key: string;
   title: string;

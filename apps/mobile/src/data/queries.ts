@@ -2,12 +2,14 @@ import { useQuery } from "@tanstack/react-query";
 import type { Granularity } from "../lib/format";
 import {
   queryClients,
+  queryDailyTotals,
   queryDashboard,
   queryEnvironments,
   queryGranularityMax,
   queryHistory,
   queryModels,
   queryQuotas,
+  queryRecords,
   querySessions,
   queryWorkspaces,
 } from "./repository";
@@ -46,6 +48,16 @@ export function useGranularityMaxQuery(granularity: Granularity) {
   return useDbQuery(["granularity-max", reportingTimezone, granularity], (db) =>
     queryGranularityMax(db, reportingTimezone, granularity),
   );
+}
+
+export function useDailyTotalsQuery() {
+  const { reportingTimezone } = useApp();
+  return useDbQuery(["daily-totals", reportingTimezone], (db) => queryDailyTotals(db, reportingTimezone, 365));
+}
+
+export function useRecordsQuery() {
+  const { reportingTimezone } = useApp();
+  return useDbQuery(["records", reportingTimezone], (db) => queryRecords(db, reportingTimezone));
 }
 
 export function useModelsQuery(days: number) {
