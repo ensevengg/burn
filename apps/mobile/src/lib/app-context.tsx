@@ -147,7 +147,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       async clearData() {
         if (db === null) return;
         await resetDb(db);
-        await kvSet(db, "mode", mode);
+        // Reset to Setup so an emptied app doesn't linger in demo/cloud mode
+        // with nothing to show (user-visible bug: empty history after clear).
+        await kvSet(db, "mode", "unconfigured");
+        setMode("unconfigured");
         invalidate();
       },
     };
