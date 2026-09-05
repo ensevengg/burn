@@ -1,7 +1,7 @@
-import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
+import { createBottomTabNavigator, type BottomTabBarButtonProps } from "@react-navigation/bottom-tabs";
 import { NavigationContainer, DarkTheme, DefaultTheme } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { Text } from "react-native";
+import { Pressable, Text } from "react-native";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Circle, Path, Rect, Line } from "react-native-svg";
 import { darkColors, lightColors } from "./theme";
@@ -82,11 +82,13 @@ function TabIcon({ name, color, focused, bg }: { name: string; color: string; fo
 
 function MainTabs() {
   const { C } = useTheme();
-  // Bottom inset goes on the bar itself with an opaque background so tab
-  // ripples never extend behind the translucent Android buttons (user feedback).
-  // Some OEM/3-button setups report insets.bottom = 0 — floor it so the
-  // touchables always clear the system row.
+  // Tab highlight must be exactly the visible box above the Android buttons
+  // (user feedback): fixed item height + clipped ripple, with the system-inset
+  // zone as opaque bar padding the pressables can never reach into. Some
+  // OEM/3-button setups report insets.bottom = 0 — floor it.
   const insets = useSafeAreaInsets();
+  const bottomInset = Math.max(insets.bottom, 44);
+  const ITEM_HEIGHT = 64;
   return (
     <Tabs.Navigator
       screenOptions={({ route }) => ({
@@ -94,9 +96,17 @@ function MainTabs() {
         tabBarStyle: {
           backgroundColor: C.panel,
           borderTopColor: C.border,
-          paddingBottom: Math.max(insets.bottom, 44),
+          height: ITEM_HEIGHT + bottomInset,
         },
-        tabBarItemStyle: { paddingBottom: 6 },
+        tabBarItemStyle: {
+          height: ITEM_HEIGHT,
+          marginHorizontal: 6,
+          borderRadius: 14,
+          overflow: "hidden",
+        },
+        tabBarButton: ({ ref: _ignoredRef, ...buttonProps }: BottomTabBarButtonProps) => (
+          <Pressable {...buttonProps} android_ripple={{ color: C.border, foreground: true, borderless: false }} />
+        ),
         tabBarLabel: ({ color }) => (
           <Text style={{ fontSize: 10.5, color, fontWeight: "500" }}>{route.name}</Text>
         ),
