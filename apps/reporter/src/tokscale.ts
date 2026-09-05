@@ -46,13 +46,25 @@ export type TokscaleUsageReport = z.infer<typeof usageReportSchema>;
 
 const npxBin = platform() === "win32" ? "npx.cmd" : "npx";
 
-function run(
-  pin: string,
+/**
+ * Runner resolution probes once and caches (first-check finding: on machines
+ * where npx/npm resolve to wrapper shims — e.g. AppImage profiles — the npx
+ * spawn rejects flags, while `bun x` works). Order: bun x → npx → bare binary.
+ */
+interface Runner {
+  command: string;
+  prefix: string[];
+}
+
+let cachedRunner: Runner | null = null;
+
+function spawnRunner(
+  runner: Runner,
   args: string[],
-  timeoutMs = 120_000,
+  timeoutMs: number,
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(npxBin, ["-y", `tokscale@${pin}`, ...args], {
+    const child = spawn(runner.command, [...runner.prefix, ...args], {
       shell: false,
       env: { ...process.env, NPM_CONFIG_YES: "true" },
     });
@@ -66,7 +78,7 @@ function run(
     child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
     child.on("error", (err) => {
       clearTimeout(timer);
-      reject(new TokscaleError(`failed to launch npx (is Node.js installed?): ${err.message}`));
+      reject(new TokscaleError(`failed to launch ${runner.command}: ${err.message}`));
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -81,9 +93,31 @@ function run(
   });
 }
 
+async function resolveRunner(pin: string): Promise<Runner> {
+  if (cachedRunner !== null) return cachedRunner;
+  const candidates: Runner[] = [
+    { command: "bun", prefix: ["x", `tokscale@${pin}`] },
+    { command: npxBin, prefix: ["-y", `tokscale@${pin}`] },
+    { command: "tokscale", prefix: [] },
+  ];
+  for (const candidate of candidates) {
+    try {
+      await spawnRunner(candidate, ["--version"], 60_000);
+      cachedRunner = candidate;
+      return candidate;
+    } catch {
+      /* probe the next strategy */
+    }
+  }
+  throw new TokscaleError(
+    `could not run tokscale (pin ${pin}) via bun x, npx, or PATH — install tokscale or bun`,
+  );
+}
+
 export async function tokscaleVersion(pin: string): Promise<string | null> {
   try {
-    const { stdout } = await run(pin, ["--version"], 60_000);
+    const runner = await resolveRunner(pin);
+    const { stdout } = await spawnRunner(runner, ["--version"], 60_000);
     return stdout.trim() || null;
   } catch {
     return null;
@@ -101,7 +135,8 @@ function extractJsonArray(text: string): unknown {
 }
 
 export async function fetchUsage(pin: string): Promise<TokscaleUsageReport> {
-  const { stdout } = await run(pin, ["usage", "--json"]);
+  const runner = await resolveRunner(pin);
+  const { stdout } = await spawnRunner(runner, ["usage", "--json"], 120_000);
   const parsed = usageReportSchema.safeParse(extractJsonArray(stdout));
   if (!parsed.success) {
     // D2: fail loudly on schema drift — never push unvalidated payloads.
