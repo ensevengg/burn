@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "name": "burn",
+    "slug": "burn",
+    "version": "0.1.0",
+    "scheme": "burn",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#0b0e14",
+    "android": {
+      "package": "dev.burn.app",
+      "softwareKeyboardLayoutMode": "pan"
+    }
+  }
+}
