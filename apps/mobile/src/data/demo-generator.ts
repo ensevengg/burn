@@ -100,10 +100,13 @@ interface ModelSpec {
 const MODELS: ModelSpec[] = [
   { client: "codex", providerId: "openai", modelId: "gpt-5.2-codex", input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0, providerReportedChance: 0.7 },
   { client: "codex", providerId: "openai", modelId: "gpt-5.2-mini", input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0, providerReportedChance: 0.4 },
+  { client: "codex", providerId: "openai", modelId: "gpt-5.2", input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0, providerReportedChance: 0.5 },
   { client: "zcode", providerId: "zai", modelId: "glm-4.7", input: 0.6, output: 2.2, cacheRead: 0.11, cacheWrite: 0.11, providerReportedChance: 0.5 },
   { client: "zcode", providerId: "zai", modelId: "glm-4.7-air", input: 0.15, output: 0.6, cacheRead: 0.03, cacheWrite: 0.03, providerReportedChance: 0.2 },
+  { client: "zcode", providerId: "zai", modelId: "glm-4.6", input: 0.6, output: 2.2, cacheRead: 0.11, cacheWrite: 0.11, providerReportedChance: 0.3 },
   { client: "opencode", providerId: "zai", modelId: "glm-4.7", input: 0.6, output: 2.2, cacheRead: 0.11, cacheWrite: 0.11, providerReportedChance: 0 },
   { client: "opencode", providerId: "openai", modelId: "gpt-5.2-mini", input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0, providerReportedChance: 0 },
+  { client: "opencode", providerId: "openrouter", modelId: "kimi-k2.5", input: 0.6, output: 2.5, cacheRead: 0.12, cacheWrite: 0.12, providerReportedChance: 0 },
 ];
 
 const ENVIRONMENTS: DemoEnvironment[] = [

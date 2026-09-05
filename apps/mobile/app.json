@@ -6,7 +6,12 @@
     "scheme": "burn",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
-    "backgroundColor": "#0b0e14",
+    "backgroundColor": "#0c0d10",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0c0d10"
+    },
     "android": {
       "package": "dev.burn.app",
       "softwareKeyboardLayoutMode": "pan"
