@@ -1,0 +1,120 @@
+import { useState } from "react";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { useClientsQuery, useModelsQuery, useSessionsQuery, useWorkspacesQuery } from "../data/queries";
+import { formatCost, formatPercent, formatRelative, formatTokens } from "../lib/format";
+import { humanize } from "../lib/labels";
+import { useTheme } from "../lib/theme-context";
+import { spacing, type } from "../theme";
+import { Card, Empty, MeterBar, SectionTitle, Segmented } from "../ui/primitives";
+import type { BreakdownRow, SessionRow } from "../data/repository";
+
+type Tab = "models" | "clients" | "workspaces" | "sessions";
+const TABS = [
+  { label: "Models", value: "models" },
+  { label: "Agents", value: "clients" },
+  { label: "Workspaces", value: "workspaces" },
+  { label: "Sessions", value: "sessions" },
+] as const;
+
+const WINDOWS = [
+  { label: "7d", value: "7" },
+  { label: "30d", value: "30" },
+  { label: "365d", value: "365" },
+] as const;
+
+export function ExploreScreen() {
+  const [tab, setTab] = useState<Tab>("models");
+  const [windowDays, setWindowDays] = useState(30);
+  const { C } = useTheme();
+
+  const models = useModelsQuery(windowDays);
+  const clients = useClientsQuery(windowDays);
+  const workspaces = useWorkspacesQuery(windowDays);
+  const sessions = useSessionsQuery(windowDays);
+
+  return (
+    <SafeAreaView style={[styles.safe, { backgroundColor: C.bg }]} edges={["top"]}>
+      <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
+        <Text style={[type.title, { color: C.text }, styles.title]}>Explore</Text>
+        <Segmented options={TABS} value={tab} onChange={setTab} />
+        <Segmented options={WINDOWS} value={String(windowDays)} onChange={(v) => setWindowDays(Number(v))} />
+
+        {tab === "models" && <BreakdownList rows={models.data} label="models" />}
+        {tab === "clients" && <BreakdownList rows={clients.data} label="agents" />}
+        {tab === "workspaces" && <BreakdownList rows={workspaces.data} label="workspaces" />}
+        {tab === "sessions" && <SessionList rows={sessions.data} />}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+function BreakdownList({ rows, label }: { rows: BreakdownRow[] | undefined; label: string }) {
+  const { C } = useTheme();
+  if (rows === undefined) return <Empty message="Loading…" />;
+  if (rows.length === 0) return <Empty message={`No ${label} in this window.`} />;
+  const maxCost = Math.max(...rows.map((r) => r.cost), 0.000001);
+  return (
+    <>
+      <SectionTitle trailing={`by spend · ${label}`}>{rows.length} rows</SectionTitle>
+      {rows.map((row) => (
+        <Card key={row.key}>
+          <View style={styles.rowHeader}>
+            <Text style={[type.h2, { color: C.text }]} numberOfLines={1}>
+              {humanize(row.title)}
+            </Text>
+            <Text style={[type.body, { color: C.muted, fontWeight: "700" }]}>{formatCost(row.cost)}</Text>
+          </View>
+          {row.subtitle !== null && <Text style={[type.muted, { color: C.muted }]}>{humanize(row.subtitle)}</Text>}
+          <MeterBar usedPercent={(row.cost / maxCost) * 100} tone={C.text} />
+          <View style={styles.rowStats}>
+            <Text style={[type.muted, { color: C.muted }]}>
+              {`${formatTokens(row.inputTokens + row.cacheReadTokens + row.cacheWriteTokens)} in`}
+              {` · ${formatTokens(row.outputTokens)} out`}
+              {` · cache ${formatPercent(row.hitRate)}`}
+              {` · ${row.messages} msgs`}
+            </Text>
+          </View>
+        </Card>
+      ))}
+    </>
+  );
+}
+
+function SessionList({ rows }: { rows: SessionRow[] | undefined }) {
+  const { C } = useTheme();
+  if (rows === undefined) return <Empty message="Loading…" />;
+  if (rows.length === 0) return <Empty message="No sessions in this window." />;
+  return (
+    <>
+      <SectionTitle trailing="recent first">{rows.length} sessions</SectionTitle>
+      {rows.map((session) => (
+        <Card key={session.sessionId}>
+          <View style={styles.rowHeader}>
+            <Text style={[type.h2, { color: C.text }]} numberOfLines={1}>
+              {session.title ?? session.sessionId}
+            </Text>
+            <Text style={[type.body, { color: C.muted, fontWeight: "700" }]}>{formatCost(session.cost)}</Text>
+          </View>
+          <View style={styles.rowStats}>
+            <Text style={[type.muted, { color: C.muted }]} numberOfLines={1}>
+              {`${humanize(session.client)} · ${session.models.map((model) => humanize(model)).join(", ")}`}
+            </Text>
+          </View>
+          <View style={styles.rowStats}>
+            <Text style={[type.muted, { color: C.muted }]}>
+              {`${formatTokens(session.tokens)} · ${session.messages} msgs · ${formatRelative(new Date(session.lastActivityMs).toISOString())}`}
+            </Text>
+          </View>
+        </Card>
+      ))}
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1 },
+  title: { marginHorizontal: spacing.l, marginTop: spacing.m, marginBottom: spacing.s },
+  rowHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: spacing.s },
+  rowStats: { marginTop: 6 },
+});
