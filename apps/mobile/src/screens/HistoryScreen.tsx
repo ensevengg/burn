@@ -1,15 +1,16 @@
-import { useMemo, useState } from "react";import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { useMemo, useState } from "react";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useDailyTotalsQuery, useGranularityMaxQuery, useHistoryQuery, useRecordsQuery } from "../data/queries";
-import { buildStackLayers, type RecordStats } from "../data/repository";
+import { buildStackLayers, eventTokens, type RecordStats } from "../data/repository";
 import type { Granularity } from "../lib/format";
 import { formatCost, formatPercent, formatTokens } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
 import { spacing, type } from "../theme";
-import { Card, Empty, SectionTitle, Segmented, Stat } from "../ui/primitives";
-import { ScrollableAreaChart } from "../ui/charts";
+import { Card, Empty, SectionTitle, Segmented, Stat, StripStat } from "../ui/primitives";
+import { AreaChart, HitRateStrip } from "../ui/charts";
 import { ContributionGrid } from "../ui/heatmap";
 
 /**
@@ -110,15 +111,26 @@ export function HistoryScreen() {
         ) : (
           <>
             <Card>
-              <View style={{ flexDirection: "row" }}>
-                <Stat
-                  label="Total tokens"
-                  value={formatTokens(
-                    totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens + totals.reasoningTokens,
-                  )}
-                  sub={`${totals.messages} messages`}
-                />
-                <Stat label="Total cost" value={formatCost(totals.cost)} tone="accent" sub={`coverage ${formatPercent(totals.costCoverage)} priced`} />
+              <Text style={[type.headline, { color: C.text }]}>
+                {formatTokens(
+                  totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens + totals.reasoningTokens,
+                )}
+              </Text>
+              <Text style={[type.muted, { color: C.muted }]}>
+                {`${totals.messages} messages · ${formatCost(totals.cost)} · coverage ${formatPercent(totals.costCoverage)} priced`}
+              </Text>
+            </Card>
+
+            <Card>
+              <View style={styles.stripRow}>
+                <StripStat label="Processed" value={formatTokens(eventTokens(totals))} />
+                <StripStat label="Cached input" value={formatTokens(totals.cacheReadTokens)} />
+                <StripStat label="Uncached in" value={formatTokens(totals.inputTokens)} />
+              </View>
+              <View style={styles.stripRow}>
+                <StripStat label="Output" value={formatTokens(totals.outputTokens)} />
+                <StripStat label="Cache hit" value={formatPercent(totals.hitRate)} />
+                <StripStat label="Priced" value={formatPercent(totals.costCoverage)} />
               </View>
             </Card>
 
@@ -133,7 +145,7 @@ export function HistoryScreen() {
             <SectionTitle trailing={`tokens per ${window.granularity === "daily" ? "day" : window.granularity === "monthly" ? "month" : "year"}`}>Usage</SectionTitle>
             {history.data === undefined ? null : (
               <Card>
-                <ScrollableAreaChart
+                <AreaChart
                   points={history.data.series.map((bucket) => ({ label: bucket.label, value: bucket.tokens }))}
                   layers={layers}
                   colorFor={colorFor}
@@ -163,7 +175,7 @@ export function HistoryScreen() {
                                 {`${index + 1}. ${humanize(row.key)}`}
                               </Text>
                               <Text style={[type.muted, { color: C.muted }]}>
-                                {`${formatTokens(row.tokens)} · ${formatPercent(totals === undefined ? 0 : row.tokens / (totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens + totals.reasoningTokens))}`}
+                                {`${formatTokens(row.tokens)} · ${formatPercent(row.tokens / (eventTokens(totals) || 1))}`}
                               </Text>
                             </View>
                             <View style={[styles.rankTrack, { backgroundColor: C.panelAlt }]}>
@@ -199,24 +211,10 @@ export function HistoryScreen() {
               <>
                 <SectionTitle trailing="cache hit rate">Efficiency</SectionTitle>
                 <Card>
-                  <ScrollableAreaChart
-                    points={rateSeries}
-                    pxPerPoint={44}
-                    height={150}
-                    formatY={(fraction: number) => `${Math.round(fraction * 100)}%`}
-                  />
+                  <HitRateStrip points={rateSeries} />
                 </Card>
               </>
             )}
-
-            <SectionTitle>Token mix</SectionTitle>
-            <Card>
-              <MixRow label="Input" value={totals.inputTokens} total={totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens} color={C.chart[1] ?? C.muted} />
-              <MixRow label="Output" value={totals.outputTokens} total={totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens} color={C.text} />
-              <MixRow label="Cache read" value={totals.cacheReadTokens} total={totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens} color={C.chart[2] ?? C.muted} />
-              <MixRow label="Cache write" value={totals.cacheWriteTokens} total={totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens} color={C.chart[3] ?? C.muted} />
-              <MixRow label="Reasoning" value={totals.reasoningTokens} total={totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens} color={C.chart[4] ?? C.muted} />
-            </Card>
           </>
         )}
       </ScrollView>
@@ -260,26 +258,10 @@ function RecordsCard({ records }: { records: RecordStats | undefined }) {
   );
 }
 
-function MixRow({ label, value, total, color }: { label: string; value: number; total: number; color: string }) {  const { C } = useTheme();
-  const fraction = total === 0 ? 0 : value / total;
-  return (
-    <View style={{ marginTop: spacing.s }}>
-      <View style={styles.mixRow}>
-        <Text style={[type.body, { color: C.text }]}>{label}</Text>
-        <Text style={[type.muted, { color: C.muted }]}>{`${formatTokens(value)} · ${formatPercent(fraction)}`}</Text>
-      </View>
-      <View style={[styles.mixTrack, { backgroundColor: C.panelAlt }]}>
-        <View style={{ width: `${fraction * 100}%`, height: "100%", backgroundColor: color, borderRadius: 999 }} />
-      </View>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   title: { marginHorizontal: spacing.l, marginTop: spacing.m, marginBottom: spacing.s },
-  mixRow: { flexDirection: "row", justifyContent: "space-between" },
-  mixTrack: { height: 5, borderRadius: 999, overflow: "hidden", marginTop: 4 },
+  stripRow: { flexDirection: "row", marginTop: spacing.s, gap: spacing.m },
   rankedRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   rankTrack: { height: 5, borderRadius: 999, overflow: "hidden", marginTop: 4 },
   showMore: {

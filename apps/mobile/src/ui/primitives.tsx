@@ -50,6 +50,19 @@ export function Stat({
   );
 }
 
+/** Compact six-up stat for totals strips (reference layout). */
+export function StripStat({ label, value }: { label: string; value: string }) {
+  const { C } = useTheme();
+  return (
+    <View style={{ flex: 1 }}>
+      <Text style={[type.muted, { color: C.muted }]}>{label}</Text>
+      <Text style={{ fontSize: 15, fontWeight: "600", color: C.text, fontVariant: ["tabular-nums"] }}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
 export function Chip({
   children,
   tone = "muted",
