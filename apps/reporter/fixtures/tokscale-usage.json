@@ -1,0 +1,52 @@
+[
+  {
+    "provider": "Codex",
+    "account": { "id": "acct_9f2c1e", "label": "Personal (Plus)", "is_active": true },
+    "credential_source": "~/.codex/auth.json",
+    "plan": "chatgpt_plus",
+    "email": "manan@example.com",
+    "metrics": [
+      {
+        "label": "Session (5h)",
+        "used_percent": 42.5,
+        "remaining_percent": 57.5,
+        "remaining_label": "resets in 2h 14m",
+        "resets_at": "2026-09-05T15:30:00Z"
+      },
+      {
+        "label": "Weekly",
+        "used_percent": 18.2,
+        "remaining_percent": 81.8,
+        "remaining_label": "resets Sep 9",
+        "resets_at": "2026-09-09T00:00:00Z"
+      }
+    ],
+    "credit_status": null,
+    "spend_control": { "individual_limit": null, "reached": false }
+  },
+  {
+    "provider": "Z.ai",
+    "account": null,
+    "credential_source": "ZAI_API_KEY",
+    "plan": "glm_coding_plan",
+    "email": null,
+    "metrics": [
+      {
+        "label": "Tokens",
+        "used_percent": 63.0,
+        "remaining_percent": 37.0,
+        "remaining_label": "1.11M of 3M left",
+        "resets_at": null
+      },
+      {
+        "label": "Web Searches",
+        "used_percent": 10.0,
+        "remaining_percent": 90.0,
+        "remaining_label": "90 of 100 left",
+        "resets_at": null
+      }
+    ],
+    "credit_status": { "balance": "$12.40", "has_credits": true, "unlimited": false, "overage_limit_reached": false },
+    "spend_control": null
+  }
+]
