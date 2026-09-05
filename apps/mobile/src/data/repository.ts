@@ -149,6 +149,171 @@ export function groupKeyFor(event: EventRow, groupBy: "model" | "client" | "none
   return "All";
 }
 
+/** Total tokens across the five buckets — the single source of that sum. */
+export function eventTokens(
+  e: Pick<
+    EventRow,
+    "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "reasoningTokens"
+  >,
+): number {
+  return e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens + e.reasoningTokens;
+}
+
+export interface DayAgg {
+  tokens: number;
+  cost: number;
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+/**
+ * The one day-bucketing implementation (first-check: was written 4×). Buckets
+ * events by calendar key in the reporting timezone at the given granularity.
+ * Pure — tests feed it synthetic rows directly.
+ */
+export function bucketEvents(
+  events: EventRow[],
+  timeZone: string,
+  granularity: Granularity,
+): Map<string, DayAgg> {
+  const byKey = new Map<string, DayAgg>();
+  for (const e of events) {
+    const key = bucketKey(e.occurredAtMs, timeZone, granularity);
+    const agg = byKey.get(key) ?? {
+      tokens: 0,
+      cost: 0,
+      inputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    };
+    agg.tokens += eventTokens(e);
+    agg.cost += e.cost;
+    agg.inputTokens += e.inputTokens;
+    agg.cacheReadTokens += e.cacheReadTokens;
+    agg.cacheWriteTokens += e.cacheWriteTokens;
+    byKey.set(key, agg);
+  }
+  return byKey;
+}
+
+/**
+ * Fixed Y ceiling: the largest bucket total across ALL history (user direction:
+ * the Y axis stays pinned to the historical peak so every window compares
+ * against the same ceiling — only X moves).
+ */
+export function computeGranularityMax(
+  events: EventRow[],
+  timeZone: string,
+  granularity: Granularity,
+): number {
+  let max = 0;
+  for (const agg of bucketEvents(events, timeZone, granularity).values()) {
+    if (agg.tokens > max) max = agg.tokens;
+  }
+  return max;
+}
+
+export interface DailyTotals {
+  /** Day key (reporting-tz "YYYY-MM-DD") → tokens/cost. Missing key = no usage. */
+  byKey: Record<string, { tokens: number; cost: number }>;
+  max: number;
+}
+
+/** Per-day totals over the given events — the contribution grid's feed. */
+export function computeDailyTotals(events: EventRow[], timeZone: string): DailyTotals {
+  const byKey: Record<string, { tokens: number; cost: number }> = {};
+  let max = 0;
+  for (const [key, agg] of bucketEvents(events, timeZone, "daily")) {
+    byKey[key] = { tokens: agg.tokens, cost: agg.cost };
+    if (agg.tokens > max) max = agg.tokens;
+  }
+  return { byKey, max };
+}
+
+export interface RecordStats {
+  biggestDay: { key: string; tokens: number; cost: number } | null;
+  longestStreak: number;
+  currentStreak: number;
+  topSession: { sessionId: string; title: string | null; client: string; cost: number; tokens: number } | null;
+}
+
+/** Streaks walk real calendar ordinals so gaps break them correctly. */
+function computeStreaks(
+  activeOrdinals: Set<number>,
+  now: number,
+): { longestStreak: number; currentStreak: number } {
+  let longestStreak = 0;
+  let run = 0;
+  const firstOrdinal = Math.floor(Date.parse("2000-01-01T12:00:00Z") / DAY_MS);
+  const lastOrdinal = Math.floor(now / DAY_MS);
+  for (let ordinal = firstOrdinal; ordinal <= lastOrdinal; ordinal++) {
+    if (activeOrdinals.has(ordinal)) {
+      run += 1;
+      if (run > longestStreak) longestStreak = run;
+    } else {
+      run = 0;
+    }
+  }
+  // Current streak counts back from today; an inactive today doesn't break it
+  // until tomorrow (GitHub convention).
+  let currentStreak = 0;
+  let cursor = activeOrdinals.has(lastOrdinal) ? lastOrdinal : lastOrdinal - 1;
+  while (activeOrdinals.has(cursor)) {
+    currentStreak += 1;
+    cursor -= 1;
+  }
+  return { longestStreak, currentStreak };
+}
+
+/** All-time records: biggest day, longest + current streak, priciest session. */
+export function computeRecords(
+  events: EventRow[],
+  timeZone: string,
+  now = Date.now(),
+): RecordStats {
+  const perDay = bucketEvents(events, timeZone, "daily");
+  const perSession = new Map<
+    string,
+    { title: string | null; client: string; cost: number; tokens: number }
+  >();
+  for (const e of events) {
+    const session =
+      perSession.get(e.sessionId) ?? { title: e.sessionTitle, client: e.client, cost: 0, tokens: 0 };
+    session.cost += e.cost;
+    session.tokens += eventTokens(e);
+    if (session.title === null && e.sessionTitle !== null) session.title = e.sessionTitle;
+    perSession.set(e.sessionId, session);
+  }
+
+  let biggestDay: RecordStats["biggestDay"] = null;
+  for (const [key, agg] of perDay) {
+    if (biggestDay === null || agg.tokens > biggestDay.tokens) {
+      biggestDay = { key, tokens: agg.tokens, cost: agg.cost };
+    }
+  }
+
+  const activeOrdinals = new Set(
+    [...perDay.keys()].map((key) => Math.floor(Date.parse(`${key}T12:00:00Z`) / DAY_MS)),
+  );
+  const { longestStreak, currentStreak } = computeStreaks(activeOrdinals, now);
+
+  let topSession: RecordStats["topSession"] = null;
+  for (const [sessionId, session] of perSession) {
+    if (topSession === null || session.cost > topSession.cost) {
+      topSession = {
+        sessionId,
+        title: session.title,
+        client: session.client,
+        cost: session.cost,
+        tokens: session.tokens,
+      };
+    }
+  }
+
+  return { biggestDay, longestStreak, currentStreak, topSession };
+}
+
 export function buildSeries(
   events: EventRow[],
   timeZone: string,
@@ -191,25 +356,13 @@ export function buildStackLayers(
   });
 }
 
-/**
- * Largest bucket total across ALL history at this granularity (user direction:
- * the Y axis stays pinned to the historical peak so every window compares
- * against the same ceiling — only X moves).
- */
 export async function queryGranularityMax(
   db: SQLiteDatabase,
   timeZone: string,
   granularity: Granularity,
 ): Promise<number> {
   const events = await loadEvents(db, 0, Date.now() + DAY_MS, null);
-  const perBucket = new Map<string, number>();
-  for (const e of events) {
-    const key = bucketKey(e.occurredAtMs, timeZone, granularity);
-    const tokens =
-      e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens + e.reasoningTokens;
-    perBucket.set(key, (perBucket.get(key) ?? 0) + tokens);
-  }
-  return Math.max(0, ...perBucket.values());
+  return computeGranularityMax(events, timeZone, granularity);
 }
 
 /** Local mirror deletion for machine removal (server row is deleted separately). */
@@ -234,18 +387,7 @@ export async function queryDailyTotals(
   days: number,
 ): Promise<DailyTotals> {
   const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, null);
-  const byKey: Record<string, { tokens: number; cost: number }> = {};
-  let max = 0;
-  for (const e of events) {
-    const key = bucketKey(e.occurredAtMs, timeZone, "daily");
-    const entry = byKey[key] ?? { tokens: 0, cost: 0 };
-    entry.tokens +=
-      e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens + e.reasoningTokens;
-    entry.cost += e.cost;
-    byKey[key] = entry;
-    if (entry.tokens > max) max = entry.tokens;
-  }
-  return { byKey, max };
+  return computeDailyTotals(events, timeZone);
 }
 
 export interface RecordStats {
@@ -258,73 +400,7 @@ export interface RecordStats {
 /** All-time records: biggest day, longest + current streak, priciest session. */
 export async function queryRecords(db: SQLiteDatabase, timeZone: string): Promise<RecordStats> {
   const events = await loadEvents(db, 0, Date.now() + DAY_MS, null);
-  const perDay = new Map<string, { tokens: number; cost: number }>();
-  const perSession = new Map<string, { title: string | null; cost: number; tokens: number; client: string }>();
-  for (const e of events) {
-    const key = bucketKey(e.occurredAtMs, timeZone, "daily");
-    const day = perDay.get(key) ?? { tokens: 0, cost: 0 };
-    day.tokens +=
-      e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens + e.reasoningTokens;
-    day.cost += e.cost;
-    perDay.set(key, day);
-
-    const session =
-      perSession.get(e.sessionId) ??
-      { title: e.sessionTitle, cost: 0, tokens: 0, client: e.client };
-    session.cost += e.cost;
-    session.tokens +=
-      e.inputTokens + e.outputTokens + e.cacheReadTokens + e.cacheWriteTokens + e.reasoningTokens;
-    if (session.title === null && e.sessionTitle !== null) session.title = e.sessionTitle;
-    perSession.set(e.sessionId, session);
-  }
-
-  let biggestDay: RecordStats["biggestDay"] = null;
-  for (const [key, day] of perDay) {
-    if (biggestDay === null || day.tokens > biggestDay.tokens) {
-      biggestDay = { key, tokens: day.tokens, cost: day.cost };
-    }
-  }
-
-  // Streaks walk real calendar ordinals so gaps break them correctly.
-  const activeOrdinals = new Set(
-    [...perDay.keys()].map((key) => Math.floor(Date.parse(`${key}T12:00:00Z`) / DAY_MS)),
-  );
-  let longestStreak = 0;
-  let run = 0;
-  let cursor = Math.floor(Date.parse("2000-01-01T12:00:00Z") / DAY_MS);
-  const lastOrdinal = Math.floor(Date.now() / DAY_MS);
-  let currentStreak = 0;
-  for (let ordinal = cursor; ordinal <= lastOrdinal; ordinal++) {
-    if (activeOrdinals.has(ordinal)) {
-      run += 1;
-      if (run > longestStreak) longestStreak = run;
-    } else {
-      run = 0;
-    }
-  }
-  // Current streak counts back from today; an inactive today doesn't break it
-  // until tomorrow (GitHub convention).
-  cursor = lastOrdinal;
-  if (!activeOrdinals.has(cursor)) cursor -= 1;
-  while (activeOrdinals.has(cursor)) {
-    currentStreak += 1;
-    cursor -= 1;
-  }
-
-  let topSession: RecordStats["topSession"] = null;
-  for (const [sessionId, session] of perSession) {
-    if (topSession === null || session.cost > topSession.cost) {
-      topSession = {
-        sessionId,
-        title: session.title,
-        client: session.client,
-        cost: session.cost,
-        tokens: session.tokens,
-      };
-    }
-  }
-
-  return { biggestDay, longestStreak, currentStreak, topSession };
+  return computeRecords(events, timeZone);
 }
 
 export interface BreakdownRow extends Totals {
