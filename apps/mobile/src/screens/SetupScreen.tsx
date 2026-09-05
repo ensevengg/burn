@@ -29,7 +29,7 @@ export function SetupScreen() {
         <Card>
           <Text style={[type.h2, { color: C.text }]}>Try it instantly</Text>
           <Text style={[type.muted, { color: C.muted, marginVertical: spacing.s }]}>
-            Loads a bundled 30-day dataset (Codex, Z.ai, OpenCode across three machines) into the local cache.
+            Loads a bundled 120-day dataset (Codex, Z.ai, OpenCode across three machines) into the local cache.
           </Text>
           {busy === "demo" ? (
             <ActivityIndicator color={C.text} />
