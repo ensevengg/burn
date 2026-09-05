@@ -1,0 +1,19 @@
+{
+  "name": "@burn/sync-api",
+  "version": "0.1.0",
+  "description": "burn's backend contract: domain types, SyncApi interfaces, upsert key definitions, and the Supabase implementation (the only place supabase-js is allowed)",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "@types/bun": "^1.2.0"
+  }
+}
