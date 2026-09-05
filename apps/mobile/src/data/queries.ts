@@ -50,9 +50,11 @@ export function useGranularityMaxQuery(granularity: Granularity) {
   );
 }
 
-export function useDailyTotalsQuery() {
+export function useDailyTotalsQuery(days: number) {
   const { reportingTimezone } = useApp();
-  return useDbQuery(["daily-totals", reportingTimezone], (db) => queryDailyTotals(db, reportingTimezone, 365));
+  return useDbQuery(["daily-totals", reportingTimezone, days], (db) =>
+    queryDailyTotals(db, reportingTimezone, days),
+  );
 }
 
 export function useRecordsQuery() {

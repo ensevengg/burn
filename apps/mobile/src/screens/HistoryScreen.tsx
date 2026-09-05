@@ -37,17 +37,21 @@ export function HistoryScreen() {
   const window = WINDOWS.find((w) => w.value === windowValue) ?? WINDOWS[1]!;
   const history = useHistoryQuery(window.granularity, groupBy, window.days);
   const granularityMax = useGranularityMaxQuery(window.granularity);
-  const dailyTotals = useDailyTotalsQuery();
+  const dailyTotals = useDailyTotalsQuery(window.days);
   const records = useRecordsQuery();
   const { C } = useTheme();
   const { reportingTimezone } = useApp();
 
+  // Stack keys ordered by total usage, most used first — bottom layer and top
+  // of the legend are the dominant model/agent (user expectation).
   const stackKeys = useMemo(() => {
-    const keys = new Set<string>();
+    const totalsByKey = new Map<string, number>();
     for (const bucket of history.data?.series ?? []) {
-      for (const key of Object.keys(bucket.stacks)) keys.add(key);
+      for (const [key, tokens] of Object.entries(bucket.stacks)) {
+        totalsByKey.set(key, (totalsByKey.get(key) ?? 0) + tokens);
+      }
     }
-    return [...keys].sort();
+    return [...totalsByKey.entries()].sort((a, b) => b[1] - a[1]).map(([key]) => key);
   }, [history.data]);
 
   const colorFor = useMemo(() => {
@@ -73,6 +77,21 @@ export function HistoryScreen() {
       };
     });
   }, [window.granularity, groupBy, history.data]);
+
+  // Ranked rows under the chart when By model/agent is active (user feedback:
+  // "By model" should show models from most used to least used).
+  const ranked = useMemo(() => {
+    if (groupBy === "none" || history.data === undefined) return null;
+    const totalsByKey = new Map<string, number>();
+    for (const bucket of history.data.series) {
+      for (const [key, tokens] of Object.entries(bucket.stacks)) {
+        totalsByKey.set(key, (totalsByKey.get(key) ?? 0) + tokens);
+      }
+    }
+    return [...totalsByKey.entries()]
+      .map(([key, tokens]) => ({ key, tokens }))
+      .sort((a, b) => b.tokens - a.tokens);
+  }, [groupBy, history.data]);
 
   const totals = history.data?.totals;
 
@@ -103,9 +122,13 @@ export function HistoryScreen() {
               </View>
             </Card>
 
-            <SectionTitle trailing="last 365 days · tap a day">Contribution</SectionTitle>
+            <SectionTitle trailing="tap a day">Contribution</SectionTitle>
             <Card>
-              <ContributionGrid totals={dailyTotals.data} timeZone={reportingTimezone} />
+              <ContributionGrid
+                totals={dailyTotals.data}
+                timeZone={reportingTimezone}
+                weeks={Math.min(Math.ceil(window.days / 7), 53)}
+              />
             </Card>
 
             <SectionTitle>Records</SectionTitle>
@@ -124,6 +147,41 @@ export function HistoryScreen() {
                   height={240}
                 />
               </Card>
+            )}
+
+            {ranked !== null && ranked.length > 0 && (
+              <>
+                <SectionTitle trailing={`most used · ${groupBy === "model" ? "models" : "agents"}`}>
+                  Ranked
+                </SectionTitle>
+                <Card>
+                  {ranked.map((row, index) => {
+                    const top = ranked[0]!.tokens || 1;
+                    return (
+                      <View key={row.key} style={{ marginTop: index === 0 ? 0 : spacing.s }}>
+                        <View style={styles.rankedRow}>
+                          <Text style={[type.body, { color: C.text, flex: 1 }]} numberOfLines={1}>
+                            {`${index + 1}. ${humanize(row.key)}`}
+                          </Text>
+                          <Text style={[type.muted, { color: C.muted }]}>
+                            {`${formatTokens(row.tokens)} · ${formatPercent(totals === undefined ? 0 : row.tokens / (totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens + totals.reasoningTokens))}`}
+                          </Text>
+                        </View>
+                        <View style={[styles.rankTrack, { backgroundColor: C.panelAlt }]}>
+                          <View
+                            style={{
+                              width: `${(row.tokens / top) * 100}%`,
+                              height: "100%",
+                              backgroundColor: colorFor(row.key),
+                              borderRadius: 999,
+                            }}
+                          />
+                        </View>
+                      </View>
+                    );
+                  })}
+                </Card>
+              </>
             )}
 
             {rateSeries.length > 0 && (
@@ -211,5 +269,7 @@ const styles = StyleSheet.create({
   title: { marginHorizontal: spacing.l, marginTop: spacing.m, marginBottom: spacing.s },
   mixRow: { flexDirection: "row", justifyContent: "space-between" },
   mixTrack: { height: 5, borderRadius: 999, overflow: "hidden", marginTop: 4 },
+  rankedRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  rankTrack: { height: 5, borderRadius: 999, overflow: "hidden", marginTop: 4 },
   priciestRow: { flexDirection: "row", borderTopWidth: 1, marginTop: spacing.m, paddingTop: spacing.m },
 });
