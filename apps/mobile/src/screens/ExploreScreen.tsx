@@ -57,26 +57,24 @@ function BreakdownList({ rows, label }: { rows: BreakdownRow[] | undefined; labe
   return (
     <>
       <SectionTitle trailing={`by spend · ${label}`}>{rows.length} rows</SectionTitle>
-      {rows.map((row) => (
-        <Card key={row.key}>
-          <View style={styles.rowHeader}>
-            <Text style={[type.h2, { color: C.text }]} numberOfLines={1}>
-              {humanize(row.title)}
-            </Text>
-            <Text style={[type.body, { color: C.muted, fontWeight: "700" }]}>{formatCost(row.cost)}</Text>
+      <Card>
+        {rows.map((row, index) => (
+          <View key={row.key} style={{ marginTop: index === 0 ? 0 : spacing.m }}>
+            <View style={styles.rowHeader}>
+              <Text style={[type.body, { color: C.text, flex: 1, fontWeight: "600" }]} numberOfLines={1}>
+                {`${index + 1}. ${humanize(row.title)}`}
+              </Text>
+              <Text style={[type.body, { color: C.muted, fontWeight: "700" }]}>{formatCost(row.cost)}</Text>
+            </View>
+            <MeterBar usedPercent={(row.cost / maxCost) * 100} tone={C.text} />
+            <View style={styles.rowStats}>
+              <Text style={[type.muted, { color: C.muted }]}>
+                {`${humanize(row.subtitle ?? "")} · ${formatTokens(row.outputTokens)} out · cache ${formatPercent(row.hitRate)}`}
+              </Text>
+            </View>
           </View>
-          {row.subtitle !== null && <Text style={[type.muted, { color: C.muted }]}>{humanize(row.subtitle)}</Text>}
-          <MeterBar usedPercent={(row.cost / maxCost) * 100} tone={C.text} />
-          <View style={styles.rowStats}>
-            <Text style={[type.muted, { color: C.muted }]}>
-              {`${formatTokens(row.inputTokens + row.cacheReadTokens + row.cacheWriteTokens)} in`}
-              {` · ${formatTokens(row.outputTokens)} out`}
-              {` · cache ${formatPercent(row.hitRate)}`}
-              {` · ${row.messages} msgs`}
-            </Text>
-          </View>
-        </Card>
-      ))}
+        ))}
+      </Card>
     </>
   );
 }
