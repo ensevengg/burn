@@ -1,0 +1,25 @@
+{
+  "name": "burn-report",
+  "version": "0.1.0",
+  "description": "burn's machine-side reporter: pushes tokscale usage + vendor quotas to your own Supabase (run via npx burn-report)",
+  "type": "module",
+  "bin": {
+    "burn-report": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun src/index.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@burn/sync-api": "workspace:*",
+    "@supabase/supabase-js": "^2.45.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "@types/node": "^26.4.1",
+    "typescript": "^5.9.2"
+  }
+}
