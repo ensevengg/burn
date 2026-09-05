@@ -1,0 +1,12 @@
+{
+  "name": "burn-monorepo",
+  "private": true,
+  "description": "burn — token burn-rate tracker for AI coding agents (Android app + machine reporter)",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "typecheck": "bun run --cwd packages/sync-api typecheck && bun run --cwd apps/reporter typecheck && bun run --cwd apps/mobile typecheck",
+    "test": "bun run --cwd packages/sync-api test && bun run --cwd apps/reporter test && bun run --cwd apps/mobile test",
+    "reporter": "bun run --cwd apps/reporter dev --",
+    "mobile": "bun run --cwd apps/mobile start"
+  }
+}
