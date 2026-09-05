@@ -24,6 +24,7 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           os_kind text not null,
           reporter_version text,
           tokscale_version text,
+          export_schema integer,
           reporting_timezone text,
           last_heartbeat_at text,
           last_success_at text,
@@ -82,6 +83,13 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
         );
         create table if not exists kv (key text primary key, value text not null);
       `);
+      // C1 parity: installs created before export_schema existed get the column
+      // added here; fresh installs already have it from the create block.
+      try {
+        await db.execAsync("alter table environments add column export_schema integer");
+      } catch {
+        /* column already exists */
+      }
       return db;
     })();
   }

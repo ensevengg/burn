@@ -35,8 +35,8 @@ export async function seedDemoData(db: SQLiteDatabase): Promise<void> {
       envId[env.slug] = id;
       await db.runAsync(
         `insert or replace into environments
-           (id, slug, display_name, host_group, os_kind, tokscale_version, reporting_timezone, last_heartbeat_at, last_success_at, latest_revision)
-         values (?, ?, ?, ?, ?, '4.15.1', ?, ?, ?, 1)`,
+           (id, slug, display_name, host_group, os_kind, tokscale_version, export_schema, reporting_timezone, last_heartbeat_at, last_success_at, latest_revision)
+         values (?, ?, ?, ?, ?, '4.15.1', 1, ?, ?, ?, 1)`,
         [
           id,
           env.slug,
@@ -119,12 +119,13 @@ export async function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
         await db.runAsync(
           `insert into environments
              (id, slug, display_name, host_group, os_kind, reporter_version, tokscale_version,
-              reporting_timezone, last_heartbeat_at, last_success_at, last_error, latest_revision)
-           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              export_schema, reporting_timezone, last_heartbeat_at, last_success_at, last_error, latest_revision)
+           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            on conflict (id) do update set
              slug = excluded.slug, display_name = excluded.display_name,
              host_group = excluded.host_group, os_kind = excluded.os_kind,
              reporter_version = excluded.reporter_version, tokscale_version = excluded.tokscale_version,
+             export_schema = excluded.export_schema,
              reporting_timezone = excluded.reporting_timezone,
              last_heartbeat_at = excluded.last_heartbeat_at, last_success_at = excluded.last_success_at,
              last_error = excluded.last_error, latest_revision = excluded.latest_revision`,
@@ -136,6 +137,7 @@ export async function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
             env.osKind,
             env.reporterVersion,
             env.tokscaleVersion,
+            env.exportSchema,
             env.reportingTimezone,
             env.lastHeartbeatAt,
             env.lastSuccessAt,
@@ -193,35 +195,36 @@ export async function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
     if (!delta.hasMore || delta.events.length === 0) break;
   }
 
-  // Quotas are freshness-selected server-side; mirror replaces wholesale.
-  const quotas = await phone.fetchQuotaLatest();
-  await db.withTransactionAsync(async () => {
-    await db.runAsync("delete from quota_snapshots");
-    for (const q of quotas) {
-      await db.runAsync(
-        `insert into quota_snapshots
-           (row_key, environment_id, provider, account_key, account_label, plan, metric,
-            used_percent, remaining_percent, remaining_label, resets_at, status, error, fetched_at)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          `${q.provider}|${q.accountKey}|${q.metric}`,
-          q.environmentId,
-          q.provider,
-          q.accountKey,
-          q.accountLabel,
-          q.plan,
-          q.metric,
-          q.usedPercent,
-          q.remainingPercent,
-          q.remainingLabel,
-          q.resetsAt,
-          q.status,
-          q.error,
-          q.fetchedAt,
-        ],
-      );
-    }
-  });
+    // Env-scoped row keys (C2): same scheme as the demo mirror, so a future
+    // per-environment quota stream can't silently collide.
+    const quotas = await phone.fetchQuotaLatest();
+    await db.withTransactionAsync(async () => {
+      await db.runAsync("delete from quota_snapshots");
+      for (const q of quotas) {
+        await db.runAsync(
+          `insert into quota_snapshots
+             (row_key, environment_id, provider, account_key, account_label, plan, metric,
+              used_percent, remaining_percent, remaining_label, resets_at, status, error, fetched_at)
+           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            `${q.environmentId ?? "no-env"}|${q.provider}|${q.accountKey}|${q.metric}`,
+            q.environmentId,
+            q.provider,
+            q.accountKey,
+            q.accountLabel,
+            q.plan,
+            q.metric,
+            q.usedPercent,
+            q.remainingPercent,
+            q.remainingLabel,
+            q.resetsAt,
+            q.status,
+            q.error,
+            q.fetchedAt,
+          ],
+        );
+      }
+    });
 
   return { pulledEvents, pages, watermark };
 }
