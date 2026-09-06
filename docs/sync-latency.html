@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>burn — sync latency deep dive (machine → server → phone)</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0e14;
+      --panel: #121722;
+      --panel-2: #171e2b;
+      --border: #2a3445;
+      --text: #e8edf5;
+      --muted: #9aa7ba;
+      --blue: #72a7ff;
+      --green: #7ee2a8;
+      --yellow: #f3c969;
+      --red: #ff8d8d;
+      --purple: #c6a0ff;
+      --code: #202838;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.65 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1040px; margin: 0 auto; padding: 42px 24px 84px; }
+    h1, h2, h3 { line-height: 1.25; letter-spacing: -0.02em; }
+    h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 2.55rem); }
+    h1 code { color: var(--yellow); }
+    h2 { margin: 50px 0 16px; padding-bottom: 9px; border-bottom: 1px solid var(--border); font-size: 1.35rem; }
+    h3 { margin: 26px 0 8px; font-size: 1.05rem; color: var(--green); }
+    p { margin: 8px 0 12px; }
+    a { color: var(--blue); }
+    code {
+      padding: 1px 6px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--code);
+      color: #d9e7ff;
+      font-size: 0.9em;
+    }
+    pre {
+      overflow-x: auto;
+      margin: 14px 0;
+      padding: 15px 18px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #0d121b;
+      color: #d7e2f3;
+      line-height: 1.5;
+      font-size: 0.86rem;
+    }
+    pre code { padding: 0; border: 0; background: transparent; }
+    ul, ol { padding-left: 24px; }
+    li { margin: 5px 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { padding: 9px 11px; border: 1px solid var(--border); text-align: left; vertical-align: top; }
+    th { background: var(--panel-2); }
+    tr:nth-child(even) td { background: #0f141e; }
+    .subtitle { max-width: 860px; margin-top: 8px; color: var(--muted); }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0 30px; }
+    .chip {
+      padding: 3px 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+    .chip.green { color: var(--green); border-color: #2e6846; }
+    .chip.yellow { color: var(--yellow); border-color: #705f33; }
+    .card {
+      margin: 14px 0;
+      padding: 17px 20px;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: var(--panel);
+    }
+    .card h3 { margin-top: 0; }
+    .callout {
+      margin: 16px 0;
+      padding: 14px 17px;
+      border-left: 4px solid var(--blue);
+      border-radius: 0 9px 9px 0;
+      background: var(--panel-2);
+    }
+    .callout.warn { border-left-color: var(--yellow); }
+    .callout.danger { border-left-color: var(--red); }
+    .callout.good { border-left-color: var(--green); }
+    .label {
+      display: inline-block;
+      margin-right: 7px;
+      padding: 1px 7px;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: 750;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      vertical-align: 1px;
+    }
+    .label.quick { background: #173524; color: var(--green); }
+    .label.struct { background: #262344; color: var(--purple); }
+    .label.server { background: #173049; color: var(--blue); }
+    .label.config { background: #41371d; color: var(--yellow); }
+    .label.later { background: #2a3445; color: var(--muted); }
+    .muted { color: var(--muted); }
+    footer { margin-top: 54px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.84rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1><code>burn</code> — sync latency deep dive</h1>
+  <p class="subtitle">Where fetch time goes on the machine → Supabase → phone path, and a ranked list of optimizations. Grounded in a read of the full pipeline: reporter/daemon (<code>apps/reporter/src</code>), the exporter (<code>crates/burn-events</code>), the wire layer (<code>packages/sync-api/src/supabase.ts</code>), the RPCs (<code>supabase/migrations/0002_api.sql</code>, <code>0005</code>), and the phone's pull path (<code>apps/mobile/src/lib</code>). No code was changed for this document.</p>
+
+  <div class="meta">
+    <span class="chip">2026-09-06</span>
+    <span class="chip">scope: machine → server → phone freshness</span>
+    <span class="chip green">analysis only — no code changes</span>
+    <span class="chip yellow">companion to docs/mobile-performance-audit.md (on-device rendering, not covered here)</span>
+  </div>
+
+  <h2>TL;DR</h2>
+  <div class="callout">
+    <p>The wire protocol is already right — revision-keyed deltas with the <code>0005</code> index, a 1h overlap window, parallel event/quota pushes, and a 6s phone follow-up loop. End-to-end latency is dominated by <strong>two costs that are not network costs</strong>:</p>
+    <ol>
+      <li>The daemon's hardcoded <strong>30s poll</strong> of <code>sync_requests</code> — on average 15s of pure waiting before the machine even notices a phone request (<code>commands.ts:371</code>).</li>
+      <li>The exporter's <strong>full rescan on every cycle</strong> — every push re-parses all client history (~12s at 27k records, growing linearly) just to emit the last hour of events (<code>main.rs:141</code> vs the filter at <code>:168</code>).</li>
+    </ol>
+    <p>Fixing those, plus caching per-process version spawns and one SQL nit, takes a manual pull-to-refresh round trip from <strong>~20–45s today to ~8–15s</strong> — without touching any D-decision. A further upstream change (parse only files modified since the cursor) makes the "fresh data exists" case proportional to new data instead of to total history.</p>
+  </div>
+
+  <h2>How freshness works today</h2>
+  <p>Three clocks govern staleness. The eager path is the only one a user can feel, so it is the one this document optimizes.</p>
+  <table>
+    <tr><th>Path</th><th>Trigger</th><th>Worst-case staleness</th><th>Where</th></tr>
+    <tr>
+      <td>Scheduled floor (D1)</td>
+      <td>10-min cron + run-on-wake catch-up</td>
+      <td>~10 min (push) + ~1 min (phone pull cadence)</td>
+      <td><code>config.intervalMinutes</code>, <code>app-context.tsx:149</code></td>
+    </tr>
+    <tr>
+      <td>Daemon eager path (D1)</td>
+      <td>Phone writes <code>burn_request_sync</code>; daemon polls every 30s</td>
+      <td>~20–45s round trip (see budget below)</td>
+      <td><code>commands.ts:356-371</code></td>
+    </tr>
+    <tr>
+      <td>Phone pull cadence</td>
+      <td>App mount, foreground, every active minute, 6s follow-up after a manual request</td>
+      <td>~1s per pull</td>
+      <td><code>app-context.tsx:143-157</code>, <code>refresh.ts</code></td>
+    </tr>
+  </table>
+
+  <p>The pipeline for one eager cycle:</p>
+  <pre><code>[phone] pull-to-refresh ──request_sync──▶ [Supabase: burn.sync_requests]
+                                                ▲ 30s poll → avg 15s idle wait
+[daemon] ◀── burn_poll_sync_requests ───────────┘
+   │  heartbeat  (spawns `bun x tokscale@pin --version` every cycle — 1–3s)
+   ├─ burn-events --since-ms   →  FULL history rescan (~12s @ 27k records, linear growth)
+   ├─ zod validate → 500-row batches → burn_ingest_events (serial, ~1–2 batches)
+   └─ tokscale usage --json → burn_push_quota_snapshot   (parallel with events)
+[phone] 6s follow-up loop ──burn_fetch_delta──▶ SQLite mirror → UI</code></pre>
+
+  <h2>Latency budget — manual pull-to-refresh, warm daemon</h2>
+  <table>
+    <tr><th>Step</th><th>Cost today</th><th>Cause</th><th>Reference</th></tr>
+    <tr>
+      <td>Phone writes <code>burn_request_sync</code> + first delta pull</td>
+      <td>~0.4–1s</td>
+      <td>2 serial RPCs; the dashboard already triggers this (<code>DashboardScreen.tsx:56</code>)</td>
+      <td><code>app-context.tsx:200-230</code></td>
+    </tr>
+    <tr>
+      <td><strong>Daemon notices the request</strong></td>
+      <td><strong>0–30s (avg 15s)</strong></td>
+      <td>Fixed <code>setInterval(…, 30_000)</code> poll</td>
+      <td><code>commands.ts:371</code></td>
+    </tr>
+    <tr>
+      <td>Daemon heartbeat</td>
+      <td>~1–3s</td>
+      <td>Re-spawns <code>bun x tokscale@pin --version</code> every cycle (runner path is cached, the spawn is not)</td>
+      <td><code>commands.ts:332</code>, <code>tokscale.ts:117-125</code></td>
+    </tr>
+    <tr>
+      <td><strong>Exporter scan</strong></td>
+      <td><strong>~12s @ 27k records, growing</strong></td>
+      <td><code>parse_local_unified_messages_with_pricing</code> reads <em>all</em> client files; <code>--since-ms</code> filters <em>after</em> the scan</td>
+      <td><code>main.rs:141-142</code> → filter at <code>:168-172</code></td>
+    </tr>
+    <tr>
+      <td>Push batches (≈1h overlap window)</td>
+      <td>~0.3–1.5s</td>
+      <td>1–2 batches × ≤500 rows; serial loop is fine at this size</td>
+      <td><code>commands.ts:251-260</code>, <code>events.ts:187,197</code></td>
+    </tr>
+    <tr>
+      <td>Phone notices + applies delta</td>
+      <td>~3–4s avg</td>
+      <td>6s follow-up cadence + 1 delta RPC + SQLite commit</td>
+      <td><code>refresh.ts:15,27</code>, <code>sync-cloud.ts</code></td>
+    </tr>
+    <tr>
+      <td><strong>Total</strong></td>
+      <td><strong>~20–45s</strong></td>
+      <td>dominated by the two bold rows</td>
+      <td></td>
+    </tr>
+  </table>
+  <p class="muted">Every RPC above also pays Supabase RTT — see recommendation 8 for the region multiplier.</p>
+
+  <h2>Recommendations, ranked</h2>
+
+  <div class="card">
+    <h3><span class="label quick">quick win</span>1. Cut the daemon poll to 10–15s</h3>
+    <p><code>burn_poll_sync_requests</code> is one token check + a tiny select/update (<code>0002_api.sql:243-274</code>). Polling every 10s — even 5s — is noise for a free-tier Supabase project. This alone removes ~10s of average wait and is a one-line change (plus making it configurable, e.g. <code>pollSeconds</code> in <code>BurnConfig</code>). Zero correctness risk.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="label quick">quick win</span>2. Cache version probes per process</h3>
+    <p>The daemon is long-lived, but every heartbeat/push re-spawns <code>bun x tokscale@pin --version</code> (<code>commands.ts:270,332</code>) and <code>burn-events --version</code> (<code>exporter.ts:49-57</code>). Both binaries are fixed for the process lifetime — resolve once, cache the string. <code>resolveRunner</code>/<code>resolveExporter</code> already cache the <em>runner choice</em>; the remaining spawn per call is what costs. Free ~1–3s per cycle.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="label quick">quick win</span><span class="label server">server</span>3. Fix the idle-pull <code>has_more</code> count</h3>
+    <p>When nothing changed, <code>burn_fetch_delta</code> returns an empty events array, so <code>v_max_rev</code> is 0 and <code>has_more</code> executes <code>select count(*) from usage_events where revision &gt; 0</code> — a full-index count of the <strong>entire table, on every phone poll, every active minute</strong> (<code>0002_api.sql:315</code>). Replace with <code>exists(select 1 …)</code>. Trivial, and it removes a per-minute O(n) server cost that grows with history. One new migration line.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="label struct">structural</span>4a. Skip the rescan when nothing changed (fingerprint skip)</h3>
+    <p>Every cycle re-parses all history to emit ~1h of events. Add a cheap fingerprint pass to <code>burn-events</code>:</p>
+    <ul>
+      <li><code>burn-events --check</code> stats the client data dirs (mtime + size, ~50ms, no parsing) and prints a stable hash.</li>
+      <li>The reporter caches the hash; on the next cycle it runs <code>--check</code> first and skips the full scan + push entirely when the hash is unchanged.</li>
+    </ul>
+    <p>Idle cycles drop from ~12s CPU+disk to ~50ms + two small RPCs. This matters more than it looks: scan time grows linearly with history (27k today; years of Claude Code sessions could be minutes), so without it the 10-min cron eventually <em>cannot keep up</em> — the scan would outlast the interval.</p>
+    <div class="callout warn">
+      <p><strong>The subtle part — failed-push invalidation.</strong> The skip is safe because an unchanged file set means everything in it was already pushed, regardless of the <code>--since-ms</code> window. But if a push <em>fails</em> after a scan, the cursor does not advance (<code>commands.ts:261</code>) — and a naive hash cache would make the next cycle report "nothing changed", push 0 rows, advance the cursor, and <strong>silently drop the un-pushed events</strong> until the next file change re-triggers a scan (whose window no longer includes them). Rule: the reporter must clear its cached hash whenever a push fails, so the next cycle rescans. Add a regression test for exactly this sequence: scan → failed push → rescan → same events re-emitted.</p>
+    </div>
+    <p>D2-safe by construction: the fingerprint decides <em>whether to invoke</em> tokscale's pipeline — it never reimplements provider parsing. Worth a quick grep of <code>ScannerSettings</code> in <code>reference/tokscale</code> first, in case upstream already exposes something exploitable.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="label struct">structural</span><span class="label later">upstream</span>4b. Parse only what changed (the deeper fix)</h3>
+    <p>The fingerprint skip makes idle cycles free, but a cycle with <em>new</em> data still pays a full-history scan. The complete fix is pushing <code>--since-ms</code> down into tokscale-core: client files are append-only JSONL/SQLite, so files untouched since the cursor can be skipped entirely, making scan cost proportional to new data. This is upstream-PR territory and pairs naturally with the intended <code>tokscale events --jsonl</code> PR that eventually replaces the exporter binary (D2). Until then, 4a is the local, immediate win.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="label quick">quick win</span>5. Fold the heartbeat into the push</h3>
+    <p><code>burn_ingest_events</code> and <code>burn_push_quota_snapshot</code> already set <code>last_heartbeat_at = now()</code> and <code>last_success_at = now()</code> (<code>0002_api.sql:97-103, 234-236</code>) — so the standalone heartbeat RPC before every push (<code>commands.ts:330-335</code>) is a redundant serial round trip. Keep it only as a low-frequency liveness beacon (e.g. every Nth poll, or once per scheduled interval) for machines with nothing to push.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="label quick">quick win</span>6. Parallelize batch ingest</h3>
+    <p><code>pushEvents</code> sends 500-row batches serially (<code>commands.ts:251</code>). Fine for the 1-hour overlap window (1–2 batches), but a <code>--full</code> correction pass at 27k rows is 54 sequential RTTs ≈ 15–25s of upload. 3–4 batches in flight cuts that to ~4–6s. Parallel is safe: each batch bumps its own revision server-side, and the phone loops until <code>has_more</code> is false, so interleaved revision commits resolve on a later page.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="label quick">quick win</span><span class="label server">phone</span>7. Backfill page and chunk sizing</h3>
+    <p>First-sync only, but the most visible "slow" moment a new user feels:</p>
+    <ul>
+      <li><code>fetchDelta</code> defaults to <code>p_limit = 5000</code> with <code>MAX_PAGES = 8</code> (<code>supabase.ts:267</code>, <code>sync-cloud.ts:13</code>) — a 27k backfill is 6 sequential ~2–3MB round trips. Pushing toward the server's 20,000 cap during backfill (when <code>hasMore</code> is driving) halves the trips.</li>
+      <li>The 32-row insert chunk (<code>sync-cloud.ts:81-90</code>) means 157 awaited statements per page. The comment itself notes expo-sqlite's bundled SQLite allows ~32k parameters — 500-row chunks (14,000 params) are safe and mean 15× fewer bridge calls. Keep a guard comment updating the binding math, as the current one does.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3><span class="label config">config</span>8. Supabase region — the fixed multiplier</h3>
+    <p>Every hop in the budget table is multiplied by RTT. If the project is not in a region near the phone (Mumbai / <code>ap-south-1</code> for this user), each refresh pays 200–300ms across ~6–8 serial round trips, in both directions. A region cannot be changed after project creation — so this is documentation work: say it in the <code>init</code> output, <code>doctor</code>, and the Supabase README ("create the project in the region nearest your phone"). Biggest single fixed-cost win for BYO users, and it is free.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="label later">later</span>9. Supabase Realtime as the rendezvous</h3>
+    <p>A broadcast channel on the user's own Supabase would wake the daemon in ~1s instead of the poll interval. It is D3-compatible only if the realtime client lives inside <code>packages/sync-api</code>, and D12-compatible since it is the user's own project. But it adds a persistent websocket per machine and a new failure surface, and the 10s poll already captures ~90% of the win for ~zero complexity. Trade-off to note if ever built: a public broadcast channel is writable by anyone holding the anon key — spam-able "sync requested" messages, which are harmless <em>after</em> 4a (a no-change cycle costs ~50ms). Park unless recommendation 1 proves insufficient.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="label config">config</span>10. Spend the savings: tighten the scheduled floor</h3>
+    <p>After 4a, an idle cycle costs ~50ms of exporter work plus a few small RPCs — which makes <code>intervalMinutes: 10 → 5</code> (or even 3) essentially free. Passive staleness drops from ~11 min to ~6 min without any new machinery. Do this <em>after</em> the scan-skip lands, not before, or you pay the full rescan twice as often.</p>
+  </div>
+
+  <h2>Expected effect</h2>
+  <table>
+    <tr><th>Path segment</th><th>Today</th><th>Quick wins (1, 2, 3, 5)</th><th>+ scan-skip (4a)</th><th>+ upstream pushdown (4b)</th></tr>
+    <tr><td>Rendezvous wait</td><td>0–30s (avg 15s)</td><td>0–10s (avg 5s)</td><td>—</td><td>—</td></tr>
+    <tr><td>Heartbeat + version spawns</td><td>~1–3s</td><td>~0.3s</td><td>—</td><td>—</td></tr>
+    <tr><td>Exporter scan</td><td>~12s every cycle</td><td>~12s</td><td><strong>~0.1s when unchanged</strong>; ~12s only when data actually changed</td><td>proportional to new data (sub-second typically)</td></tr>
+    <tr><td>Push + phone pickup</td><td>~4–6s</td><td>~4–6s</td><td>—</td><td>—</td></tr>
+    <tr><td><strong>Manual refresh, idle machine</strong></td><td><strong>~20–45s</strong></td><td><strong>~8–15s</strong></td><td><strong>~5–8s</strong></td><td>—</td></tr>
+    <tr><td><strong>Manual refresh, fresh tokens just written</strong></td><td>~20–45s</td><td>~15–25s</td><td>~18–25s (scan still needed)</td><td><strong>~3–6s</strong></td></tr>
+    <tr><td>Idle daemon cycle cost</td><td>~15s CPU + 2 RPCs</td><td>~1–3s</td><td><strong>~50ms + 2 RPCs</strong></td><td>—</td></tr>
+  </table>
+  <p class="muted">The honest framing: the scan is only removable when nothing changed. When data exists, 4a still rescans — that is exactly the moment the work is worth doing. 4b is what makes the "user just used tokens and pulls to refresh" case fast.</p>
+
+  <h2>What is already right — do not touch</h2>
+  <div class="callout good">
+    <ul>
+      <li><strong>Revision-based deltas (D5)</strong> with the <code>0005 (revision, event_id)</code> index — the pull itself is a single indexed query; not the bottleneck.</li>
+      <li><strong>The 1h overlap window</strong> (<code>events.ts:187</code>) — re-upserts are server-side no-ops that never advance the phone's watermark; the correctness mechanism is sound.</li>
+      <li><strong>Parallel events/quotas within a cycle</strong> (<code>commands.ts:289</code>) and independent failure handling.</li>
+      <li><strong>The 2-minute/6s bounded follow-up</strong> (<code>refresh.ts</code>) — this closed the earlier audit's "refresh finishes before a machine pushes" finding; it covers the 30s poll plus upload with margin.</li>
+      <li><strong>Dashboard-triggered <code>requestSync</code></strong> (<code>DashboardScreen.tsx:56</code>) — the eager path covers casual pull-to-refresh, not just the Machines tab.</li>
+      <li><strong>Phone→server direction</strong> — <code>burn_request_sync</code> is one cheap RPC; it is not part of the problem.</li>
+    </ul>
+  </div>
+
+  <h2>Suggested order</h2>
+  <ol>
+    <li><strong>#1 poll 10s</strong> — minutes; halves average wait.</li>
+    <li><strong>#2 cache version strings</strong> — minutes; kills a per-cycle spawn.</li>
+    <li><strong>#3 <code>has_more</code> exists</strong> — minutes; one migration, removes per-minute O(n) server work.</li>
+    <li><strong>#5 fold heartbeat</strong> — small; one less serial RTT per cycle.</li>
+    <li><strong>#4a fingerprint skip</strong> — the structural fix. Exporter <code>--check</code> + reporter-side hash cache + the failed-push invalidation rule + a regression test for scan → failed push → rescan.</li>
+    <li><strong>#10 tighten interval to 5 min</strong> — only after #4a.</li>
+    <li><strong>#8 region documentation</strong> — <code>init</code>/<code>doctor</code>/README note.</li>
+    <li><strong>#6 parallel batches, #7 backfill sizing</strong> — mechanical; matter for <code>--full</code> passes and first sync respectively.</li>
+    <li><strong>#4b upstream pushdown</strong> — ride the <code>tokscale events --jsonl</code> PR when it happens.</li>
+    <li><strong>#9 Realtime rendezvous</strong> — only if the 10s poll ever feels slow.</li>
+  </ol>
+
+  <h2>Validating it</h2>
+  <p>Instrumentation mostly exists: the daemon already logs cycle duration (<code>commands.ts:344</code>) and the exporter prints scanned/emitted counts with elapsed time on stderr (<code>main.rs:190-193</code>). What is missing is an end-to-end number: log, on the phone, the interval between <code>request_sync</code> and the first delta pull containing an event newer than the request — that single timestamp is the metric this whole document optimizes. Before/after that number on a real machine is the acceptance test for items 1–5.</p>
+
+  <footer>
+    burn · sync latency deep dive · 2026-09-06 · analysis only, no code changed · companion to <code>docs/mobile-performance-audit.md</code>
+  </footer>
+</main>
+</body>
+</html>
