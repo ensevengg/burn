@@ -1,4 +1,4 @@
-import { StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { useTheme } from "../lib/theme-context";
 import type { ThemeColors } from "../theme";
 import { spacing, type } from "../theme";
@@ -101,10 +101,16 @@ export function Segmented<T extends string>({
       {options.map((option) => {
         const active = option.value === value;
         return (
-          <View
+          <Pressable
             key={option.value}
-            style={[styles.segment, { backgroundColor: active ? C.accent : "transparent" }]}
-            onTouchEnd={() => onChange(option.value)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: active }}
+            onPress={() => onChange(option.value)}
+            android_ripple={{ color: C.border, foreground: true, borderless: false }}
+            style={({ pressed }) => [
+              styles.segment,
+              { backgroundColor: active ? C.accent : "transparent", opacity: pressed && !active ? 0.6 : 1 },
+            ]}
           >
             <Text
               style={{
@@ -115,7 +121,7 @@ export function Segmented<T extends string>({
             >
               {option.label}
             </Text>
-          </View>
+          </Pressable>
         );
       })}
     </View>

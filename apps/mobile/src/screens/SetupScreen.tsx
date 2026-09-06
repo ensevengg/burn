@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useApp } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
@@ -34,15 +34,17 @@ export function SetupScreen() {
           {busy === "demo" ? (
             <ActivityIndicator color={C.text} />
           ) : (
-            <View
+            <Pressable
+              accessibilityRole="button"
+              android_ripple={{ color: C.accentInk, foreground: true, borderless: false }}
               style={[styles.actionButton, { backgroundColor: C.accent }]}
-              onTouchEnd={() => {
+              onPress={() => {
                 setBusy("demo");
                 void enterDemo().finally(() => setBusy(null));
               }}
             >
               <Text style={{ color: C.accentInk, fontWeight: "700" }}>Explore with demo data</Text>
-            </View>
+            </Pressable>
           )}
         </Card>
 
@@ -60,9 +62,12 @@ export function SetupScreen() {
           {busy === "cloud" ? (
             <ActivityIndicator color={C.text} />
           ) : (
-            <View
+            <Pressable
+              accessibilityRole="button"
+              disabled={!valid}
+              android_ripple={{ color: C.accentInk, foreground: true, borderless: false }}
               style={[styles.actionButton, { backgroundColor: C.accent, opacity: valid ? 1 : 0.35 }]}
-              onTouchEnd={() => {
+              onPress={() => {
                 if (!valid) return;
                 setBusy("cloud");
                 setError(null);
@@ -72,7 +77,7 @@ export function SetupScreen() {
               }}
             >
               <Text style={{ color: C.accentInk, fontWeight: "700" }}>Connect & sync</Text>
-            </View>
+            </Pressable>
           )}
         </Card>
       </ScrollView>
