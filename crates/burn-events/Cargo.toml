@@ -1,0 +1,16 @@
+[package]
+name = "burn-events"
+# Tracks the tokscale pin (TOKSCALE_PIN in packages/sync-api) — the reporter's
+# drift-guard test asserts these stay in lockstep. Bump both together.
+version = "4.15.1"
+edition = "2021"
+license = "MIT"
+description = "burn's D2 export seam: tokscale UnifiedMessage records as versioned JSONL"
+
+[dependencies]
+chrono = "0.4"
+iana-time-zone = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tokscale-core = { git = "https://github.com/junhoyeo/tokscale", tag = "v4.15.1" }
