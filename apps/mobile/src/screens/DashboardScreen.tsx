@@ -9,7 +9,7 @@ import { useApp } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
 import { spacing, type } from "../theme";
 import { Card, Chip, Dot, Empty, MeterBar, SectionTitle, Segmented, Stat } from "../ui/primitives";
-import { ScrollableAreaChart } from "../ui/charts";
+import { AreaChart } from "../ui/charts";
 
 type Metric = "cost" | "tokens";
 type WindowDays = 1 | 7 | 30 | 90;
@@ -110,7 +110,7 @@ export function DashboardScreen() {
           <Empty message={`No usage in the last ${days}d.`} />
         ) : (
           <Card>
-            <ScrollableAreaChart
+            <AreaChart
               points={overview.data.series.map((bucket) => ({
                 label: bucket.label,
                 value: metric === "cost" ? bucket.cost : bucket.tokens,
