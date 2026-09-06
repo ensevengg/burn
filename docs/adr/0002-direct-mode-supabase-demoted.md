@@ -1,6 +1,6 @@
 # ADR 0002 — Direct mode: machines as the backend, Supabase demoted to backup
 
-Status: **accepted, not yet implemented** (Phase-1 design pin) · Refines D3/D4 · Builds on [ADR 0001](0001-tailscale-direct-pull.md) · 2026-09-07
+Status: **implemented** on `feat/tailscale-live-pull` (commits `655fe34`, `f1491a6`) · Refines D3/D4 · Builds on [ADR 0001](0001-tailscale-direct-pull.md) · 2026-09-07
 
 ## Context
 
