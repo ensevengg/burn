@@ -5,6 +5,7 @@
  * no pre-bucketed day keys are ever stored.
  */
 import * as SQLite from "expo-sqlite";
+import { withWriteLock } from "./writelock";
 
 export type { SQLiteDatabase } from "expo-sqlite";
 
@@ -119,7 +120,12 @@ export async function kvSet(db: SQLite.SQLiteDatabase, key: string, value: strin
  * theme_mode) survive — they are user settings, not data (B2, first-check);
  * callers set `mode` explicitly after a reset.
  */
-export async function resetDb(db: SQLite.SQLiteDatabase): Promise<void> {
+export function resetDb(db: SQLite.SQLiteDatabase): Promise<void> {
+  return withWriteLock(() => wipeForReseed(db));
+}
+
+/** Same deletes as resetDb, for callers already holding the write lock. */
+export async function wipeForReseed(db: SQLite.SQLiteDatabase): Promise<void> {
   await db.withTransactionAsync(async () => {
     await db.runAsync("delete from usage_events");
     await db.runAsync("delete from environments");

@@ -6,6 +6,7 @@
  */
 import type { SQLiteDatabase } from "expo-sqlite";
 import { bucketKey, bucketLabel, type Granularity } from "../lib/format";
+import { withWriteLock } from "../lib/writelock";
 
 export const DAY_MS = 86_400_000;
 
@@ -387,11 +388,13 @@ export async function queryGranularityMax(
 }
 
 /** Local mirror deletion for machine removal (server row is deleted separately). */
-export async function removeEnvironmentLocal(db: SQLiteDatabase, environmentId: string): Promise<void> {
-  await db.withTransactionAsync(async () => {
-    await db.runAsync("delete from usage_events where environment_id = ?", [environmentId]);
-    await db.runAsync("delete from quota_snapshots where environment_id = ?", [environmentId]);
-    await db.runAsync("delete from environments where id = ?", [environmentId]);
+export function removeEnvironmentLocal(db: SQLiteDatabase, environmentId: string): Promise<void> {
+  return withWriteLock(async () => {
+    await db.withTransactionAsync(async () => {
+      await db.runAsync("delete from usage_events where environment_id = ?", [environmentId]);
+      await db.runAsync("delete from quota_snapshots where environment_id = ?", [environmentId]);
+      await db.runAsync("delete from environments where id = ?", [environmentId]);
+    });
   });
 }
 

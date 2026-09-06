@@ -4,7 +4,8 @@
  * mode: the bundled generator writes the same mirror schema locally.
  */
 import { createBurnBackend } from "@burn/sync-api";
-import { kvGet, kvSet, resetDb, type SQLiteDatabase } from "./db";
+import { kvGet, kvSet, wipeForReseed, type SQLiteDatabase } from "./db";
+import { withWriteLock } from "./writelock";
 import { loadConnection } from "./settings";
 import { generateDemoDataset, MODELS } from "../data/demo-generator";
 
@@ -25,9 +26,14 @@ export interface SyncResult {
   watermark: number;
 }
 
-export async function seedDemoData(db: SQLiteDatabase): Promise<void> {
+export function seedDemoData(db: SQLiteDatabase): Promise<void> {
+  // The lock spans wipe + seed: a double-tap must not interleave two seeds.
+  return withWriteLock(() => seedDemoDataUnlocked(db));
+}
+
+async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
   const dataset = generateDemoDataset();
-  await resetDb(db);
+  await wipeForReseed(db);
   const envId: Record<string, string> = {};
   await db.withTransactionAsync(async () => {
     for (const env of dataset.environments) {
@@ -118,7 +124,13 @@ export async function seedDemoData(db: SQLiteDatabase): Promise<void> {
   });
 }
 
-export async function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
+export function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
+  // Serialized: the mount pull, manual refresh, and the requestSync timer can
+  // all overlap; interleaved transactions tear each other down.
+  return withWriteLock(() => syncFromCloudUnlocked(db));
+}
+
+async function syncFromCloudUnlocked(db: SQLiteDatabase): Promise<SyncResult> {
   const connection = await loadConnection();
   if (connection === null) throw new Error("Not connected to a backend");
   const phone = createBurnBackend(connection).phone(connection.readToken);
