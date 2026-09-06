@@ -31,7 +31,8 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           last_heartbeat_at text,
           last_success_at text,
           last_error text,
-          latest_revision integer not null default 0
+          latest_revision integer not null default 0,
+          live_endpoint text
         );
         create table if not exists usage_events (
           event_id text primary key,
@@ -95,6 +96,12 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
       // added here; fresh installs already have it from the create block.
       try {
         await db.execAsync("alter table environments add column export_schema integer");
+      } catch {
+        /* column already exists */
+      }
+      // Same parity for the live-pull advertisement (D1 v2, ADR 0001).
+      try {
+        await db.execAsync("alter table environments add column live_endpoint text");
       } catch {
         /* column already exists */
       }
