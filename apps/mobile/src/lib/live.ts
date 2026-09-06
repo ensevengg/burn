@@ -71,7 +71,7 @@ async function liveTargets(
 }
 
 /** Abort when any linked signal fires; cancel() detaches the listeners. */
-function linkedSignals(...signals: (AbortSignal | undefined)[]): { signal: AbortSignal; cancel: () => void } {
+export function linkedSignals(...signals: (AbortSignal | undefined)[]): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController();
   const detach: (() => void)[] = [];
   for (const signal of signals) {
@@ -87,7 +87,7 @@ function linkedSignals(...signals: (AbortSignal | undefined)[]): { signal: Abort
 }
 
 /** Abort when the deadline fires; cancel() clears the timer. */
-function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; cancel: () => void } {
+export function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
   const linked = linkedSignals(signal);
@@ -106,7 +106,7 @@ function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): { sign
   };
 }
 
-function describeFailure(err: unknown): { state: "offline" | "error"; error: string } {
+export function describeFailure(err: unknown): { state: "offline" | "error"; error: string } {
   if (err instanceof LiveError && err.name === "LiveUnreachableError") {
     return { state: "offline", error: (err as Error).message };
   }
@@ -212,7 +212,7 @@ async function pullLiveUnlocked(
         const eventsTimeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 60_000);
         let page;
         try {
-          page = parseLiveEventsPage(await api.events(eventsTimeout.signal));
+          page = parseLiveEventsPage(await api.events(null, eventsTimeout.signal));
         } finally {
           eventsTimeout.cancel();
         }

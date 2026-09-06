@@ -138,6 +138,23 @@ describe("live server", () => {
     expect(body.error).toContain("schema drift");
   });
 
+  test("/live/events honors a ?since= cursor (direct mode) over the machine's own", async () => {
+    let scanned: number | null = null;
+    const res = await createLiveFetch(
+      deps({ exporterScan: async (sinceMs) => { scanned = sinceMs; return `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n`; } }),
+    )(new Request("http://machine/live/events?since=1725590000000"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { sinceMs: number };
+    expect(body.sinceMs).toBe(1725590000000);
+    expect(scanned!).toBe(1725590000000);
+    // Invalid values fall back to the machine cursor window.
+    const fallback = await createLiveFetch(
+      deps({ exporterScan: async (sinceMs) => { scanned = sinceMs; return `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n`; } }),
+    )(new Request("http://machine/live/events?since=potato"));
+    expect(((await fallback.json()) as { sinceMs: number }).sinceMs).toBe(SINCE);
+    expect(scanned!).toBe(SINCE);
+  });
+
   test("/live/quotas maps tokscale usage rows into ingest snapshots", async () => {
     const res = await createLiveFetch(deps())(new Request("http://machine/live/quotas"));
     expect(res.status).toBe(200);

@@ -48,8 +48,19 @@ export interface LiveQuotasPage {
 
 export interface LiveApi {
   ping(signal?: AbortSignal): Promise<LivePing>;
-  events(signal?: AbortSignal): Promise<LiveEventsPage>;
+  /**
+   * Events since the given epoch ms, or the machine's own push cursor minus
+   * overlap when null. Direct mode (ADR 0002) always passes the phone's
+   * per-machine cursor; the cloud-mode live pull passes null and takes the
+   * machine's tail.
+   */
+  events(sinceMs: number | null, signal?: AbortSignal): Promise<LiveEventsPage>;
+  quotas(signal?: AbortSignal): Promise<LiveQuotasPage>;
 }
+
+/** Re-send window shared by push, live pull, and direct mode: a message
+ * completed just after a scan is caught by the next pull's overlap. */
+export const LIVE_OVERLAP_MS = 60 * 60_000;
 
 export class LiveError extends Error {
   constructor(message: string) {
@@ -100,7 +111,9 @@ export function httpLiveApiFor(baseUrl: string, fetchImpl: typeof fetch = fetch)
   }
   return {
     ping: (signal) => call<LivePing>("/ping", signal),
-    events: (signal) => call<LiveEventsPage>("/live/events", signal),
+    events: (sinceMs, signal) =>
+      call<LiveEventsPage>(sinceMs === null ? "/live/events" : `/live/events?since=${Math.floor(sinceMs)}`, signal),
+    quotas: (signal) => call<LiveQuotasPage>("/live/quotas", signal),
   };
 }
 

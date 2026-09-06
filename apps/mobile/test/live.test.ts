@@ -67,7 +67,7 @@ function apiForByEndpoint(map: Record<string, { page?: LiveEventsPage; ping?: Li
         if (entry?.failPing) throw entry.failPing;
         return entry?.ping ?? ping();
       },
-      events: async (signal) => {
+      events: async (_sinceMs: number | null, signal?: AbortSignal) => {
         if (signal?.aborted) throw new LiveUnreachableError("aborted");
         const entry = map[endpoint];
         if (entry?.failEvents) throw entry.failEvents;
@@ -261,7 +261,7 @@ describe("live pull merge", () => {
         if (signal?.aborted) throw new LiveUnreachableError("aborted");
         return ping();
       },
-      events: async (signal) => {
+      events: async (_sinceMs: number | null, signal?: AbortSignal) => {
         if (signal?.aborted) throw new LiveUnreachableError("aborted");
         calls += 1;
         if (calls === 1) {

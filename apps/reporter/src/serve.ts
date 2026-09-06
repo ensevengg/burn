@@ -106,8 +106,16 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
             return jsonResponse({ error: "burn-events exporter not found on this machine" }, 503);
           }
           assertExporterMatchesPin(exporter, deps.config.tokscalePin);
+          // Direct mode (ADR 0002) passes the phone's per-machine cursor;
+          // without it, serve the machine's own push cursor minus overlap —
+          // exactly the next push's window.
+          const sinceParam = new URL(req.url).searchParams.get("since");
+          const requested = sinceParam === null ? null : Number(sinceParam);
           const cursor = (deps.cursor ?? loadCursor)();
-          const sinceMs = pushSinceMs(cursor.lastPushAt, false);
+          const sinceMs =
+            requested !== null && Number.isFinite(requested) && requested >= 0
+              ? Math.floor(requested)
+              : pushSinceMs(cursor.lastPushAt, false);
           const rows = parseEventsJsonl(await (deps.exporterScan ?? fetchEventsJsonl)(sinceMs));
           // The exact transform the push path applies: dedup fallback derived,
           // cost → decimal string, timezone shim, parser version pinned. The
