@@ -1,4 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useIsFocused } from "@react-navigation/native";
+import { keepPreviousData, useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import type { Granularity } from "../lib/format";
 import {
   queryClients,
@@ -16,74 +18,136 @@ import {
 import type { SQLiteDatabase } from "expo-sqlite";
 import { useApp } from "../lib/app-context";
 
-/** All queries read the local mirror; sync invalidates them wholesale. */
-function useDbQuery<T>(key: readonly unknown[], loader: (db: SQLiteDatabase) => Promise<T>, enabled = true) {
-  const { db } = useApp();
-  return useQuery({
-    queryKey: key,
-    queryFn: () => {
-      if (db === null) throw new Error("database not open yet");
-      return loader(db);
-    },
-    enabled: enabled && db !== null,
-  });
+interface DbQueryOptions {
+  enabled?: boolean;
+  /**
+   * Periodic re-read for tiny always-fresh tables (quota staleness, machine
+   * heartbeats). Event queries must not heartbeat: they re-read and
+   * re-aggregate their whole window, and mirror-change invalidations already
+   * cover every real data change.
+   */
+  heartbeatMs?: number | false;
+  /** Show the previous window's data while a chip-tap recomputes, instead of blanking. */
+  keepPrevious?: boolean;
 }
 
-export function useHistoryQuery(granularity: Granularity, groupBy: "model" | "client" | "none", days: number) {
+/** Focused screens read the local mirror; sync invalidates only changed families. */
+function useDbQuery<T>(
+  key: readonly unknown[],
+  loader: (db: SQLiteDatabase, signal: AbortSignal) => Promise<T>,
+  options: DbQueryOptions = {},
+) {
+  const { enabled = true, heartbeatMs = false, keepPrevious = false } = options;
+  const { db } = useApp();
+  const focused = useIsFocused();
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    const cancelUnused = () => {
+      void queryClient.cancelQueries({ queryKey: key, exact: true, predicate: (query) => !query.isActive() });
+    };
+    if (!focused || !enabled) cancelUnused();
+    return cancelUnused;
+  }, [focused, enabled, queryClient, JSON.stringify(key)]);
+  // Annotated options pin TData = T: with placeholderData in play, useQuery
+  // otherwise infers the placeholder function itself as the data type.
+  const queryOptions: UseQueryOptions<T, Error, T> = {
+    queryKey: key,
+    queryFn: ({ signal }) => {
+      if (db === null) throw new Error("database not open yet");
+      return loader(db, signal);
+    },
+    enabled: enabled && focused && db !== null,
+    refetchInterval: heartbeatMs === false ? false : focused && enabled ? heartbeatMs : false,
+  };
+  if (keepPrevious) {
+    // TanStack guards placeholderData against function-typed data
+    // (NonFunctionGuard<T>), which cannot be proven for an unresolved generic —
+    // no loader here returns a function, so the cast only satisfies that guard.
+    queryOptions.placeholderData = keepPreviousData<T> as NonNullable<
+      UseQueryOptions<T, Error, T>["placeholderData"]
+    >;
+  }
+  return useQuery(queryOptions);
+}
+
+export function useHistoryQuery(
+  granularity: Granularity,
+  groupBy: "model" | "client" | "none",
+  days: number,
+) {
   const { reportingTimezone } = useApp();
   return useDbQuery(
     ["history", reportingTimezone, granularity, groupBy, days],
-    (db) => queryHistory(db, reportingTimezone, granularity, groupBy, days, null),
+    (db, signal) => queryHistory(db, reportingTimezone, granularity, groupBy, days, null, signal),
+    { keepPrevious: true },
   );
 }
 
 /** Historical peak bucket for the granularity — the fixed Y ceiling (user direction). */
 export function useGranularityMaxQuery(granularity: Granularity, metric: "cost" | "tokens" = "tokens") {
   const { reportingTimezone } = useApp();
-  return useDbQuery(["granularity-max", reportingTimezone, granularity, metric], (db) =>
-    queryGranularityMax(db, reportingTimezone, granularity, metric),
+  return useDbQuery(
+    ["granularity-max", reportingTimezone, granularity, metric],
+    (db, signal) => queryGranularityMax(db, reportingTimezone, granularity, metric, signal),
+    { keepPrevious: true },
   );
 }
 
 /** The restructured dashboard's single source: totals, sessions, series, client shares, cache savings. */
 export function useWindowOverviewQuery(days: number) {
   const { reportingTimezone } = useApp();
-  return useDbQuery(["window-overview", reportingTimezone, days], (db) =>
-    queryWindowOverview(db, reportingTimezone, days, "cost"),
+  return useDbQuery(
+    ["window-overview", reportingTimezone, days],
+    (db, signal) => queryWindowOverview(db, reportingTimezone, days, "cost", signal),
+    { keepPrevious: true },
   );
 }
 
 /** Contribution grid always feeds on a trailing year, independent of the window selector. */
 export function useDailyTotalsQuery() {
   const { reportingTimezone } = useApp();
-  return useDbQuery(["daily-totals", reportingTimezone], (db) => queryDailyTotals(db, reportingTimezone, 365));
+  return useDbQuery(["daily-totals", reportingTimezone], (db, signal) =>
+    queryDailyTotals(db, reportingTimezone, 365, signal),
+  );
 }
 
 export function useRecordsQuery() {
   const { reportingTimezone } = useApp();
-  return useDbQuery(["records", reportingTimezone], (db) => queryRecords(db, reportingTimezone));
+  return useDbQuery(["records", reportingTimezone], (db, signal) => queryRecords(db, reportingTimezone, signal));
 }
 
-export function useModelsQuery(days: number) {
-  return useDbQuery(["models", days], (db) => queryModels(db, days, null));
+export function useModelsQuery(days: number, enabled = true) {
+  return useDbQuery(["models", days], (db, signal) => queryModels(db, days, null, signal), {
+    enabled,
+    keepPrevious: true,
+  });
 }
 
-export function useClientsQuery(days: number) {
-  return useDbQuery(["clients", days], (db) => queryClients(db, days, null));
+export function useClientsQuery(days: number, enabled = true) {
+  return useDbQuery(["clients", days], (db, signal) => queryClients(db, days, null, signal), {
+    enabled,
+    keepPrevious: true,
+  });
 }
 
-export function useWorkspacesQuery(days: number) {
-  return useDbQuery(["workspaces", days], (db) => queryWorkspaces(db, days, null));
+export function useWorkspacesQuery(days: number, enabled = true) {
+  return useDbQuery(["workspaces", days], (db, signal) => queryWorkspaces(db, days, null, signal), {
+    enabled,
+    keepPrevious: true,
+  });
 }
 
-export function useSessionsQuery(days: number) {
-  return useDbQuery(["sessions", days], (db) => querySessions(db, days, null));
+export function useSessionsQuery(days: number, enabled = true) {
+  return useDbQuery(["sessions", days], (db, signal) => querySessions(db, days, null, 60, signal), {
+    enabled,
+    keepPrevious: true,
+  });
 }
 
 export function useQuotasQuery() {
-  return useDbQuery(["quotas"], (db) => queryQuotas(db));
+  return useDbQuery(["quotas"], (db) => queryQuotas(db), { heartbeatMs: 60_000 });
 }
 
 export function useMachinesQuery() {
-  return useDbQuery(["machines"], (db) => queryEnvironments(db));
+  return useDbQuery(["machines"], (db) => queryEnvironments(db), { heartbeatMs: 60_000 });
 }
