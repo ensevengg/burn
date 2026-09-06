@@ -3,14 +3,14 @@
  * SQLite transaction per page, watermark advanced only after commit. Demo
  * mode: the bundled generator writes the same mirror schema locally.
  */
+import { pullCloud, type SyncResult } from "./sync-cloud";
+import { cloudGeneration, advanceCloudGeneration, publishMirrorChange } from "./sync-state";
+import { invalidateEventCache } from "../data/repository";
 import { createBurnBackend } from "@burn/sync-api";
-import { kvGet, kvSet, wipeForReseed, type SQLiteDatabase } from "./db";
+import { kvSet, wipeForReseed, type SQLiteDatabase } from "./db";
 import { withWriteLock } from "./writelock";
 import { loadConnection } from "./settings";
 import { generateDemoDataset, MODELS } from "../data/demo-generator";
-
-const WATERMARK_KEY = "watermark_revision";
-const MAX_PAGES = 8;
 
 /** Demo data is generator-controlled, so literal interpolation is safe here. */
 function sqlStr(value: string | null): string {
@@ -18,12 +18,6 @@ function sqlStr(value: string | null): string {
 }
 function sqlNum(decimalString: string): string {
   return Number.isFinite(Number(decimalString)) ? decimalString : "0";
-}
-
-export interface SyncResult {
-  pulledEvents: number;
-  pages: number;
-  watermark: number;
 }
 
 export function seedDemoData(db: SQLiteDatabase): Promise<void> {
@@ -122,145 +116,50 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
 
     await kvSet(db, "mode", "demo");
   });
+  // Post-commit eviction, still inside the seed's write lock — same contract
+  // as resetDb and removeEnvironmentLocal.
+  invalidateEventCache(db);
 }
 
+export { type SyncResult } from "./sync-cloud";
+
+const inFlight = new WeakMap<SQLiteDatabase, Promise<SyncResult>>();
 export function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
-  // Serialized: the mount pull, manual refresh, and the requestSync timer can
-  // all overlap; interleaved transactions tear each other down.
-  return withWriteLock(() => syncFromCloudUnlocked(db));
+  const existing = inFlight.get(db);
+  if (existing) return existing;
+  const generation = cloudGeneration(db);
+  const assertActive = () => {
+    if (cloudGeneration(db) !== generation) throw new Error("Sync cancelled");
+  };
+  const pending = (async () => {
+    const connection = await loadConnection();
+    assertActive();
+    if (connection === null) throw new Error("Not connected to a backend");
+    return pullCloud(db, createBurnBackend(connection).phone(connection.readToken), assertActive, (kind) => {
+      if (kind === "events") invalidateEventCache(db);
+      publishMirrorChange(db, kind);
+    });
+  })();
+  inFlight.set(db, pending);
+  void pending
+    .finally(() => {
+      if (inFlight.get(db) === pending) inFlight.delete(db);
+    })
+    .catch(() => {});
+  return pending;
 }
 
-async function syncFromCloudUnlocked(db: SQLiteDatabase): Promise<SyncResult> {
-  const connection = await loadConnection();
-  if (connection === null) throw new Error("Not connected to a backend");
-  const phone = createBurnBackend(connection).phone(connection.readToken);
-
-  const sinceRevision = Number((await kvGet(db, WATERMARK_KEY)) ?? 0);
-  let watermark = sinceRevision;
-  let pulledEvents = 0;
-  let pages = 0;
-
-  // Loop until the backend reports everything below the watermark shipped.
-  // Each page commits atomically before the watermark advances.
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const delta = await phone.fetchDelta(watermark);
-    await db.withTransactionAsync(async () => {
-      for (const env of delta.environments) {
-        await db.runAsync(
-          `insert into environments
-             (id, slug, display_name, host_group, os_kind, reporter_version, tokscale_version,
-              export_schema, reporting_timezone, last_heartbeat_at, last_success_at, last_error, latest_revision)
-           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           on conflict (id) do update set
-             slug = excluded.slug, display_name = excluded.display_name,
-             host_group = excluded.host_group, os_kind = excluded.os_kind,
-             reporter_version = excluded.reporter_version, tokscale_version = excluded.tokscale_version,
-             export_schema = excluded.export_schema,
-             reporting_timezone = excluded.reporting_timezone,
-             last_heartbeat_at = excluded.last_heartbeat_at, last_success_at = excluded.last_success_at,
-             last_error = excluded.last_error, latest_revision = excluded.latest_revision`,
-          [
-            env.id,
-            env.slug,
-            env.displayName,
-            env.hostGroup,
-            env.osKind,
-            env.reporterVersion,
-            env.tokscaleVersion,
-            env.exportSchema,
-            env.reportingTimezone,
-            env.lastHeartbeatAt,
-            env.lastSuccessAt,
-            env.lastError,
-            env.latestRevision,
-          ],
-        );
-      }
-      for (const e of delta.events) {
-        await db.runAsync(
-          `insert or replace into usage_events
-             (event_id, environment_id, client, provider_id, model_id, session_id, session_title,
-              workspace_key, workspace_label, agent, occurred_at_ms, source_offset_minutes, source_timezone,
-              source_local_date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-              reasoning_tokens, message_count, is_turn_start, duration_ms, cost, cost_source,
-              cost_is_complete, model_attribution_conflicted, parser_version, revision)
-           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            e.eventId,
-            e.environmentId,
-            e.client,
-            e.providerId,
-            e.modelId,
-            e.sessionId,
-            e.sessionTitle,
-            e.workspaceKey,
-            e.workspaceLabel,
-            e.agent,
-            e.occurredAtMs,
-            e.sourceOffsetMinutes,
-            e.sourceTimezone,
-            e.sourceLocalDate,
-            e.inputTokens,
-            e.outputTokens,
-            e.cacheReadTokens,
-            e.cacheWriteTokens,
-            e.reasoningTokens,
-            e.messageCount,
-            e.isTurnStart ? 1 : 0,
-            e.durationMs,
-            e.cost,
-            e.costSource,
-            e.costIsComplete ? 1 : 0,
-            e.modelAttributionConflicted ? 1 : 0,
-            e.parserVersion,
-            e.revision,
-          ],
-        );
-      }
-      await kvSet(db, WATERMARK_KEY, String(delta.maxRevision));
-    });
-    watermark = Math.max(watermark, delta.maxRevision);
-    pulledEvents += delta.events.length;
-    pages++;
-    if (!delta.hasMore || delta.events.length === 0) break;
-  }
-
-    // Env-scoped row keys (C2): same scheme as the demo mirror, so a future
-    // per-environment quota stream can't silently collide.
-    const quotas = await phone.fetchQuotaLatest();
-    await db.withTransactionAsync(async () => {
-      await db.runAsync("delete from quota_snapshots");
-      for (const q of quotas) {
-        await db.runAsync(
-          `insert into quota_snapshots
-             (row_key, environment_id, provider, account_key, account_label, plan, metric,
-              used_percent, remaining_percent, remaining_label, resets_at, status, error, fetched_at)
-           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            `${q.environmentId ?? "no-env"}|${q.provider}|${q.accountKey}|${q.metric}`,
-            q.environmentId,
-            q.provider,
-            q.accountKey,
-            q.accountLabel,
-            q.plan,
-            q.metric,
-            q.usedPercent,
-            q.remainingPercent,
-            q.remainingLabel,
-            q.resetsAt,
-            q.status,
-            q.error,
-            q.fetchedAt,
-          ],
-        );
-      }
-    });
-
-  return { pulledEvents, pages, watermark };
+/** Called before a reset/backend change; old network responses cannot commit. */
+export function cancelCloudSync(db: SQLiteDatabase): void {
+  advanceCloudGeneration(db);
+  inFlight.delete(db);
+  invalidateEventCache(db);
 }
 
 export async function requestMachineSync(db: SQLiteDatabase, environmentId: string | null): Promise<void> {
+  const generation = cloudGeneration(db);
   const connection = await loadConnection();
+  if (cloudGeneration(db) !== generation) throw new Error("Sync cancelled");
   if (connection === null) throw new Error("Not connected to a backend");
   const phone = createBurnBackend(connection).phone(connection.readToken);
   await phone.requestSync(environmentId ?? undefined);
