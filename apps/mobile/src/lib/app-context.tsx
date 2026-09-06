@@ -22,6 +22,7 @@ import {
   type ConnectionConfig,
 } from "./settings";
 import { seedDemoData, syncFromCloud, requestMachineSync, cancelCloudSync } from "./sync";
+import { pullLiveFromMachines, type LivePullStatus } from "./live";
 import { removeEnvironmentLocal } from "../data/repository";
 import { subscribeMirrorChanges } from "./sync-state";
 import { followMachineUpdates } from "./refresh";
@@ -55,6 +56,8 @@ interface SyncStatus {
   refreshingMachines: boolean;
   /** True for the whole bounded follow-up window, not just the first pull. */
   checkingMachines: boolean;
+  /** Per-machine result of the last Tailscale live probe (D1 v2). */
+  liveMachines: LivePullStatus[];
 }
 
 const AppContext = createContext<AppState | null>(null);
@@ -71,12 +74,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     syncNotice: null,
     refreshingMachines: false,
     checkingMachines: false,
+    liveMachines: [],
   });
   const followup = useRef<{
     controller: AbortController;
     target: string | null;
     promise: Promise<void>;
   } | null>(null);
+  const live = useRef<AbortController | null>(null);
   const lifecycle = useRef(0);
 
   const patchStatus = useCallback((patch: Partial<SyncStatus>) => {
@@ -87,9 +92,40 @@ export function AppProvider({ children }: { children: ReactNode }) {
     lifecycle.current++;
     followup.current?.controller.abort();
     followup.current = null;
-    patchStatus({ refreshingMachines: false, checkingMachines: false });
+    live.current?.abort();
+    live.current = null;
+    patchStatus({ refreshingMachines: false, checkingMachines: false, liveMachines: [] });
     if (db) cancelCloudSync(db);
   }, [db, patchStatus]);
+
+  /**
+   * Tailscale live probe (D1 v2). Explicit gestures and app-foreground only —
+   * never the minute timer: each probe triggers a machine-side exporter scan.
+   * Writes serialize on the mirror lock; cancellation rides the same
+   * generation counter as the cloud path.
+   */
+  const pullLive = useCallback(
+    (signal?: AbortSignal) => {
+      if (db === null || mode !== "cloud") return;
+      live.current?.abort();
+      const controller = new AbortController();
+      const relay = () => controller.abort();
+      signal?.addEventListener("abort", relay, { once: true });
+      live.current = controller;
+      void pullLiveFromMachines(db, { signal: controller.signal })
+        .then((statuses) => {
+          if (!controller.signal.aborted) patchStatus({ liveMachines: statuses });
+        })
+        .catch(() => {
+          /* cancelled — a reset owns the surface now */
+        })
+        .finally(() => {
+          signal?.removeEventListener("abort", relay);
+          if (live.current === controller) live.current = null;
+        });
+    },
+    [db, mode, patchStatus],
+  );
 
   useEffect(() => {
     let active = true;
@@ -144,9 +180,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (mode !== "cloud") return;
     void sync();
     const subscription = NativeAppState.addEventListener("change", (state) => {
-      if (state === "active") void sync();
+      if (state === "active") {
+        void sync();
+        pullLive();
+      }
     });
     const timer = setInterval(() => {
+      // Deliberately no live probe here: per-minute exporter scans on the
+      // machine are not worth it; the mirror is already fresh to the last push.
       if (NativeAppState.currentState === "active") void sync();
     }, 60_000);
     return () => {
@@ -154,7 +195,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       clearInterval(timer);
       stop();
     };
-  }, [mode, sync, stop]);
+  }, [mode, sync, stop, pullLive]);
 
   const value = useMemo<AppState>(() => {
     const invalidate = () => {
@@ -207,6 +248,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const epoch = lifecycle.current;
         const pending = (async () => {
           patchStatus({ refreshingMachines: true, checkingMachines: true });
+          pullLive(controller.signal);
           try {
             await requestMachineSync(db, environmentId);
             if (controller.signal.aborted || epoch !== lifecycle.current) return;
@@ -254,7 +296,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         invalidate();
       },
     };
-  }, [db, mode, reportingTimezone, sync, stop, queryClient, patchStatus]);
+  }, [db, mode, reportingTimezone, sync, stop, pullLive, queryClient, patchStatus]);
 
   return (
     <AppContext.Provider value={value}>

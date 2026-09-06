@@ -13,12 +13,13 @@ import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
 export function MachinesScreen() {
   const machines = useMachinesQuery();
   const { mode, requestSync, reportingTimezone, removeMachine } = useApp();
-  const { refreshingMachines } = useSyncStatus();
+  const { refreshingMachines, liveMachines } = useSyncStatus();
   const { C } = useTheme();
   const [showAdd, setShowAdd] = useState(false);
   // Gesture-driven spinner for demo mode: the machines query heartbeats every
   // minute, and isFetching would blip the pull-to-refresh control.
   const [demoRefreshing, setDemoRefreshing] = useState(false);
+  const liveBySlug = new Map(liveMachines.map((status) => [status.slug, status]));
 
   // Removal is destructive (server-side cascade of the machine's events +
   // quotas), so it always confirms first (user direction).
@@ -96,6 +97,7 @@ export function MachinesScreen() {
             <SectionTitle trailing={`${machines.data?.length ?? 0} reporters`}>Environments</SectionTitle>
             {machines.data?.map((machine) => {
               const healthy = machine.lastError === null && machine.lastHeartbeatAt !== null;
+              const live = liveBySlug.get(machine.slug);
               return (
                 <Card key={machine.id}>
                   <View style={styles.header}>
@@ -120,6 +122,7 @@ export function MachinesScreen() {
                   <Text style={[type.muted, { color: C.muted, marginTop: 4 }]}>
                     {`tokscale ${machine.tokscaleVersion ?? "?"} · reporter ${machine.reporterVersion ?? "?"}`}
                   </Text>
+                  {live !== undefined && <LiveLine status={live} />}
                   {machine.lastError !== null && (
                     <Text style={{ color: C.err, marginTop: 6 }} numberOfLines={3}>
                       {machine.lastError}
@@ -196,6 +199,29 @@ function AddMachineSheet() {
       )}
     </Card>
   );
+}
+
+/**
+ * Live-pull result for one machine (D1 v2). Rendered only after a probe ran —
+ * absence means "not probed yet", not "offline", so the card never implies a
+ * machine is down before the user asked.
+ */
+function LiveLine({ status }: { status: import("../lib/live").LivePullStatus }) {
+  const { C } = useTheme();
+  if (status.state === "live") {
+    const tail =
+      status.pulledEvents > 0
+        ? `live · +${status.pulledEvents} event${status.pulledEvents === 1 ? "" : "s"} not yet pushed`
+        : "live · up to date with its push cursor";
+    return <Text style={{ color: C.ok ?? C.muted, marginTop: 4 }}>{tail}</Text>;
+  }
+  if (status.state === "offline") {
+    return <Text style={[type.muted, { color: C.muted, marginTop: 4 }]}>live probe: unreachable — showing pushed data</Text>;
+  }
+  if (status.state === "skipped") {
+    return <Text style={{ color: C.err, marginTop: 4 }}>{`live probe skipped: ${status.error ?? "identity mismatch"}`}</Text>;
+  }
+  return <Text style={{ color: C.err, marginTop: 4 }} numberOfLines={2}>{`live probe failed: ${status.error ?? "unknown"}`}</Text>;
 }
 
 const styles = StyleSheet.create({
