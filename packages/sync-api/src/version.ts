@@ -6,5 +6,10 @@ export const SYNC_SCHEMA_VERSION = 1;
  * fixtures in apps/reporter/fixtures gate every bump.
  */
 export const TOKSCALE_PIN = "4.15.1";
-// EVENT_EXPORT_SCHEMA returns with D2's `burn-events` exporter — the constant
-// was dead until then (first-check C3) and was removed to keep that honest.
+
+/**
+ * Exporter contract version (D2): the JSONL shape the `burn-events` exporter
+ * emits and the reporter consumes. Bump when the payload shape changes;
+ * reported in heartbeats as the environment's export_schema.
+ */
+export const EVENT_EXPORT_SCHEMA = 1;
