@@ -1,0 +1,43 @@
+name: burn-events release
+
+# Builds the D2 exporter binary for the common targets and attaches the
+# artifacts to the `burn-events-v*` release, so burn-report users don't need a
+# Rust toolchain. Other targets build from source: cargo install --path crates/burn-events.
+on:
+  push:
+    tags: ["burn-events-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            exe: burn-events.exe
+            artifact: burn-events-x86_64-pc-windows-msvc.exe
+          - os: ubuntu-latest
+            exe: burn-events
+            artifact: burn-events-x86_64-unknown-linux-gnu
+          - os: macos-latest
+            exe: burn-events
+            artifact: burn-events-aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: crates/burn-events
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Stage binary
+        shell: bash
+        run: cp "target/release/${{ matrix.exe }}" "../../../${{ matrix.artifact }}"
+      - name: Upload to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" "../../../${{ matrix.artifact }}" --clobber --repo "${GITHUB_REPOSITORY}"
