@@ -8,9 +8,10 @@ Usage: npx burn-report <command> [flags]
 
   init      Configure this machine (once): --url --key --slug --name
             [--os windows|wsl|linux|macos] [--host-group g] [--tz Asia/Kolkata] [--interval 10]
-  doctor    Verify config, tokscale pin, backend connectivity, clock
+  doctor    Verify config, tokscale pin, burn-events exporter, backend, clock
   usage     Fetch vendor quotas (tokscale usage) and push snapshots
-  push      Push usage event rows since cursor (needs burn-events exporter)
+  push      Push usage event rows since cursor (burn-events exporter);
+            --full re-sends everything (correction pass after a pin bump)
   daemon    Resident mode: 30s sync-request poll + scheduled push
   help      This text
 
@@ -38,7 +39,7 @@ try {
       process.exitCode = await runUsage();
       break;
     case "push":
-      process.exitCode = await runPush();
+      process.exitCode = await runPush(args);
       break;
     case "daemon":
       await runDaemon();

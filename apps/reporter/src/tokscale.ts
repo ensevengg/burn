@@ -51,14 +51,14 @@ const npxBin = platform() === "win32" ? "npx.cmd" : "npx";
  * where npx/npm resolve to wrapper shims — e.g. AppImage profiles — the npx
  * spawn rejects flags, while `bun x` works). Order: bun x → npx → bare binary.
  */
-interface Runner {
+export interface Runner {
   command: string;
   prefix: string[];
 }
 
 let cachedRunner: Runner | null = null;
 
-function spawnRunner(
+export function spawnRunner(
   runner: Runner,
   args: string[],
   timeoutMs: number,

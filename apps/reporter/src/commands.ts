@@ -1,9 +1,29 @@
-import { BurnBackendError, type IngestQuotaInput } from "@burn/sync-api";
+import {
+  BurnBackendError,
+  EVENT_EXPORT_SCHEMA,
+  type IngestQuotaInput,
+  type ReporterSyncApi,
+} from "@burn/sync-api";
 import { reporterApiFor } from "./backend.js";
-import { loadConfig, loadCursor, saveConfig, configPath, setupSqlPath, type BurnConfig } from "./config.js";
+import {
+  loadConfig,
+  loadCursor,
+  saveConfig,
+  saveCursor,
+  configPath,
+  setupSqlPath,
+  type BurnConfig,
+} from "./config.js";
 import { renderSetupSql } from "./setup-sql.js";
 import { generateToken } from "./tokens.js";
 import { fetchUsage, tokscaleVersion, TokscaleError } from "./tokscale.js";
+import { exportRowsToIngestInputs, parseEventsJsonl, planBatches, pushSinceMs } from "./events.js";
+import {
+  assertExporterMatchesPin,
+  ExporterError,
+  exporterVersion,
+  fetchEventsJsonl,
+} from "./exporter.js";
 import { quotaAccountKey, quotaMetricLabel, TOKSCALE_PIN } from "@burn/sync-api";
 import { writeFileSync } from "node:fs";
 import { platform } from "node:os";
@@ -123,12 +143,24 @@ export async function runDoctor(): Promise<number> {
     detail: tokscale ? `reachable at pin ${config.tokscalePin}` : `npx tokscale@${config.tokscalePin} failed`,
   });
 
+  const exporter = await exporterVersion();
+  checks.push({
+    name: "burn-events",
+    ok: exporter !== null && exporter === config.tokscalePin,
+    detail:
+      exporter === null
+        ? "exporter not found — cargo install --path crates/burn-events (or set BURN_EVENTS_BIN)"
+        : exporter === config.tokscalePin
+          ? `matches pin ${config.tokscalePin}`
+          : `version ${exporter} ≠ pin ${config.tokscalePin} — rebuild: cargo install --path crates/burn-events`,
+  });
+
   const reporter = reporterApiFor(config);
   try {
     const beat = await reporter.heartbeat({
       reporterVersion: REPORTER_VERSION,
       tokscaleVersion: tokscale,
-      exportSchema: null,
+      exportSchema: EVENT_EXPORT_SCHEMA,
       reportingTimezone: config.reportingTimezone,
     });
     checks.push({ name: "backend", ok: true, detail: `heartbeat accepted (${beat.slug})` });
@@ -181,23 +213,76 @@ export async function runUsage(): Promise<number> {
   }
 }
 
-// ── push (usage events) ──────────────────────────────────────────────────────
+// ── push (usage events, D2 seam) ─────────────────────────────────────────────
 
-export async function runPush(): Promise<number> {
+export interface PushOutcome {
+  rows: number;
+  changed: number;
+  revision: number;
+  batches: number;
+}
+
+/**
+ * Exporter scan → schema validation → batched ingest. Events are filtered at
+ * the exporter by the cursor's push time minus an overlap window; `full`
+ * re-sends everything (the correction pass after a pin bump — unchanged
+ * content is a server-side no-op that never advances the phone's watermark).
+ */
+export async function pushEvents(
+  config: BurnConfig,
+  reporter: ReporterSyncApi,
+  options: { full?: boolean } = {},
+): Promise<PushOutcome> {
+  const exporter = await exporterVersion();
+  if (exporter === null) {
+    throw new ExporterError(
+      "burn-events exporter not found — install once per machine: cargo install --path crates/burn-events",
+    );
+  }
+  assertExporterMatchesPin(exporter, config.tokscalePin);
+
+  const cursor = loadCursor();
+  const sinceMs = pushSinceMs(cursor.lastPushAt, options.full === true);
+  const rows = parseEventsJsonl(await fetchEventsJsonl(sinceMs));
+  const inputs = exportRowsToIngestInputs(rows, config.tokscalePin);
+  const batches = planBatches(inputs);
+
+  let changed = 0;
+  let revision = cursor.lastRevision;
+  for (const [index, batch] of batches.entries()) {
+    const out = await reporter.ingestEvents(batch);
+    changed += out.changed;
+    revision = out.revision;
+    if (batches.length > 1) {
+      console.log(
+        `[push] batch ${index + 1}/${batches.length}: ${batch.length} row(s), ${out.changed} changed, revision ${out.revision}`,
+      );
+    }
+  }
+  saveCursor({ lastRevision: revision, lastPushAt: new Date().toISOString() });
+  return { rows: inputs.length, changed, revision, batches: batches.length };
+}
+
+export async function runPush(args: Map<string, string>): Promise<number> {
   const config = loadConfig();
   const reporter = reporterApiFor(config);
   await reporter.heartbeat({
     reporterVersion: REPORTER_VERSION,
     tokscaleVersion: await tokscaleVersion(config.tokscalePin),
-    exportSchema: null,
+    exportSchema: EVENT_EXPORT_SCHEMA,
     reportingTimezone: config.reportingTimezone,
   });
-  console.log(
-    "push: usage events require the burn-events exporter seam (D2) — deferred post-demo.\n" +
-      "      Quota snapshots are live: run `npx burn-report usage`.\n" +
-      "      See AGENTS.md → Known deferrals.",
-  );
-  return 2;
+  try {
+    const outcome = await pushEvents(config, reporter, { full: args.has("full") });
+    console.log(
+      `push: ${outcome.rows} row(s) through ${outcome.batches} batch(es); ` +
+        `${outcome.changed} changed; environment revision ${outcome.revision}`,
+    );
+    return 0;
+  } catch (err) {
+    await reporter.reportError(`push: ${(err as Error).message}`).catch(() => {});
+    throw err;
+  }
 }
 
 // ── daemon (D1: resident eager path + scheduled fallback) ────────────────────
@@ -214,16 +299,37 @@ export async function runDaemon(): Promise<void> {
       await reporter.heartbeat({
         reporterVersion: REPORTER_VERSION,
         tokscaleVersion: await tokscaleVersion(config.tokscalePin),
-        exportSchema: null,
+        exportSchema: EVENT_EXPORT_SCHEMA,
         reportingTimezone: config.reportingTimezone,
       });
+    } catch (err) {
+      const message = err instanceof BurnBackendError ? err.message : (err as Error).message;
+      console.error(`[daemon] ${reason}: heartbeat: ${message}`);
+      await reporter.reportError(`heartbeat: ${message}`).catch(() => {});
+      return;
+    }
+    try {
+      const outcome = await pushEvents(config, reporter);
+      console.log(
+        `[daemon] ${reason}: push ok — ${outcome.rows} row(s), ${outcome.changed} changed, ` +
+          `revision ${outcome.revision} (${Date.now() - started}ms)`,
+      );
+    } catch (err) {
+      const message =
+        err instanceof TokscaleError || err instanceof ExporterError
+          ? err.message
+          : (err as Error).message;
+      console.error(`[daemon] ${reason}: push: ${message}`);
+      await reporter.reportError(`push: ${message}`).catch(() => {});
+    }
+    try {
       const quotas = tokscaleQuotaInputs(await fetchUsage(config.tokscalePin));
       if (quotas.length > 0) await reporter.pushQuotaSnapshots(quotas);
       console.log(`[daemon] ${reason}: ok (${Date.now() - started}ms)`);
     } catch (err) {
       const message = err instanceof TokscaleError ? err.message : (err as Error).message;
-      console.error(`[daemon] ${reason}: ${message}`);
-      await reporter.reportError(`${reason}: ${message}`).catch(() => {});
+      console.error(`[daemon] ${reason}: quota: ${message}`);
+      await reporter.reportError(`usage: ${message}`).catch(() => {});
     }
     lastPush = Date.now();
   };
