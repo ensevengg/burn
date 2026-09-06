@@ -16,7 +16,8 @@ machines (cron/daemon: tokscale → burn-report) ──push──▶ your Supaba
 |---|---|
 | `supabase/` | Schema + scoped-token RPCs (`burn_*`), demo seed. SQL contract verified end-to-end (RLS lockdown, idempotent ingest, revision propagation, quota dedup, rendezvous). |
 | `packages/sync-api` | Shared contract: types, `SyncApi` interfaces, upsert-key definitions, Supabase impl (the only supabase-js import in the repo). |
-| `apps/reporter` | `burn-report` CLI: `init` / `doctor` / `usage` / `daemon` work against real tokscale; `push` awaits the `burn-events` exporter seam (D2, first post-demo iteration). |
+| `apps/reporter` | `burn-report` CLI: `init` / `doctor` / `usage` / `push` / `daemon` all work against real tokscale — `push` reads versioned JSONL from the `crates/burn-events` exporter (D2 seam), schema-validates it, and batch-upserts per-message usage rows. |
+| `crates/burn-events` | D2 export seam: a small pinned Rust binary calling `tokscale-core`'s unified-message pipeline, emitting priced `UnifiedMessage` records as JSONL. |
 | `apps/mobile` | All v1 screens: dashboard + limits, daily/monthly/yearly charts with model/agent stacking, cache breakdown + hit rate, cost view, machines, sessions/workspaces/models, settings. Runs on bundled demo data instantly; connects to a real backend via read token. |
 
 ## Demo quickstart
@@ -28,11 +29,13 @@ bun run mobile        # then scan the QR with Expo Go on your Android phone
 # Setup screen → "Explore with demo data"
 ```
 
-**Full loop (with your Supabase project):** follow [supabase/README.md](./supabase/README.md) — three SQL pastes, `npx burn-report init`, then connect the phone with the printed read token. `bun run reporter -- usage` pushes real Codex/Z.ai quotas; the Machines tab can request eager syncs from machines running `burn-report daemon`.
+**Full loop (with your Supabase project):** follow [supabase/README.md](./supabase/README.md) — three SQL pastes, `npx burn-report init`, then connect the phone with the printed read token. Install the exporter once per machine (`cargo install --path crates/burn-events`); `bun run reporter -- push` then streams per-message usage rows (tokens, cache, cost) and `bun run reporter -- usage` pushes real Codex/Z.ai quotas. The Machines tab can request eager syncs from machines running `burn-report daemon`.
 
 **Reporter (on each machine):**
 ```bash
-bun run reporter -- doctor    # verify tokscale pin, config, backend, clock
+cargo install --path crates/burn-events   # D2 exporter, once per machine (or grab a release binary)
+bun run reporter -- doctor    # verify tokscale pin, exporter version, config, backend, clock
+bun run reporter -- push      # push usage event rows since cursor (--full = correction pass)
 bun run reporter -- usage     # push vendor quota snapshots
 bun run reporter -- daemon    # resident: answers phone refresh requests (~30s) + scheduled push
 ```
@@ -47,6 +50,7 @@ bun run typecheck && bun run test
 ```
 apps/mobile        Expo app (SDK 57 / RN 0.86 / React 19)
 apps/reporter      burn-report CLI (npm: npx burn-report)
+crates/burn-events D2 exporter — Rust binary emitting tokscale records as JSONL
 packages/sync-api  SyncApi contract — supabase-js touches nothing else
 supabase/          migrations, RLS, scoped-token RPCs, demo seed
 docs → AGENTS.md   the rulebook: decisions D1–D12, conventions, status
@@ -60,7 +64,7 @@ docs → AGENTS.md   the rulebook: decisions D1–D12, conventions, status
 
 ## Known deferrals (post-demo iterations)
 
-1. `burn-events` Rust exporter + upstream `tokscale events --jsonl` PR — unblocks real `push`.
+1. upstream `tokscale events --jsonl` PR — would replace the `burn-events` exporter binary (its output parses with the same reporter schema).
 2. victory-native (Skia) chart pass behind the existing `Chart` boundary (D9).
 3. EAS build profiles + GitHub Releases packaging.
 4. `burn-report install-service` (systemd user units / Task Scheduler XML).
