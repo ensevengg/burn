@@ -6,6 +6,7 @@
 
 export type Granularity = "daily" | "monthly" | "yearly";
 
+const formatterCache = new Map<string, Intl.DateTimeFormat>();
 const partsCache = new Map<string, { y: number; m: number; d: number }>();
 
 /** Calendar parts of an instant in the given IANA zone (Intl-backed). */
@@ -13,12 +14,17 @@ export function calendarParts(occurredAtMs: number, timeZone: string): { y: numb
   const cacheKey = `${occurredAtMs}|${timeZone}`;
   const cached = partsCache.get(cacheKey);
   if (cached) return cached;
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
+  let formatter = formatterCache.get(timeZone);
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    if (formatterCache.size >= 8) formatterCache.delete(formatterCache.keys().next().value!);
+    formatterCache.set(timeZone, formatter);
+  }
   const parts = formatter.formatToParts(new Date(occurredAtMs));
   const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
   const out = { y: get("year"), m: get("month"), d: get("day") };
