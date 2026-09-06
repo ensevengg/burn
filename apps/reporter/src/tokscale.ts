@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process";
 import { platform } from "node:os";
 import { z } from "zod";
+import { quotaAccountKey, quotaMetricLabel, type IngestQuotaInput } from "@burn/sync-api";
 
 export class TokscaleError extends Error {
   constructor(message: string) {
@@ -43,6 +44,45 @@ export type TokscaleUsageOutput = z.infer<typeof usageOutputSchema>;
 
 export const usageReportSchema = z.array(usageOutputSchema);
 export type TokscaleUsageReport = z.infer<typeof usageReportSchema>;
+
+/** Reporter release; lives here so the live server and commands share it. */
+export const REPORTER_VERSION = "0.1.0";
+
+export function currentUtcOffsetMinutes(): number {
+  return -new Date().getTimezoneOffset();
+}
+
+/**
+ * tokscale usage rows → scoped ingest snapshots (D6: account-level; identical
+ * from any machine sharing the subscription). Shared by push, `usage`, and
+ * the live server's /live/quotas.
+ */
+export function tokscaleQuotaInputs(outputs: TokscaleUsageReport): IngestQuotaInput[] {
+  const offset = currentUtcOffsetMinutes();
+  const inputs: IngestQuotaInput[] = [];
+  for (const out of outputs) {
+    const accountKey = quotaAccountKey(out.account?.id);
+    for (const metric of out.metrics) {
+      inputs.push({
+        provider: out.provider,
+        accountKey,
+        accountLabel: out.account?.label ?? null,
+        plan: out.plan ?? null,
+        metric: quotaMetricLabel(metric.label),
+        usedPercent: metric.used_percent,
+        remainingPercent: metric.remaining_percent,
+        remainingLabel: metric.remaining_label ?? null,
+        resetsAt: metric.resets_at ?? null,
+        creditStatus: out.credit_status ?? null,
+        spendControl: out.spend_control ?? null,
+        status: "ok",
+        error: null,
+        sourceOffsetMinutes: offset,
+      });
+    }
+  }
+  return inputs;
+}
 
 const npxBin = platform() === "win32" ? "npx.cmd" : "npx";
 
