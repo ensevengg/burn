@@ -2,10 +2,10 @@ import { useMemo, useState } from "react";
 import { RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useGranularityMaxQuery, useMachinesQuery, useQuotasQuery, useWindowOverviewQuery } from "../data/queries";
-import type { QuotaCard } from "../data/repository";
+import { eventTokens, type QuotaCard } from "../data/repository";
 import { formatCost, formatPercent, formatRelative, formatTokens } from "../lib/format";
 import { humanize } from "../lib/labels";
-import { useApp } from "../lib/app-context";
+import { useApp, useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
 import { spacing, type } from "../theme";
 import { Card, Chip, Dot, Empty, MeterBar, SectionTitle, Segmented, Stat } from "../ui/primitives";
@@ -27,15 +27,20 @@ const WINDOWS = [
 ] as const;
 
 export function DashboardScreen() {
-  const { mode, reportingTimezone, sync, lastSync, syncError, requestSync } = useApp();
+  const { mode, reportingTimezone, requestSync } = useApp();
+  const { syncError, syncNotice, refreshingMachines, checkingMachines } = useSyncStatus();
   const { C } = useTheme();
   const [metric, setMetric] = useState<Metric>("cost");
   const [days, setDays] = useState<WindowDays>(30);
+  const [demoRefreshing, setDemoRefreshing] = useState(false);
   const overview = useWindowOverviewQuery(days);
   const dailyMax = useGranularityMaxQuery("daily", metric);
   const quotas = useQuotasQuery();
   const machines = useMachinesQuery();
-  const refreshing = overview.isFetching || quotas.isFetching;
+  // Cloud pull-to-refresh is covered by the machine-refresh spinner (which
+  // settles after the first pull); demo mode has no machines to ask, so the
+  // gesture itself drives the spinner — heartbeat refetches must not blip it.
+  const refreshing = mode === "cloud" ? refreshingMachines : demoRefreshing;
 
   const totals = overview.data?.totals;
   const headlineValue =
@@ -43,16 +48,16 @@ export function DashboardScreen() {
       ? "—"
       : metric === "cost"
         ? formatCost(totals.cost)
-        : formatTokens(
-            totals.inputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens,
-          );
+        : formatTokens(eventTokens(totals));
 
   // Pull-to-refresh = request an eager push from every online machine (D1) + pull delta.
   const onRefresh = () => {
-    if (mode === "cloud") void requestSync(null);
-    void overview.refetch();
-    void quotas.refetch();
-    void sync();
+    if (mode === "cloud") {
+      void requestSync(null);
+      return;
+    }
+    setDemoRefreshing(true);
+    void Promise.all([overview.refetch(), quotas.refetch()]).finally(() => setDemoRefreshing(false));
   };
 
   return (
@@ -74,7 +79,7 @@ export function DashboardScreen() {
         {overview.data !== undefined && overview.data.byClient.length > 0 ? (
           <View style={styles.providerRows}>
             {overview.data.byClient.slice(0, 3).map((client) => {
-              const total = metric === "cost" ? overview.data!.totals.cost : overview.data!.totals.inputTokens + overview.data!.totals.outputTokens + overview.data!.totals.cacheReadTokens + overview.data!.totals.cacheWriteTokens;
+              const total = metric === "cost" ? overview.data!.totals.cost : eventTokens(overview.data!.totals);
               const share = total === 0 ? 0 : (metric === "cost" ? client.cost : client.tokens) / total;
               return (
                 <View key={client.key} style={styles.providerRow}>
@@ -102,6 +107,12 @@ export function DashboardScreen() {
         {syncError !== null && (
           <Card>
             <Text style={{ color: C.err }}>{syncError}</Text>
+          </Card>
+        )}
+
+        {syncNotice !== null && (
+          <Card>
+            <Text style={[type.muted, { color: C.muted }]}>{syncNotice}</Text>
           </Card>
         )}
 
@@ -141,7 +152,7 @@ export function DashboardScreen() {
           </Card>
         )}
 
-        <SectionTitle>Subscriptions</SectionTitle>
+        <SectionTitle trailing={checkingMachines ? "Checking machines…" : undefined}>Subscriptions</SectionTitle>
         {quotas.data === undefined || quotas.data.length === 0 ? (
           <Empty message="No quota snapshots yet. Run `npx burn-report usage` on a machine." />
         ) : (
@@ -228,7 +239,7 @@ function groupSubscriptions(quotas: QuotaCard[]): {
     { key: string; provider: string; accountLabel: string | null; plan: string | null; fetchedAt: string; metrics: QuotaCard[] }
   >();
   for (const quota of quotas) {
-    const key = `${quota.provider}|${quota.accountLabel ?? ""}`;
+    const key = JSON.stringify([quota.provider, quota.accountKey]);
     const group = groups.get(key) ?? {
       key,
       provider: quota.provider,

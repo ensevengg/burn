@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View, Pressable } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useDailyTotalsQuery, useGranularityMaxQuery, useHistoryQuery, useRecordsQuery } from "../data/queries";
 import { buildStackLayers, eventTokens, type RecordStats } from "../data/repository";
@@ -191,14 +191,16 @@ export function HistoryScreen() {
                           </View>
                         ))}
                         {ranked.length > 5 && (
-                          <View
+                          <Pressable
+                            accessibilityRole="button"
+                            android_ripple={{ color: C.border, foreground: true, borderless: false }}
                             style={[styles.showMore, { borderColor: C.border }]}
-                            onTouchEnd={() => setShowAllRanked(!showAllRanked)}
+                            onPress={() => setShowAllRanked(!showAllRanked)}
                           >
                             <Text style={{ color: C.text, fontWeight: "600" }}>
                               {showAllRanked ? "show less" : `… show more (${ranked.length - 5})`}
                             </Text>
-                          </View>
+                          </Pressable>
                         )}
                       </>
                     );

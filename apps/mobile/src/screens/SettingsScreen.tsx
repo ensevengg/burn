@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useApp } from "../lib/app-context";
+import { useApp, useSyncStatus } from "../lib/app-context";
 import { useTheme, type ThemeMode } from "../lib/theme-context";
 import { spacing, type } from "../theme";
 import { Card, SectionTitle, Segmented, Chip } from "../ui/primitives";
@@ -23,7 +23,8 @@ const THEME_OPTIONS = [
 ] as const satisfies readonly { label: string; value: ThemeMode }[];
 
 export function SettingsScreen() {
-  const { mode, reportingTimezone, setReportingTimezone, disconnect, clearData, sync, lastSync } = useApp();
+  const { mode, reportingTimezone, setReportingTimezone, disconnect, clearData, sync } = useApp();
+  const { lastSync } = useSyncStatus();
   const { C, themeMode, setThemeMode } = useThemeExtras();
   const [tzPicker, setTzPicker] = useState(false);
 
@@ -51,14 +52,24 @@ export function SettingsScreen() {
             dashboard.
           </Text>
           {mode === "cloud" && (
-            <View style={[styles.dangerButton, { borderColor: C.border }]} onTouchEnd={() => void disconnect()}>
+            <Pressable
+              accessibilityRole="button"
+              android_ripple={{ color: C.border, foreground: true, borderless: false }}
+              style={[styles.dangerButton, { borderColor: C.border }]}
+              onPress={() => void disconnect()}
+            >
               <Text style={{ color: C.err, fontWeight: "600" }}>Disconnect & wipe local cache</Text>
-            </View>
+            </Pressable>
           )}
           {mode === "demo" && (
-            <View style={[styles.dangerButton, { borderColor: C.border }]} onTouchEnd={() => void clearData()}>
+            <Pressable
+              accessibilityRole="button"
+              android_ripple={{ color: C.border, foreground: true, borderless: false }}
+              style={[styles.dangerButton, { borderColor: C.border }]}
+              onPress={() => void clearData()}
+            >
               <Text style={{ color: C.err, fontWeight: "600" }}>Clear demo data</Text>
-            </View>
+            </Pressable>
           )}
         </Card>
 
@@ -69,9 +80,14 @@ export function SettingsScreen() {
             Persisted at setup and stable until you change it (D8). History is re-bucketed at render time from
             stored UTC instants — nothing is rewritten.
           </Text>
-          <View style={[styles.tzToggle, { backgroundColor: C.panelAlt, borderColor: C.border }]} onTouchEnd={() => setTzPicker(!tzPicker)}>
+          <Pressable
+            accessibilityRole="button"
+            android_ripple={{ color: C.border, foreground: true, borderless: false }}
+            style={[styles.tzToggle, { backgroundColor: C.panelAlt, borderColor: C.border }]}
+            onPress={() => setTzPicker(!tzPicker)}
+          >
             <Text style={{ color: C.text, fontWeight: "600" }}>{tzPicker ? "Hide options" : "Change…"}</Text>
-          </View>
+          </Pressable>
           {tzPicker && (
             <Segmented
               options={TIMEZONES.map((tz) => ({ label: tz.split("/").pop() ?? tz, value: tz }))}
@@ -88,9 +104,14 @@ export function SettingsScreen() {
         <Card>
           <View style={styles.rowBetween}>
             <Text style={[type.body, { color: C.text }]}>Manual refresh</Text>
-            <View style={[styles.tzToggle, { backgroundColor: C.panelAlt, borderColor: C.border }]} onTouchEnd={() => void sync()}>
+            <Pressable
+              accessibilityRole="button"
+              android_ripple={{ color: C.border, foreground: true, borderless: false }}
+              style={[styles.tzToggle, { backgroundColor: C.panelAlt, borderColor: C.border }]}
+              onPress={() => void sync()}
+            >
               <Text style={{ color: C.text, fontWeight: "600" }}>Pull delta now</Text>
-            </View>
+            </Pressable>
           </View>
           <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
             {mode === "cloud"

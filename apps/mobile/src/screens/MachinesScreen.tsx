@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { Alert, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useMachinesQuery } from "../data/queries";
 import { formatRelative } from "../lib/format";
 import { humanize } from "../lib/labels";
-import { useApp } from "../lib/app-context";
+import { useApp, useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
 import { loadConnection } from "../lib/settings";
 import { spacing, type } from "../theme";
@@ -12,9 +12,13 @@ import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
 
 export function MachinesScreen() {
   const machines = useMachinesQuery();
-  const { mode, requestSync, reportingTimezone, sync, removeMachine } = useApp();
+  const { mode, requestSync, reportingTimezone, removeMachine } = useApp();
+  const { refreshingMachines } = useSyncStatus();
   const { C } = useTheme();
   const [showAdd, setShowAdd] = useState(false);
+  // Gesture-driven spinner for demo mode: the machines query heartbeats every
+  // minute, and isFetching would blip the pull-to-refresh control.
+  const [demoRefreshing, setDemoRefreshing] = useState(false);
 
   // Removal is destructive (server-side cascade of the machine's events +
   // quotas), so it always confirms first (user direction).
@@ -45,10 +49,14 @@ export function MachinesScreen() {
         contentContainerStyle={{ paddingBottom: 40 }}
         refreshControl={
           <RefreshControl
-            refreshing={machines.isFetching}
+            refreshing={mode === "cloud" ? refreshingMachines : demoRefreshing}
             onRefresh={() => {
-              void machines.refetch();
-              if (mode === "cloud") void requestSync(null);
+              if (mode === "cloud") {
+                void requestSync(null);
+                return;
+              }
+              setDemoRefreshing(true);
+              void machines.refetch().finally(() => setDemoRefreshing(false));
             }}
             tintColor={C.muted}
           />
@@ -56,12 +64,15 @@ export function MachinesScreen() {
       >
         <View style={styles.headerRow}>
           <Text style={[type.title, { color: C.text, flex: 1 }]}>Machines</Text>
-          <View
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Add a machine"
+            android_ripple={{ color: C.border, foreground: true, borderless: false }}
             style={[styles.addButton, { borderColor: C.border, backgroundColor: C.panelAlt }]}
-            onTouchEnd={() => setShowAdd(!showAdd)}
+            onPress={() => setShowAdd(!showAdd)}
           >
             <Text style={{ color: C.text, fontSize: 20, fontWeight: "600", lineHeight: 26 }}>+</Text>
-          </View>
+          </Pressable>
         </View>
         <Text style={[type.muted, { color: C.muted, marginHorizontal: spacing.l }]}>
           Reporters push on a schedule; a resident daemon answers refresh requests within ~30s. Pull down to request a
@@ -89,12 +100,15 @@ export function MachinesScreen() {
                 <Card key={machine.id}>
                   <View style={styles.header}>
                     <Text style={[type.h2, { color: C.text, flex: 1 }]} numberOfLines={1}>{machine.displayName}</Text>
-                    <View
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Remove ${machine.displayName}`}
+                      android_ripple={{ color: C.border, foreground: true, borderless: false }}
                       style={[styles.removeButton, { borderColor: C.border }]}
-                      onTouchEnd={() => confirmRemove(machine.id, machine.displayName)}
+                      onPress={() => confirmRemove(machine.id, machine.displayName)}
                     >
                       <Text style={{ color: C.err, fontSize: 16, lineHeight: 20, fontWeight: "600" }}>−</Text>
-                    </View>
+                    </Pressable>
                     <Chip tone={healthy ? "green" : "yellow"}>{healthy ? "ok" : "attention"}</Chip>
                   </View>
                   <Text style={[type.muted, { color: C.muted }]}>
@@ -112,9 +126,14 @@ export function MachinesScreen() {
                     </Text>
                   )}
                   {mode === "cloud" && (
-                    <View style={[styles.requestButton, { backgroundColor: C.panelAlt, borderColor: C.border }]} onTouchEnd={() => void requestSync(machine.id)}>
+                    <Pressable
+                      accessibilityRole="button"
+                      android_ripple={{ color: C.border, foreground: true, borderless: false }}
+                      style={[styles.requestButton, { backgroundColor: C.panelAlt, borderColor: C.border }]}
+                      onPress={() => void requestSync(machine.id)}
+                    >
                       <Text style={{ color: C.text, fontWeight: "600" }}>Request sync now</Text>
-                    </View>
+                    </Pressable>
                   )}
                 </Card>
               );
