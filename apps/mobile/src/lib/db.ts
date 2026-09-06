@@ -85,6 +85,15 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           fetched_at text not null
         );
         create table if not exists kv (key text primary key, value text not null);
+        create table if not exists direct_machines (
+          id text primary key,
+          slug text not null unique,
+          base_url text not null,
+          display_name text not null,
+          added_at text not null,
+          last_ping_at text,
+          last_error text
+        );
         create table if not exists model_prices (
           model_id text primary key,
           input_cost_per_m real not null,
