@@ -47,8 +47,8 @@ export async function pullCloud(
             await db.runAsync(
               `insert into environments
              (id, slug, display_name, host_group, os_kind, reporter_version, tokscale_version,
-              export_schema, reporting_timezone, last_heartbeat_at, last_success_at, last_error, latest_revision)
-           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              export_schema, reporting_timezone, last_heartbeat_at, last_success_at, last_error, latest_revision, live_endpoint)
+           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            on conflict (id) do update set
              slug = excluded.slug, display_name = excluded.display_name,
              host_group = excluded.host_group, os_kind = excluded.os_kind,
@@ -56,7 +56,8 @@ export async function pullCloud(
              export_schema = excluded.export_schema,
              reporting_timezone = excluded.reporting_timezone,
              last_heartbeat_at = excluded.last_heartbeat_at, last_success_at = excluded.last_success_at,
-             last_error = excluded.last_error, latest_revision = excluded.latest_revision`,
+             last_error = excluded.last_error, latest_revision = excluded.latest_revision,
+             live_endpoint = excluded.live_endpoint`,
               [
                 env.id,
                 env.slug,
@@ -71,6 +72,7 @@ export async function pullCloud(
                 env.lastSuccessAt,
                 env.lastError,
                 env.latestRevision,
+                env.liveEndpoint,
               ],
             );
           }

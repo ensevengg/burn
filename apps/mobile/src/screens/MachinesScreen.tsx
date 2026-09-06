@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useMachinesQuery } from "../data/queries";
 import { formatRelative } from "../lib/format";
@@ -12,13 +12,14 @@ import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
 
 export function MachinesScreen() {
   const machines = useMachinesQuery();
-  const { mode, requestSync, reportingTimezone, removeMachine } = useApp();
-  const { refreshingMachines } = useSyncStatus();
+  const { mode, requestSync, reportingTimezone, removeMachine, addDirectMachine } = useApp();
+  const { refreshingMachines, liveMachines } = useSyncStatus();
   const { C } = useTheme();
   const [showAdd, setShowAdd] = useState(false);
   // Gesture-driven spinner for demo mode: the machines query heartbeats every
   // minute, and isFetching would blip the pull-to-refresh control.
   const [demoRefreshing, setDemoRefreshing] = useState(false);
+  const liveBySlug = new Map(liveMachines.map((status) => [status.slug, status]));
 
   // Removal is destructive (server-side cascade of the machine's events +
   // quotas), so it always confirms first (user direction).
@@ -75,11 +76,13 @@ export function MachinesScreen() {
           </Pressable>
         </View>
         <Text style={[type.muted, { color: C.muted, marginHorizontal: spacing.l }]}>
-          Reporters push on a schedule; a resident daemon answers refresh requests within ~30s. Pull down to request a
-          sync from every machine. Reporting timezone: {reportingTimezone}.
+          {mode === "direct"
+            ? "Direct over Tailscale: your machines are the backend. Pull down (or open the app) to probe every machine and pull fresh data. Reporting timezone: "
+            : "Reporters push on a schedule; a resident daemon answers refresh requests within ~30s. Pull down to request a sync from every machine. Reporting timezone: "}
+          {reportingTimezone}.
         </Text>
 
-        {showAdd && <AddMachineSheet />}
+        {showAdd && (mode === "direct" ? <AddDirectMachineSheet onAdded={() => setShowAdd(false)} addMachine={addDirectMachine} /> : <AddMachineSheet />)}
 
         {mode !== "cloud" && !showAdd && (
           <Card>
@@ -96,6 +99,7 @@ export function MachinesScreen() {
             <SectionTitle trailing={`${machines.data?.length ?? 0} reporters`}>Environments</SectionTitle>
             {machines.data?.map((machine) => {
               const healthy = machine.lastError === null && machine.lastHeartbeatAt !== null;
+              const live = liveBySlug.get(machine.slug);
               return (
                 <Card key={machine.id}>
                   <View style={styles.header}>
@@ -120,6 +124,7 @@ export function MachinesScreen() {
                   <Text style={[type.muted, { color: C.muted, marginTop: 4 }]}>
                     {`tokscale ${machine.tokscaleVersion ?? "?"} · reporter ${machine.reporterVersion ?? "?"}`}
                   </Text>
+                  {live !== undefined && <LiveLine status={live} />}
                   {machine.lastError !== null && (
                     <Text style={{ color: C.err, marginTop: 6 }} numberOfLines={3}>
                       {machine.lastError}
@@ -194,6 +199,85 @@ function AddMachineSheet() {
           Connect a backend first (Settings → Mode) to get your command prefilled.
         </Text>
       )}
+    </Card>
+  );
+}
+
+/**
+ * Live-pull result for one machine (D1 v2). Rendered only after a probe ran —
+ * absence means "not probed yet", not "offline", so the card never implies a
+ * machine is down before the user asked.
+ */
+function LiveLine({ status }: { status: import("../lib/live").LivePullStatus }) {
+  const { C } = useTheme();
+  if (status.state === "live") {
+    const tail =
+      status.pulledEvents > 0
+        ? `live · +${status.pulledEvents} event${status.pulledEvents === 1 ? "" : "s"} not yet pushed`
+        : "live · up to date with its push cursor";
+    return <Text style={{ color: C.ok ?? C.muted, marginTop: 4 }}>{tail}</Text>;
+  }
+  if (status.state === "offline") {
+    return <Text style={[type.muted, { color: C.muted, marginTop: 4 }]}>live probe: unreachable — showing pushed data</Text>;
+  }
+  if (status.state === "skipped") {
+    return <Text style={{ color: C.err, marginTop: 4 }}>{`live probe skipped: ${status.error ?? "identity mismatch"}`}</Text>;
+  }
+  return <Text style={{ color: C.err, marginTop: 4 }} numberOfLines={2}>{`live probe failed: ${status.error ?? "unknown"}`}</Text>;
+}
+
+/**
+ * Direct mode (ADR 0002): adding a machine = its tailnet endpoint. The ping
+ * validates it and the slug dedupes it; the machine card appears immediately.
+ */
+function AddDirectMachineSheet({
+  onAdded,
+  addMachine,
+}: {
+  onAdded: () => void;
+  addMachine: (url: string) => Promise<{ slug: string; displayName: string }>;
+}) {
+  const { C } = useTheme();
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const valid = /^https?:\/\//.test(url.trim());
+
+  const submit = () => {
+    if (!valid || busy) return;
+    setBusy(true);
+    setError(null);
+    void addMachine(url.trim())
+      .then(() => onAdded())
+      .catch((err: Error) => setError(err.message))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Card>
+      <Text style={[type.h2, { color: C.text }]}>Add a machine</Text>
+      <Text style={[type.muted, { color: C.muted, marginVertical: 6 }]}>
+        Run `npx burn-report daemon` (or `serve`) on the machine — it prints its endpoint. Same tailnet required.
+      </Text>
+      <TextInput
+        value={url}
+        onChangeText={setUrl}
+        placeholder="http://machine-name:8787"
+        placeholderTextColor={C.faint}
+        autoCapitalize="none"
+        autoCorrect={false}
+        keyboardType="url"
+        style={[styles.command, { backgroundColor: C.panelAlt, borderColor: C.border, color: C.text }]}
+      />
+      {error !== null && <Text style={{ color: C.err, marginTop: 6 }}>{error}</Text>}
+      <Pressable
+        accessibilityRole="button"
+        android_ripple={{ color: C.border, foreground: true, borderless: false }}
+        style={[styles.requestButton, { backgroundColor: C.panelAlt, borderColor: C.border, opacity: valid && !busy ? 1 : 0.35 }]}
+        onPress={submit}
+      >
+        <Text style={{ color: C.text, fontWeight: "600" }}>{busy ? "Checking…" : "Add machine"}</Text>
+      </Pressable>
     </Card>
   );
 }

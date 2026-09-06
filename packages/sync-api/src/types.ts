@@ -22,6 +22,8 @@ export interface EnvironmentInfo {
   lastSuccessAt: string | null;
   lastError: string | null;
   latestRevision: number;
+  /** Tailscale live-pull base URL advertised by the machine's heartbeat (D1 v2). */
+  liveEndpoint: string | null;
 }
 
 /** A normalized per-message usage row (tokscale UnifiedMessage projection). */

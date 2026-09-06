@@ -16,51 +16,28 @@ import {
 } from "./config.js";
 import { renderSetupSql } from "./setup-sql.js";
 import { generateToken } from "./tokens.js";
-import { fetchUsage, tokscaleVersion, TokscaleError } from "./tokscale.js";
+import {
+  currentUtcOffsetMinutes,
+  fetchUsage,
+  REPORTER_VERSION,
+  tokscaleQuotaInputs,
+  tokscaleVersion,
+  TokscaleError,
+} from "./tokscale.js";
 import { exportRowsToIngestInputs, parseEventsJsonl, planBatches, pushSinceMs } from "./events.js";
 import { assertExporterMatchesPin, ExporterError, exporterVersion, fetchEventsJsonl } from "./exporter.js";
 import { quotaAccountKey, quotaMetricLabel, TOKSCALE_PIN } from "@burn/sync-api";
 import { writeFileSync } from "node:fs";
 import { platform } from "node:os";
 
-export const REPORTER_VERSION = "0.1.0";
+// Shared with the live server (serve.ts) — re-exported for compatibility.
+export { REPORTER_VERSION, tokscaleQuotaInputs, currentUtcOffsetMinutes } from "./tokscale.js";
 
 export function detectOsKind(): "windows" | "wsl" | "linux" | "macos" {
   if (platform() === "win32") return "windows";
   if (platform() === "darwin") return "macos";
   if (platform() === "linux" && process.env["WSL_DISTRO_NAME"]) return "wsl";
   return "linux";
-}
-
-export function currentUtcOffsetMinutes(): number {
-  return -new Date().getTimezoneOffset();
-}
-
-export function tokscaleQuotaInputs(outputs: Awaited<ReturnType<typeof fetchUsage>>): IngestQuotaInput[] {
-  const offset = currentUtcOffsetMinutes();
-  const inputs: IngestQuotaInput[] = [];
-  for (const out of outputs) {
-    const accountKey = quotaAccountKey(out.account?.id);
-    for (const metric of out.metrics) {
-      inputs.push({
-        provider: out.provider,
-        accountKey,
-        accountLabel: out.account?.label ?? null,
-        plan: out.plan ?? null,
-        metric: quotaMetricLabel(metric.label),
-        usedPercent: metric.used_percent,
-        remainingPercent: metric.remaining_percent,
-        remainingLabel: metric.remaining_label ?? null,
-        resetsAt: metric.resets_at ?? null,
-        creditStatus: out.credit_status ?? null,
-        spendControl: out.spend_control ?? null,
-        status: "ok",
-        error: null,
-        sourceOffsetMinutes: offset,
-      });
-    }
-  }
-  return inputs;
 }
 
 export function printConfigured(config: BurnConfig): void {
@@ -316,13 +293,33 @@ export async function pushMachineData(
   return 0;
 }
 
-// ── daemon (D1: resident eager path + scheduled fallback) ────────────────────
+// ── daemon (D1: resident eager path + scheduled fallback + live server) ──────
 
-export async function runDaemon(): Promise<void> {
+export async function runDaemon(args: Map<string, string> = new Map()): Promise<void> {
   const config = loadConfig();
   const reporter = reporterApiFor(config);
   const intervalMs = config.intervalMinutes * 60_000;
   let lastPush = 0;
+
+  // The live server rides the daemon (D1 v2). Failure to bind must not kill
+  // the push floor — it is an enhancement, logged and skipped.
+  const liveOptions: { bind?: string; port?: number } = {};
+  const bindArg = args.get("bind");
+  if (bindArg) liveOptions.bind = bindArg;
+  const portArg = args.get("port");
+  if (portArg) liveOptions.port = Number(portArg);
+  let liveUrl: string | null = args.get("live-url") ?? null;
+  let live: import("./serve.js").LiveServerHandle | null = null;
+  if (!args.has("no-live") && liveUrl === null) {
+    try {
+      const { startLiveServer } = await import("./serve.js");
+      live = await startLiveServer(config, liveOptions);
+      liveUrl = live.url;
+      console.log(`[live] serving ${liveUrl}`);
+    } catch (err) {
+      console.warn(`[live] not started: ${(err as Error).message}`);
+    }
+  }
 
   const cycle = async (reason: string): Promise<void> => {
     const started = Date.now();
@@ -332,6 +329,7 @@ export async function runDaemon(): Promise<void> {
         tokscaleVersion: await tokscaleVersion(config.tokscalePin),
         exportSchema: EVENT_EXPORT_SCHEMA,
         reportingTimezone: config.reportingTimezone,
+        ...(liveUrl !== null ? { liveEndpoint: liveUrl } : {}),
       });
     } catch (err) {
       const message = err instanceof BurnBackendError ? err.message : (err as Error).message;
@@ -373,6 +371,7 @@ export async function runDaemon(): Promise<void> {
   await new Promise<never>(() => {
     process.on("SIGINT", () => {
       clearInterval(poller);
+      live?.stop();
       console.log("\n[daemon] stopped");
       process.exit(0);
     });

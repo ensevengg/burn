@@ -2,7 +2,7 @@ import * as SecureStore from "expo-secure-store";
 import { kvGet, kvSet } from "./db";
 import type { SQLiteDatabase } from "expo-sqlite";
 
-export type AppMode = "unconfigured" | "demo" | "cloud";
+export type AppMode = "unconfigured" | "demo" | "cloud" | "direct";
 
 export interface ConnectionConfig {
   url: string;

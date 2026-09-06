@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { runDaemon, runDoctor, runInit, runPush, runUsage } from "./commands.js";
+import { runServe } from "./serve.js";
 
 function usage(): never {
   console.log(`burn-report — push AI token usage from this machine to your own Supabase
@@ -12,7 +13,9 @@ Usage: npx burn-report <command> [flags]
   usage     Fetch vendor quotas (tokscale usage) and push snapshots
   push      Push usage event rows since cursor (burn-events exporter);
             --full re-sends everything (correction pass after a pin bump)
-  daemon    Resident mode: 30s sync-request poll + scheduled push
+  daemon    Resident mode: 30s sync-request poll + scheduled push + live server
+            [--no-live] [--port 8787] [--bind ip] [--live-url https://...]
+  serve     Live server only (Tailscale live-pull endpoint), no push loop
   help      This text
 
 Docs: https://github.com/ensevengg/burn · AGENTS.md is the rulebook`);
@@ -42,7 +45,10 @@ try {
       process.exitCode = await runPush(args);
       break;
     case "daemon":
-      await runDaemon();
+      await runDaemon(args);
+      break;
+    case "serve":
+      await runServe(args);
       break;
     case "help":
     case "--help":
