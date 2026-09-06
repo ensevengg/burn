@@ -4,8 +4,8 @@
  * that day below. Pure display — day keys arrive pre-bucketed in the
  * reporting timezone (D8).
  */
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { memo, useMemo, useRef, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useTheme } from "../lib/theme-context";
 import { spacing } from "../theme";
 import { bucketKey, formatCost, formatTokens } from "../lib/format";
@@ -33,6 +33,36 @@ function withAlpha(hex: string, alpha: number): string {
     .toString(16)
     .padStart(2, "0")}`;
 }
+
+interface GridCellProps {
+  dayKey: string;
+  tokens: number;
+  max: number;
+  selected: boolean;
+  onSelect: (dayKey: string) => void;
+}
+
+/**
+ * Memoized so a selection tap re-renders two cells, not the whole 371-cell
+ * grid; `onSelect` is the stable setState function, so props stay referential.
+ */
+const GridCell = memo(function GridCell({ dayKey, tokens, max, selected, onSelect }: GridCellProps) {
+  const { C } = useTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={dayKey}
+      onPress={() => onSelect(dayKey)}
+      style={[
+        styles.cell,
+        {
+          backgroundColor: intensity(tokens, max, C),
+          borderColor: selected ? C.text : "transparent",
+        },
+      ]}
+    />
+  );
+});
 
 export function ContributionGrid({
   totals,
@@ -103,18 +133,14 @@ export function ContributionGrid({
               <View key={columnIndex} style={styles.column}>
                 {column.dayKeys.map((key, dayIndex) => {
                   if (key === null) return <View key={dayIndex} style={styles.cell} />;
-                  const day = totals.byKey[key];
                   return (
-                    <View
+                    <GridCell
                       key={key}
-                      style={[
-                        styles.cell,
-                        {
-                          backgroundColor: intensity(day === undefined ? 0 : day.tokens, totals.max, C),
-                          borderColor: key === captionKey ? C.text : "transparent",
-                        },
-                      ]}
-                      onTouchEnd={() => setSelected(key)}
+                      dayKey={key}
+                      tokens={totals.byKey[key]?.tokens ?? 0}
+                      max={totals.max}
+                      selected={key === captionKey}
+                      onSelect={setSelected}
                     />
                   );
                 })}
