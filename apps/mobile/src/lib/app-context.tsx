@@ -22,6 +22,7 @@ import {
   type ConnectionConfig,
 } from "./settings";
 import { seedDemoData, syncFromCloud, requestMachineSync, cancelCloudSync } from "./sync";
+import { pullDirectFromMachines, addDirectMachine, removeDirectMachine, type DirectPullStatus } from "./direct";
 import { pullLiveFromMachines, type LivePullStatus } from "./live";
 import { removeEnvironmentLocal } from "../data/repository";
 import { subscribeMirrorChanges } from "./sync-state";
@@ -34,6 +35,8 @@ interface AppState {
   reportingTimezone: string;
   enterDemo: () => Promise<void>;
   connect: (config: ConnectionConfig) => Promise<void>;
+  connectDirect: () => Promise<void>;
+  addDirectMachine: (url: string) => Promise<{ slug: string; displayName: string }>;
   disconnect: () => Promise<void>;
   sync: () => Promise<void>;
   requestSync: (environmentId: string | null) => Promise<void>;
@@ -56,8 +59,8 @@ interface SyncStatus {
   refreshingMachines: boolean;
   /** True for the whole bounded follow-up window, not just the first pull. */
   checkingMachines: boolean;
-  /** Per-machine result of the last Tailscale live probe (D1 v2). */
-  liveMachines: LivePullStatus[];
+  /** Per-machine result of the last Tailscale probe (live pull or direct mode). */
+  liveMachines: LivePullStatus[] | DirectPullStatus[];
 }
 
 const AppContext = createContext<AppState | null>(null);
@@ -99,10 +102,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [db, patchStatus]);
 
   /**
-   * Tailscale live probe (D1 v2). Explicit gestures and app-foreground only —
-   * never the minute timer: each probe triggers a machine-side exporter scan.
-   * Writes serialize on the mirror lock; cancellation rides the same
-   * generation counter as the cloud path.
+   * Tailscale live probe (D1 v2, cloud mode). Explicit gestures and
+   * app-foreground only — never the minute timer: each probe triggers a
+   * machine-side exporter scan. Writes serialize on the mirror lock;
+   * cancellation rides the same generation counter as the cloud path.
+   * Direct mode probes through sync()/requestSync instead — there, probing
+   * IS the sync.
    */
   const pullLive = useCallback(
     (signal?: AbortSignal) => {
@@ -161,9 +166,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const sync = useCallback(async () => {
-    if (db === null || mode !== "cloud") return;
+    if (db === null || (mode !== "cloud" && mode !== "direct")) return;
     const epoch = lifecycle.current;
     try {
+      if (mode === "direct") {
+        const statuses = await pullDirectFromMachines(db);
+        if (epoch !== lifecycle.current) return;
+        const failed = statuses.filter((s) => s.state === "error").length;
+        patchStatus({
+          lastSync: new Date(),
+          syncError: null,
+          syncNotice:
+            failed > 0
+              ? `${failed} machine${failed === 1 ? "" : "s"} failed to answer — showing pushed/cached data.`
+              : null,
+          liveMachines: statuses,
+        });
+        return;
+      }
       const result = await syncFromCloud(db);
       if (epoch !== lifecycle.current) return;
       patchStatus({
@@ -177,17 +197,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [db, mode, patchStatus]);
 
   useEffect(() => {
-    if (mode !== "cloud") return;
+    if (mode !== "cloud" && mode !== "direct") return;
     void sync();
     const subscription = NativeAppState.addEventListener("change", (state) => {
       if (state === "active") {
         void sync();
-        pullLive();
+        if (mode === "cloud") pullLive();
       }
     });
     const timer = setInterval(() => {
-      // Deliberately no live probe here: per-minute exporter scans on the
-      // machine are not worth it; the mirror is already fresh to the last push.
+      // Cloud: deliberately no live probe on the timer (per-minute exporter
+      // scans on the machine are not worth it; the mirror is fresh to the
+      // last push). Direct: the timed sync IS the probe — its since-cursor
+      // keeps each scan to a small window.
       if (NativeAppState.currentState === "active") void sync();
     }, 60_000);
     return () => {
@@ -230,6 +252,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setMode("cloud");
         invalidate();
       },
+      async connectDirect() {
+        if (!db) return;
+        await prepareReset();
+        setMode("unconfigured");
+        // Keep any previously registered machines and their history: the
+        // registry is the backend here, and wiping it would orphan the mirror.
+        await kvSet(db, "mode", "direct");
+        setMode("direct");
+        invalidate();
+      },
+      async addDirectMachine(url) {
+        if (!db) throw new Error("App not started");
+        const added = await addDirectMachine(db, url);
+        invalidate();
+        // First data lands immediately; statuses feed the Machines card.
+        void sync();
+        return added;
+      },
       async disconnect() {
         if (!db) return;
         await prepareReset();
@@ -239,7 +279,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
         invalidate();
       },
       async requestSync(environmentId) {
-        if (!db || mode !== "cloud") return;
+        if (!db || mode === "unconfigured" || mode === "demo") return;
+        if (mode === "direct") {
+          patchStatus({ refreshingMachines: true });
+          try {
+            await sync();
+          } finally {
+            patchStatus({ refreshingMachines: false });
+          }
+          return;
+        }
         const existing = followup.current;
         if (existing && (existing.target === null || existing.target === environmentId))
           return existing.promise;
@@ -273,6 +322,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       async removeMachine(environmentId) {
         if (!db) return;
         stop();
+        if (mode === "direct") {
+          await removeDirectMachine(db, environmentId);
+          patchStatus({ liveMachines: [] });
+          invalidate();
+          return;
+        }
         if (mode === "cloud") {
           const connection = await loadConnection();
           if (!connection) throw new Error("Not connected to a backend");

@@ -7,12 +7,12 @@ import { spacing, type } from "../theme";
 import { Card } from "../ui/primitives";
 
 export function SetupScreen() {
-  const { enterDemo, connect } = useApp();
+  const { enterDemo, connect, connectDirect } = useApp();
   const { C } = useTheme();
   const [url, setUrl] = useState("");
   const [publishableKey, setKey] = useState("");
   const [readToken, setToken] = useState("");
-  const [busy, setBusy] = useState<null | "demo" | "cloud">(null);
+  const [busy, setBusy] = useState<null | "demo" | "cloud" | "direct">(null);
   const [error, setError] = useState<string | null>(null);
 
   const trimmedUrl = url.trim().replace(/\/+$/, "");
@@ -44,6 +44,29 @@ export function SetupScreen() {
               }}
             >
               <Text style={{ color: C.accentInk, fontWeight: "700" }}>Explore with demo data</Text>
+            </Pressable>
+          )}
+        </Card>
+
+        <Card>
+          <Text style={[type.h2, { color: C.text }]}>Connect machines directly</Text>
+          <Text style={[type.muted, { color: C.muted, marginVertical: spacing.s }]}>
+            No cloud project. Your phone talks to your machines over Tailscale; history lives on this device and on
+            the machines. Add machines on the Machines tab afterwards.
+          </Text>
+          {busy === "direct" ? (
+            <ActivityIndicator color={C.text} />
+          ) : (
+            <Pressable
+              accessibilityRole="button"
+              android_ripple={{ color: C.border, foreground: true, borderless: false }}
+              style={[styles.actionButton, { borderColor: C.accent, borderWidth: 1 }]}
+              onPress={() => {
+                setBusy("direct");
+                void connectDirect().finally(() => setBusy(null));
+              }}
+            >
+              <Text style={{ color: C.text, fontWeight: "700" }}>Use machines directly</Text>
             </Pressable>
           )}
         </Card>

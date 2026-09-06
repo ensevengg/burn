@@ -45,11 +45,12 @@ export function SettingsScreen() {
         <Card>
           <View style={styles.rowBetween}>
             <Text style={[type.body, { color: C.text }]}>Mode</Text>
-            <Chip tone={mode === "cloud" ? "green" : mode === "demo" ? "yellow" : "muted"}>{mode}</Chip>
+            <Chip tone={mode === "cloud" || mode === "direct" ? "green" : mode === "demo" ? "yellow" : "muted"}>{mode}</Chip>
           </View>
           <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
-            BYO Supabase (D4). The app holds only a scoped read token (D7); the secret key never leaves your
-            dashboard.
+            {mode === "direct"
+              ? "Direct over Tailscale (ADR 0002). Your machines are the backend; nothing leaves the tailnet."
+              : "BYO Supabase (D4). The app holds only a scoped read token (D7); the secret key never leaves your dashboard."}
           </Text>
           {mode === "cloud" && (
             <Pressable
@@ -57,6 +58,16 @@ export function SettingsScreen() {
               android_ripple={{ color: C.border, foreground: true, borderless: false }}
               style={[styles.dangerButton, { borderColor: C.border }]}
               onPress={() => void disconnect()}
+            >
+              <Text style={{ color: C.err, fontWeight: "600" }}>Disconnect & wipe local cache</Text>
+            </Pressable>
+          )}
+          {mode === "direct" && (
+            <Pressable
+              accessibilityRole="button"
+              android_ripple={{ color: C.border, foreground: true, borderless: false }}
+              style={[styles.dangerButton, { borderColor: C.border }]}
+              onPress={() => void clearData()}
             >
               <Text style={{ color: C.err, fontWeight: "600" }}>Disconnect & wipe local cache</Text>
             </Pressable>
@@ -110,13 +121,15 @@ export function SettingsScreen() {
               style={[styles.tzToggle, { backgroundColor: C.panelAlt, borderColor: C.border }]}
               onPress={() => void sync()}
             >
-              <Text style={{ color: C.text, fontWeight: "600" }}>Pull delta now</Text>
+              <Text style={{ color: C.text, fontWeight: "600" }}>{mode === "direct" ? "Sync machines now" : "Pull delta now"}</Text>
             </Pressable>
           </View>
           <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
             {mode === "cloud"
               ? `Fetches revision > watermark. Last pulled ${lastSync === null ? "never" : lastSync.toISOString()}.`
-              : "Available when connected to a backend."}
+              : mode === "direct"
+                ? `Probes every registered machine. Last pulled ${lastSync === null ? "never" : lastSync.toISOString()}.`
+                : "Available when connected to a backend."}
           </Text>
         </Card>
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useMachinesQuery } from "../data/queries";
 import { formatRelative } from "../lib/format";
@@ -12,7 +12,7 @@ import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
 
 export function MachinesScreen() {
   const machines = useMachinesQuery();
-  const { mode, requestSync, reportingTimezone, removeMachine } = useApp();
+  const { mode, requestSync, reportingTimezone, removeMachine, addDirectMachine } = useApp();
   const { refreshingMachines, liveMachines } = useSyncStatus();
   const { C } = useTheme();
   const [showAdd, setShowAdd] = useState(false);
@@ -76,11 +76,13 @@ export function MachinesScreen() {
           </Pressable>
         </View>
         <Text style={[type.muted, { color: C.muted, marginHorizontal: spacing.l }]}>
-          Reporters push on a schedule; a resident daemon answers refresh requests within ~30s. Pull down to request a
-          sync from every machine. Reporting timezone: {reportingTimezone}.
+          {mode === "direct"
+            ? "Direct over Tailscale: your machines are the backend. Pull down (or open the app) to probe every machine and pull fresh data. Reporting timezone: "
+            : "Reporters push on a schedule; a resident daemon answers refresh requests within ~30s. Pull down to request a sync from every machine. Reporting timezone: "}
+          {reportingTimezone}.
         </Text>
 
-        {showAdd && <AddMachineSheet />}
+        {showAdd && (mode === "direct" ? <AddDirectMachineSheet onAdded={() => setShowAdd(false)} addMachine={addDirectMachine} /> : <AddMachineSheet />)}
 
         {mode !== "cloud" && !showAdd && (
           <Card>
@@ -222,6 +224,62 @@ function LiveLine({ status }: { status: import("../lib/live").LivePullStatus }) 
     return <Text style={{ color: C.err, marginTop: 4 }}>{`live probe skipped: ${status.error ?? "identity mismatch"}`}</Text>;
   }
   return <Text style={{ color: C.err, marginTop: 4 }} numberOfLines={2}>{`live probe failed: ${status.error ?? "unknown"}`}</Text>;
+}
+
+/**
+ * Direct mode (ADR 0002): adding a machine = its tailnet endpoint. The ping
+ * validates it and the slug dedupes it; the machine card appears immediately.
+ */
+function AddDirectMachineSheet({
+  onAdded,
+  addMachine,
+}: {
+  onAdded: () => void;
+  addMachine: (url: string) => Promise<{ slug: string; displayName: string }>;
+}) {
+  const { C } = useTheme();
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const valid = /^https?:\/\//.test(url.trim());
+
+  const submit = () => {
+    if (!valid || busy) return;
+    setBusy(true);
+    setError(null);
+    void addMachine(url.trim())
+      .then(() => onAdded())
+      .catch((err: Error) => setError(err.message))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <Card>
+      <Text style={[type.h2, { color: C.text }]}>Add a machine</Text>
+      <Text style={[type.muted, { color: C.muted, marginVertical: 6 }]}>
+        Run `npx burn-report daemon` (or `serve`) on the machine — it prints its endpoint. Same tailnet required.
+      </Text>
+      <TextInput
+        value={url}
+        onChangeText={setUrl}
+        placeholder="http://machine-name:8787"
+        placeholderTextColor={C.faint}
+        autoCapitalize="none"
+        autoCorrect={false}
+        keyboardType="url"
+        style={[styles.command, { backgroundColor: C.panelAlt, borderColor: C.border, color: C.text }]}
+      />
+      {error !== null && <Text style={{ color: C.err, marginTop: 6 }}>{error}</Text>}
+      <Pressable
+        accessibilityRole="button"
+        android_ripple={{ color: C.border, foreground: true, borderless: false }}
+        style={[styles.requestButton, { backgroundColor: C.panelAlt, borderColor: C.border, opacity: valid && !busy ? 1 : 0.35 }]}
+        onPress={submit}
+      >
+        <Text style={{ color: C.text, fontWeight: "600" }}>{busy ? "Checking…" : "Add machine"}</Text>
+      </Pressable>
+    </Card>
+  );
 }
 
 const styles = StyleSheet.create({
