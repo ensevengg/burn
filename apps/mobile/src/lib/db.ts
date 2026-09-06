@@ -6,6 +6,7 @@
  */
 import * as SQLite from "expo-sqlite";
 import { withWriteLock } from "./writelock";
+import { invalidateEventCache } from "../data/repository";
 
 export type { SQLiteDatabase } from "expo-sqlite";
 
@@ -121,7 +122,12 @@ export async function kvSet(db: SQLite.SQLiteDatabase, key: string, value: strin
  * callers set `mode` explicitly after a reset.
  */
 export function resetDb(db: SQLite.SQLiteDatabase): Promise<void> {
-  return withWriteLock(() => wipeForReseed(db));
+  // Eviction happens inside the writer, right after the deletes commit: no
+  // pre-reset read result may survive in the shared event cache.
+  return withWriteLock(async () => {
+    await wipeForReseed(db);
+    invalidateEventCache(db);
+  });
 }
 
 /** Same deletes as resetDb, for callers already holding the write lock. */
