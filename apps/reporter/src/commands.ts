@@ -18,12 +18,7 @@ import { renderSetupSql } from "./setup-sql.js";
 import { generateToken } from "./tokens.js";
 import { fetchUsage, tokscaleVersion, TokscaleError } from "./tokscale.js";
 import { exportRowsToIngestInputs, parseEventsJsonl, planBatches, pushSinceMs } from "./events.js";
-import {
-  assertExporterMatchesPin,
-  ExporterError,
-  exporterVersion,
-  fetchEventsJsonl,
-} from "./exporter.js";
+import { assertExporterMatchesPin, ExporterError, exporterVersion, fetchEventsJsonl } from "./exporter.js";
 import { quotaAccountKey, quotaMetricLabel, TOKSCALE_PIN } from "@burn/sync-api";
 import { writeFileSync } from "node:fs";
 import { platform } from "node:os";
@@ -107,9 +102,13 @@ export function runInit(args: Map<string, string>): void {
   printConfigured(config);
   console.log(`\nconfig       ${configPath()}`);
   console.log("\nNext steps (one-time):");
-  console.log(`  1. Paste supabase/migrations/0001_schema.sql into your project's SQL editor, then 0002_api.sql.`);
+  console.log(
+    `  1. Paste supabase/migrations/0001_schema.sql into your project's SQL editor, then 0002_api.sql.`,
+  );
   console.log(`  2. Paste ${setupSqlPath()} into the SQL editor (registers this machine + your phone).`);
-  console.log(`  3. Phone app → Settings → Connect: paste the same URL + publishable key and this read token:`);
+  console.log(
+    `  3. Phone app → Settings → Connect: paste the same URL + publishable key and this read token:`,
+  );
   console.log(`\nREAD TOKEN (store it in the app; it is shown only once):\n  ${readToken}`);
   console.log(`\nINGEST TOKEN (already saved to config.json; shown only once):\n  ${ingestToken}`);
   console.log(`\nThen: npx burn-report doctor`);
@@ -272,17 +271,49 @@ export async function runPush(args: Map<string, string>): Promise<number> {
     exportSchema: EVENT_EXPORT_SCHEMA,
     reportingTimezone: config.reportingTimezone,
   });
-  try {
-    const outcome = await pushEvents(config, reporter, { full: args.has("full") });
-    console.log(
-      `push: ${outcome.rows} row(s) through ${outcome.batches} batch(es); ` +
-        `${outcome.changed} changed; environment revision ${outcome.revision}`,
-    );
-    return 0;
-  } catch (err) {
-    await reporter.reportError(`push: ${(err as Error).message}`).catch(() => {});
-    throw err;
-  }
+  return pushMachineData(config, reporter, args.has("full"));
+}
+
+/** One machine cycle: independent event and quota sources, shared scoped ingest API. */
+export async function pushMachineData(
+  config: BurnConfig,
+  reporter: ReporterSyncApi,
+  full = false,
+  sources: { events: typeof pushEvents; quotas: typeof fetchUsage } = {
+    events: pushEvents,
+    quotas: fetchUsage,
+  },
+): Promise<number> {
+  // Scheduled push is the reliability floor for both events and quotas.
+  // Neither channel waits for the other, and either can succeed independently.
+  const results = await Promise.allSettled([
+    (async () => {
+      try {
+        const outcome = await sources.events(config, reporter, { full });
+        console.log(`push: ${outcome.rows} row(s), ${outcome.changed} changed; revision ${outcome.revision}`);
+      } catch (err) {
+        await reporter.reportError(`push: ${(err as Error).message}`).catch(() => {});
+        throw err;
+      }
+    })(),
+    (async () => {
+      try {
+        const quotas = tokscaleQuotaInputs(await sources.quotas(config.tokscalePin));
+        if (quotas.length > 0) {
+          const result = await reporter.pushQuotaSnapshots(quotas);
+          console.log(`push: ${result.snapshots} quota snapshot(s)`);
+        } else {
+          console.log("push: no quota providers with credentials on this machine");
+        }
+      } catch (err) {
+        await reporter.reportError(`usage: ${(err as Error).message}`).catch(() => {});
+        throw err;
+      }
+    })(),
+  ]);
+  const failures = results.flatMap((result) => (result.status === "rejected" ? [String(result.reason)] : []));
+  if (failures.length > 0) throw new Error(failures.join("; "));
+  return 0;
 }
 
 // ── daemon (D1: resident eager path + scheduled fallback) ────────────────────
@@ -309,34 +340,22 @@ export async function runDaemon(): Promise<void> {
       return;
     }
     try {
-      const outcome = await pushEvents(config, reporter);
-      console.log(
-        `[daemon] ${reason}: push ok — ${outcome.rows} row(s), ${outcome.changed} changed, ` +
-          `revision ${outcome.revision} (${Date.now() - started}ms)`,
-      );
-    } catch (err) {
-      const message =
-        err instanceof TokscaleError || err instanceof ExporterError
-          ? err.message
-          : (err as Error).message;
-      console.error(`[daemon] ${reason}: push: ${message}`);
-      await reporter.reportError(`push: ${message}`).catch(() => {});
-    }
-    try {
-      const quotas = tokscaleQuotaInputs(await fetchUsage(config.tokscalePin));
-      if (quotas.length > 0) await reporter.pushQuotaSnapshots(quotas);
+      await pushMachineData(config, reporter);
       console.log(`[daemon] ${reason}: ok (${Date.now() - started}ms)`);
     } catch (err) {
-      const message = err instanceof TokscaleError ? err.message : (err as Error).message;
-      console.error(`[daemon] ${reason}: quota: ${message}`);
-      await reporter.reportError(`usage: ${message}`).catch(() => {});
+      console.error(`[daemon] ${reason}: ${(err as Error).message}`);
     }
     lastPush = Date.now();
   };
 
-  console.log(`[daemon] resident mode: polling sync_requests every 30s, scheduled push every ${config.intervalMinutes} min`);
+  console.log(
+    `[daemon] resident mode: polling sync_requests every 30s, scheduled push every ${config.intervalMinutes} min`,
+  );
   await cycle("startup");
+  let polling = false;
   const poller = setInterval(() => {
+    if (polling) return;
+    polling = true;
     const scheduled = Date.now() - lastPush >= intervalMs;
     void (async () => {
       try {
@@ -345,6 +364,8 @@ export async function runDaemon(): Promise<void> {
         else if (scheduled) await cycle("scheduled");
       } catch (err) {
         console.error(`[daemon] poll: ${(err as Error).message}`);
+      } finally {
+        polling = false;
       }
     })();
   }, 30_000);

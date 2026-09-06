@@ -29,7 +29,7 @@ bun run mobile        # then scan the QR with Expo Go on your Android phone
 # Setup screen → "Explore with demo data"
 ```
 
-**Full loop (with your Supabase project):** follow [supabase/README.md](./supabase/README.md) — three SQL pastes, `npx burn-report init`, then connect the phone with the printed read token. Install the exporter once per machine (`cargo install --path crates/burn-events`); `bun run reporter -- push` then streams per-message usage rows (tokens, cache, cost) and `bun run reporter -- usage` pushes real Codex/Z.ai quotas. The Machines tab can request eager syncs from machines running `burn-report daemon`.
+**Full loop (with your Supabase project):** follow [supabase/README.md](./supabase/README.md) — three SQL pastes, `npx burn-report init`, then connect the phone with the printed read token. Install the exporter once per machine (`cargo install --path crates/burn-events`); `bun run reporter -- push` then streams per-message usage rows (tokens, cache, cost) and refreshes vendor quotas independently; `bun run reporter -- usage` is the quota-only command. The Machines tab can request eager syncs from machines running `burn-report daemon`.
 
 **Reporter (on each machine):**
 ```bash
