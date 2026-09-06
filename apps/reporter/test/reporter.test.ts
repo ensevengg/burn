@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { platform } from "node:os";
 import { join } from "node:path";
 import { configSchema, loadConfig, saveConfig, configPath, setupSqlPath } from "../src/config.js";
 import { renderSetupSql } from "../src/setup-sql.js";
@@ -110,9 +111,12 @@ describe("tokscale adapter", () => {
 
 describe("init artifacts", () => {
   test("detectOsKind maps WSL via WSL_DISTRO_NAME", () => {
+    // WSL_DISTRO_NAME only distinguishes wsl from linux on a Linux host; on
+    // Windows proper the win32 check wins even if the variable leaks in.
+    const expected = platform() === "win32" ? "windows" : "wsl";
     const previous = process.env["WSL_DISTRO_NAME"];
     process.env["WSL_DISTRO_NAME"] = "Ubuntu-24.04";
-    expect(detectOsKind()).toBe("wsl");
+    expect(detectOsKind()).toBe(expected);
     if (previous === undefined) delete process.env["WSL_DISTRO_NAME"];
     else process.env["WSL_DISTRO_NAME"] = previous;
   });
