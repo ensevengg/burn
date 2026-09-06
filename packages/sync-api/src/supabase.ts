@@ -69,6 +69,7 @@ export function parseEnvironmentRow(raw: any): EnvironmentInfo {
     lastSuccessAt: orNull(raw.last_success_at),
     lastError: orNull(raw.last_error),
     latestRevision: Number(raw.latest_revision ?? 0),
+    liveEndpoint: orNull(raw.live_endpoint),
   };
 }
 
@@ -203,14 +204,18 @@ export function createBurnBackend(config: BurnBackendConfig): BurnBackend {
       const token = ingestToken;
       return {
         async heartbeat(meta: ReporterMeta) {
+          const meta_wire: Record<string, unknown> = {
+            reporter_version: meta.reporterVersion,
+            tokscale_version: meta.tokscaleVersion,
+            export_schema: meta.exportSchema,
+            reporting_timezone: meta.reportingTimezone,
+          };
+          // Undefined = "not my concern" — the server coalesce keeps whatever
+          // the live-serving process last advertised.
+          if (meta.liveEndpoint !== undefined) meta_wire.live_endpoint = meta.liveEndpoint;
           const out = await rpc<{ environment_id: string; slug: string }>("burn_heartbeat", {
             p_ingest_token: token,
-            p_meta: {
-              reporter_version: meta.reporterVersion,
-              tokscale_version: meta.tokscaleVersion,
-              export_schema: meta.exportSchema,
-              reporting_timezone: meta.reportingTimezone,
-            },
+            p_meta: meta_wire,
           });
           return { environmentId: out.environment_id, slug: out.slug };
         },

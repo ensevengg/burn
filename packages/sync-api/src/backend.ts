@@ -19,6 +19,13 @@ export interface ReporterMeta {
   tokscaleVersion: string | null;
   exportSchema: number | null;
   reportingTimezone: string | null;
+  /**
+   * Tailscale live-pull base URL (D1 v2). Omitted (undefined) preserves
+   * whatever the environment last advertised; explicit null CLEARS it (the
+   * machine stopped serving live). Only a process actually running the live
+   * server may set a URL, so a parallel `push` can't wipe another's.
+   */
+  liveEndpoint?: string | null;
 }
 
 /** What the reporter sends for one usage row (pre-identity; server computes event_id). */
