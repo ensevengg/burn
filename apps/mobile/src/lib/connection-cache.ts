@@ -19,7 +19,7 @@ export function createConnectionCache(
   return {
     get() {
       if (pending !== null) return pending;
-      pending = load().then((config) =>
+      const current = load().then((config) =>
         config === null
           ? null
           : {
@@ -27,10 +27,11 @@ export function createConnectionCache(
               phone: backendFor(config).phone(config.readToken),
             },
       );
-      void pending.catch(() => {
-        pending = null;
+      pending = current;
+      void current.catch(() => {
+        if (pending === current) pending = null;
       });
-      return pending;
+      return current;
     },
     clear() {
       pending = null;
