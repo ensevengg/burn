@@ -40,7 +40,7 @@ export function DashboardScreen() {
   // Cloud pull-to-refresh is covered by the machine-refresh spinner (which
   // settles after the first pull); demo mode has no machines to ask, so the
   // gesture itself drives the spinner — heartbeat refetches must not blip it.
-  const refreshing = mode === "cloud" ? refreshingMachines : demoRefreshing;
+  const refreshing = mode === "demo" ? demoRefreshing : refreshingMachines;
 
   const totals = overview.data?.totals;
   const headlineValue =
@@ -52,7 +52,7 @@ export function DashboardScreen() {
 
   // Pull-to-refresh = request an eager push from every online machine (D1) + pull delta.
   const onRefresh = () => {
-    if (mode === "cloud") {
+    if (mode === "cloud" || mode === "direct") {
       void requestSync(null);
       return;
     }
@@ -68,8 +68,8 @@ export function DashboardScreen() {
       >
         <View style={styles.header}>
           <Text style={[type.title, { color: C.text }]}>Overview</Text>
-          <Chip tone={mode === "demo" ? "yellow" : mode === "cloud" ? "green" : "muted"}>
-            {mode === "demo" ? "demo data" : mode === "cloud" ? "live" : "not connected"}
+          <Chip tone={mode === "demo" ? "yellow" : mode === "cloud" || mode === "direct" ? "green" : "muted"}>
+            {mode === "demo" ? "demo data" : mode === "cloud" ? "cloud" : mode === "direct" ? "direct" : "not connected"}
           </Chip>
         </View>
 
