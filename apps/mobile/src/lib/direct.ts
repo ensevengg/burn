@@ -291,6 +291,19 @@ async function pullDirectUnlocked(
         const storedCursor = await kvGetNumber(db, cursorKey(machine.id));
         const since = storedCursor === null ? null : Math.max(0, storedCursor - LIVE_OVERLAP_MS);
 
+        // Quotas are independent of event export. Start the vendor request
+        // before the scan so its latency is hidden behind the slower path;
+        // failure remains best-effort and cannot discard event data.
+        const quotaPromise = (async () => {
+          const quotaTimeout = withTimeout(probeSignal, options.pingTimeoutMs ?? 15_000);
+          try {
+            return parseLiveQuotasPage(await api.quotas(quotaTimeout.signal));
+          } catch {
+            return null;
+          } finally {
+            quotaTimeout.cancel();
+          }
+        })();
         const eventsTimeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 60_000);
         let eventsPage;
         try {
@@ -420,31 +433,34 @@ async function pullDirectUnlocked(
         // Quotas: env-scoped upsert only — never touches other machines'
         // rows, so the cloud path's wholesale replace stays impossible here.
         let pulledQuotas = 0;
-        const quotaTimeout = withTimeout(probeSignal, options.pingTimeoutMs ?? 15_000);
-        let quotaPage;
-        try {
-          quotaPage = parseLiveQuotasPage(await api.quotas(quotaTimeout.signal));
-        } catch {
-          quotaPage = null; // quotas are best-effort; events already merged
-        } finally {
-          quotaTimeout.cancel();
-        }
+        const quotaPage = await quotaPromise;
         if (quotaPage !== null && quotaPage.quotas.length > 0) {
+          let changedQuotas = 0;
           await withWriteLock(async () => {
             assertActive();
             await db.withTransactionAsync(async () => {
               for (const q of quotaPage.quotas) {
-                await db.runAsync(
+                const result = await db.runAsync(
                   `insert into quota_snapshots
                      (row_key, environment_id, provider, account_key, account_label, plan, metric,
                       used_percent, remaining_percent, remaining_label, resets_at, status, error, fetched_at)
                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    on conflict (row_key) do update set
+                     account_label = excluded.account_label, plan = excluded.plan,
                      used_percent = excluded.used_percent,
                      remaining_percent = excluded.remaining_percent,
                      remaining_label = excluded.remaining_label, resets_at = excluded.resets_at,
                      status = excluded.status, error = excluded.error,
-                     fetched_at = excluded.fetched_at`,
+                     fetched_at = excluded.fetched_at
+                   where quota_snapshots.account_label is not excluded.account_label or
+                     quota_snapshots.plan is not excluded.plan or
+                     quota_snapshots.used_percent is not excluded.used_percent or
+                     quota_snapshots.remaining_percent is not excluded.remaining_percent or
+                     quota_snapshots.remaining_label is not excluded.remaining_label or
+                     quota_snapshots.resets_at is not excluded.resets_at or
+                     quota_snapshots.status is not excluded.status or
+                     quota_snapshots.error is not excluded.error or
+                     quota_snapshots.fetched_at is not excluded.fetched_at`,
                   [
                     `${machine.id}|${q.provider}|${q.accountKey}|${q.metric}`,
                     machine.id,
@@ -462,11 +478,12 @@ async function pullDirectUnlocked(
                     quotaPage.generatedAt,
                   ],
                 );
+                changedQuotas += result.changes;
               }
             });
           });
           pulledQuotas = quotaPage.quotas.length;
-          publishMirrorChange(db, "quotas");
+          if (changedQuotas > 0) publishMirrorChange(db, "quotas");
         }
 
         return {

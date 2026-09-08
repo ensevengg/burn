@@ -246,7 +246,45 @@ describe("direct pull", () => {
     expect(eventCalls).toBe(1);
   });
 
-  test("an identical overlap does not announce an event change", async () => {
+  test("starts quota collection while the event scan is running", async () => {
+    const fx = mirrorFixture();
+    await addDirectMachine(fx.db, "http://win:8787", {
+      apiFor: directApiFor({ "http://win:8787": { seenSince: [] } }),
+    });
+    let eventStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      eventStarted = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let quotaCalls = 0;
+    const pending = pullDirectFromMachines(fx.db, {
+      apiFor: () => ({
+        ping: async () => ping(),
+        events: async (sinceMs) => {
+          eventStarted();
+          await gate;
+          return { sinceMs, generatedAt: "2026-09-07T10:00:00.000Z", events: [] };
+        },
+        quotas: async () => {
+          quotaCalls += 1;
+          return { generatedAt: "2026-09-07T10:00:00.000Z", quotas: [] };
+        },
+      }),
+    });
+    try {
+      await started;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(quotaCalls).toBe(1);
+    } finally {
+      release();
+      await pending;
+    }
+  });
+
+  test("an identical overlap does not announce mirror changes", async () => {
     const fx = mirrorFixture();
     const entry: FakeEntry = {
       seenSince: [],
@@ -254,6 +292,25 @@ describe("direct pull", () => {
         sinceMs: null,
         generatedAt: "2026-09-07T10:00:00.000Z",
         events: [ingestRow()],
+      },
+      quotas: {
+        generatedAt: "2026-09-07T10:00:00.000Z",
+        quotas: [
+          {
+            provider: "codex",
+            accountKey: "shared",
+            accountLabel: "Personal",
+            plan: null,
+            metric: "5h",
+            usedPercent: 40,
+            remainingPercent: 60,
+            remainingLabel: null,
+            resetsAt: null,
+            status: "ok",
+            error: null,
+            sourceOffsetMinutes: 330,
+          },
+        ],
       },
     };
     const apiFor = directApiFor({ "http://win:8787": entry });
@@ -266,6 +323,7 @@ describe("direct pull", () => {
       await pullDirectFromMachines(fx.db, { apiFor, now: () => 10_000_000 });
       await pullDirectFromMachines(fx.db, { apiFor, now: () => 11_000_000 });
       expect(changes.filter((kind) => kind === "events")).toHaveLength(1);
+      expect(changes.filter((kind) => kind === "quotas")).toHaveLength(1);
     } finally {
       unsubscribe();
     }
