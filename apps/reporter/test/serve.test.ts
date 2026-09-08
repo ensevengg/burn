@@ -102,19 +102,27 @@ describe("live server", () => {
     expect(second!.costIsComplete).toBe(false);
   });
 
-  test("/live/events refuses to overlap scans (503) until the first settles", async () => {
+  test("/live/events coalesces callers requesting the same scan", async () => {
+    let scans = 0;
     let release!: () => void;
     const gate = new Promise<string>((resolve) => {
       release = () => resolve(`${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n`);
     });
-    const fetcher = createLiveFetch(deps({ exporterScan: () => gate }));
+    const fetcher = createLiveFetch(
+      deps({
+        exporterScan: () => {
+          scans += 1;
+          return gate;
+        },
+      }),
+    );
     const first = fetcher(new Request("http://machine/live/events"));
-    const second = await fetcher(new Request("http://machine/live/events"));
-    expect(second.status).toBe(503);
+    const second = fetcher(new Request("http://machine/live/events"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(scans).toBe(1);
     release();
     expect((await first).status).toBe(200);
-    const after = await fetcher(new Request("http://machine/live/events"));
-    expect(after.status).toBe(200);
+    expect((await second).status).toBe(200);
   });
 
   test("/live/events reports a missing exporter as 503, a pin mismatch as 500", async () => {
@@ -168,6 +176,28 @@ describe("live server", () => {
       metric: "5h",
       status: "ok",
     });
+  });
+
+  test("/live/quotas reuses a recent vendor response", async () => {
+    let now = Date.parse("2026-09-07T10:05:00.000Z");
+    let calls = 0;
+    const base = deps();
+    const fetcher = createLiveFetch({
+      ...base,
+      now: () => now,
+      usage: async (pin) => {
+        calls += 1;
+        return base.usage!(pin);
+      },
+    });
+
+    expect((await fetcher(new Request("http://machine/live/quotas"))).status).toBe(200);
+    now += 60_000;
+    expect((await fetcher(new Request("http://machine/live/quotas"))).status).toBe(200);
+    expect(calls).toBe(1);
+    now += 5 * 60_000;
+    expect((await fetcher(new Request("http://machine/live/quotas"))).status).toBe(200);
+    expect(calls).toBe(2);
   });
 
   test("routing: unknown path 404, non-GET 405", async () => {

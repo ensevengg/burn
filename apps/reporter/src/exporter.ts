@@ -19,6 +19,8 @@ export class ExporterError extends Error {
 }
 
 let cachedExporter: Runner | null = null;
+let cachedExporterVersion: string | null = null;
+let exporterVersionProbe: Promise<string | null> | null = null;
 
 export async function resolveExporter(): Promise<Runner> {
   if (cachedExporter !== null) return cachedExporter;
@@ -46,14 +48,25 @@ export async function resolveExporter(): Promise<Runner> {
 }
 
 /** Semver from `burn-events --version` ("burn-events 4.15.1"), or null. */
-export async function exporterVersion(): Promise<string | null> {
-  try {
-    const runner = await resolveExporter();
-    const { stdout } = await spawnRunner(runner, ["--version"], 60_000);
-    return /^burn-events\s+(\S+)/m.exec(stdout)?.[1] ?? null;
-  } catch {
-    return null;
-  }
+export function exporterVersion(): Promise<string | null> {
+  if (cachedExporterVersion !== null) return Promise.resolve(cachedExporterVersion);
+  if (exporterVersionProbe !== null) return exporterVersionProbe;
+  const pending = (async () => {
+    try {
+      const runner = await resolveExporter();
+      const { stdout } = await spawnRunner(runner, ["--version"], 60_000);
+      const version = /^burn-events\s+(\S+)/m.exec(stdout)?.[1] ?? null;
+      if (version !== null) cachedExporterVersion = version;
+      return version;
+    } catch {
+      return null;
+    }
+  })();
+  exporterVersionProbe = pending;
+  void pending.finally(() => {
+    if (exporterVersionProbe === pending) exporterVersionProbe = null;
+  });
+  return pending;
 }
 
 export function assertExporterMatchesPin(version: string, pin: string): void {
