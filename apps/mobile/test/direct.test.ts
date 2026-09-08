@@ -171,7 +171,7 @@ describe("direct pull", () => {
       now: () => 10_000,
     });
     expect(statuses[0]).toMatchObject({ state: "live", slug: "win", pulledEvents: 1, error: null });
-    expect(seen.seenSince[0]).toBeNull(); // first pull: full history
+    expect(seen.seenSince[0]).toBe(0); // first pull: full history
     const row = await fx.db.getFirstAsync<Record<string, unknown>>(
       "select * from usage_events where event_id = ?",
       [liveEventId("win", "codex", "v1:codex:s1:1725599000000:1")],
@@ -179,8 +179,28 @@ describe("direct pull", () => {
     expect(row).not.toBeNull();
     expect(row!.revision).toBe(0);
     expect(row!.environment_id).toBe(directEnvId("win"));
-    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_" + directEnvId("win") + "'");
+    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_v2_" + directEnvId("win") + "'");
     expect(cursor!.value).toBe("10000");
+  });
+
+  test("ignores a legacy cursor that was advanced after a tail-only first pull", async () => {
+    const fx = mirrorFixture();
+    const seen: FakeEntry = {
+      seenSince: [],
+      page: {
+        sinceMs: 0,
+        generatedAt: "2026-09-07T10:00:00.000Z",
+        events: [ingestRow()],
+      },
+    };
+    const id = directEnvId("win");
+    const apiFor = directApiFor({ "http://win:8787": seen });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+    await fx.db.runAsync("insert into kv (key, value) values (?, ?)", [`direct_since_${id}`, "10000000"]);
+
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => 11_000_000 });
+
+    expect(seen.seenSince[0]).toBe(0);
   });
 
   test("a full backfill crosses the native bridge in large bound batches", async () => {
@@ -420,7 +440,7 @@ describe("direct pull", () => {
       const r = await fx.db.getFirstAsync<{ n: number }>(`select count(*) as n from ${table}`);
       expect(r!.n).toBe(0);
     }
-    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_" + directEnvId("win") + "'");
+    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_v2_" + directEnvId("win") + "'");
     expect(cursor).toBeNull();
   });
 
@@ -467,7 +487,7 @@ describe("direct pull", () => {
       now: () => 2_000,
     });
     expect(["offline", "error", "skipped"]).toContain(statuses[0]!.state);
-    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_" + directEnvId("win") + "'");
+    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_v2_" + directEnvId("win") + "'");
     expect(cursor).toBeNull();
   });
 });

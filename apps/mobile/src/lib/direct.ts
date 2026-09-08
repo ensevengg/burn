@@ -8,7 +8,7 @@
  * `WHERE usage_events.revision = 0` guard — so a machine serving BOTH modes
  * (Supabase push + live server) converges instead of forking: cloud rows
  * (revision >= 1) are authoritative; direct rows are the same rows, pulled
- * earlier. Per-machine time cursors live in kv (`direct_since_<envId>`),
+ * earlier. Per-machine time cursors live in kv (`direct_since_v2_<envId>`),
  * never in the cloud watermark.
  */
 import {
@@ -67,6 +67,12 @@ export function directEnvId(slug: string): string {
 }
 
 function cursorKey(envId: string): string {
+  // v1 could mark a recent-tail response as a completed initial backfill.
+  // Versioning forces one corrective full pull for those installations.
+  return `direct_since_v2_${envId}`;
+}
+
+function legacyCursorKey(envId: string): string {
   return `direct_since_${envId}`;
 }
 
@@ -194,6 +200,7 @@ export async function removeDirectMachine(db: SQLiteDatabase, environmentId: str
       await db.runAsync("delete from quota_snapshots where environment_id = ?", [environmentId]);
       await db.runAsync("delete from environments where id = ?", [environmentId]);
       await db.runAsync("delete from kv where key = ?", [cursorKey(environmentId)]);
+      await db.runAsync("delete from kv where key = ?", [legacyCursorKey(environmentId)]);
     });
     invalidateEventCache(db);
   });
@@ -287,10 +294,12 @@ async function pullDirectUnlocked(
         }
         const clockSkewMs = Math.abs(ping.serverNowMs - now());
 
-        // Per-machine time cursor; the machine applies its own overlap. The
-        // very first pull passes null and takes the machine's full history.
+        // Per-machine time cursor; the machine applies its own overlap. Direct
+        // mode explicitly sends epoch zero on the first pull: null omits the
+        // query parameter and means "use the reporter push cursor", which is
+        // only the recent cloud-live tail.
         const storedCursor = await kvGetNumber(db, cursorKey(machine.id));
-        const since = storedCursor === null ? null : Math.max(0, storedCursor - LIVE_OVERLAP_MS);
+        const since = storedCursor === null ? 0 : Math.max(0, storedCursor - LIVE_OVERLAP_MS);
 
         // Quotas are independent of event export. Start the vendor request
         // before the scan so its latency is hidden behind the slower path;
