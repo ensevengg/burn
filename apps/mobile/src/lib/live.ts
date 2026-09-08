@@ -116,9 +116,9 @@ export function describeFailure(err: unknown): { state: "offline" | "error"; err
 
 /**
  * Probe every advertising machine and merge its event tail. Concurrent calls
- * are safe: a new call aborts the previous probe's network work and starts
- * fresh (the dying probe never commits, and its discarded "offline" statuses
- * are not shown). Cancelling — reset/disconnect — aborts before any commit.
+ * share the active probe so foreground/refresh races cannot restart expensive
+ * exporter work. Cancelling the owning call — reset/disconnect — aborts before
+ * any commit.
  */
 export function pullLiveFromMachines(
   db: SQLiteDatabase,

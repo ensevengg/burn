@@ -111,7 +111,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const pullLive = useCallback(
     (signal?: AbortSignal) => {
       if (db === null || mode !== "cloud") return;
-      live.current?.abort();
+      // Let the active probe finish; pullLiveFromMachines coalesces callers,
+      // so aborting here would only hand the new caller the dying promise.
+      if (live.current !== null) return;
       const controller = new AbortController();
       const relay = () => controller.abort();
       signal?.addEventListener("abort", relay, { once: true });

@@ -289,8 +289,8 @@ export async function removeDirectMachine(db: SQLiteDatabase, environmentId: str
 
 /**
  * Probe every registered machine and merge its tail. Same concurrency and
- * cancellation contract as the cloud-path live pull: a superseding call
- * abandons the dying one, and reset/disconnect aborts before any commit.
+ * cancellation contract as the cloud-path live pull: concurrent calls share
+ * the active probe, and reset/disconnect invalidates it before any commit.
  */
 export function pullDirectFromMachines(
   db: SQLiteDatabase,
