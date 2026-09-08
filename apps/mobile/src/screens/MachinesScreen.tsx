@@ -6,7 +6,7 @@ import { formatRelative } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp, useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
-import { loadConnection } from "../lib/settings";
+import { loadConnectedPhone } from "../lib/connection";
 import { spacing, type } from "../theme";
 import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
 
@@ -162,9 +162,9 @@ function AddMachineSheet() {
 
   useEffect(() => {
     void (async () => {
-      const config = await loadConnection();
-      if (config !== null) {
-        setConnection({ url: config.url, publishableKey: config.publishableKey });
+      const connected = await loadConnectedPhone();
+      if (connected !== null) {
+        setConnection({ url: connected.config.url, publishableKey: connected.config.publishableKey });
       }
       setLoaded(true);
     })();

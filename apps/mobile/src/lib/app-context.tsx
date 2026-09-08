@@ -15,7 +15,6 @@ import {
   clearConnection,
   getMode,
   getReportingTimezone,
-  loadConnection,
   saveConnection,
   setReportingTimezone,
   type AppMode,
@@ -27,7 +26,7 @@ import { pullLiveFromMachines, type LivePullStatus } from "./live";
 import { removeEnvironmentLocal } from "../data/repository";
 import { subscribeMirrorChanges } from "./sync-state";
 import { followMachineUpdates } from "./refresh";
-import { createBurnBackend } from "@burn/sync-api";
+import { clearConnectedPhone, loadConnectedPhone } from "./connection";
 
 interface AppState {
   db: SQLiteDatabase | null;
@@ -225,6 +224,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
     const prepareReset = async () => {
       stop();
+      clearConnectedPhone();
       await queryClient.cancelQueries();
       queryClient.removeQueries();
       patchStatus({ lastSync: null, syncError: null, syncNotice: null });
@@ -329,9 +329,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
           return;
         }
         if (mode === "cloud") {
-          const connection = await loadConnection();
-          if (!connection) throw new Error("Not connected to a backend");
-          await createBurnBackend(connection).phone(connection.readToken).removeEnvironment(environmentId);
+          const connected = await loadConnectedPhone();
+          if (!connected) throw new Error("Not connected to a backend");
+          await connected.phone.removeEnvironment(environmentId);
         }
         await removeEnvironmentLocal(db, environmentId);
         invalidate();

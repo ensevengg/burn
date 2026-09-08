@@ -6,10 +6,9 @@
 import { pullCloud, type SyncResult } from "./sync-cloud";
 import { cloudGeneration, advanceCloudGeneration, publishMirrorChange } from "./sync-state";
 import { invalidateEventCache } from "../data/repository";
-import { createBurnBackend } from "@burn/sync-api";
 import { kvSet, wipeForReseed, type SQLiteDatabase } from "./db";
 import { withWriteLock } from "./writelock";
-import { loadConnection } from "./settings";
+import { loadConnectedPhone } from "./connection";
 import { generateDemoDataset, MODELS } from "../data/demo-generator";
 
 /** Demo data is generator-controlled, so literal interpolation is safe here. */
@@ -132,10 +131,10 @@ export function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
     if (cloudGeneration(db) !== generation) throw new Error("Sync cancelled");
   };
   const pending = (async () => {
-    const connection = await loadConnection();
+    const connected = await loadConnectedPhone();
     assertActive();
-    if (connection === null) throw new Error("Not connected to a backend");
-    return pullCloud(db, createBurnBackend(connection).phone(connection.readToken), assertActive, (kind) => {
+    if (connected === null) throw new Error("Not connected to a backend");
+    return pullCloud(db, connected.phone, assertActive, (kind) => {
       if (kind === "events") invalidateEventCache(db);
       publishMirrorChange(db, kind);
     });
@@ -158,9 +157,8 @@ export function cancelCloudSync(db: SQLiteDatabase): void {
 
 export async function requestMachineSync(db: SQLiteDatabase, environmentId: string | null): Promise<void> {
   const generation = cloudGeneration(db);
-  const connection = await loadConnection();
+  const connected = await loadConnectedPhone();
   if (cloudGeneration(db) !== generation) throw new Error("Sync cancelled");
-  if (connection === null) throw new Error("Not connected to a backend");
-  const phone = createBurnBackend(connection).phone(connection.readToken);
-  await phone.requestSync(environmentId ?? undefined);
+  if (connected === null) throw new Error("Not connected to a backend");
+  await connected.phone.requestSync(environmentId ?? undefined);
 }
