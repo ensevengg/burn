@@ -91,3 +91,35 @@ A follow-up review of the implemented work found one significant regression path
 - **Migration 0005** adds `usage_events (revision, event_id)` so `burn_fetch_delta`'s global revision scan stays fast as history grows — the one server-side item from the review.
 
 Typecheck clean; 31 tests pass, including the new writer-eviction race and follow-up `onSettle` cases. Android timing validation remains the open item.
+
+## Direct-sync smoothing pass (2026-09-08)
+
+Branch `perf/sync-smoothness` addresses the work introduced when direct mode
+became primary:
+
+- The resident reporter fingerprints tokscale's discovered source files,
+  SQLite WALs, scanner/pricing inputs, parser pin and timezone. It caches one
+  fully validated event snapshot per generation. A real local fingerprint
+  probe took about 5 ms; a production-path smoke test against real data took
+  29.8 s for the initial debug-build scan and 6 ms for the unchanged follow-up
+  (193 tail rows versus zero). Release exporter timings remain device-specific.
+- Direct and cloud-live callers coalesce instead of cancelling/restarting the
+  same machine scan. Direct events and quotas start concurrently; live quotas
+  have a five-minute machine-side TTL.
+- The phone persists each machine's source generation. Matching pulls return
+  no overlap payload, and identical fallback overlaps no longer write rows,
+  evict event caches, or invalidate focused screen queries.
+- Event mirror writes increased from 32 to 400 rows per bound statement:
+  11,200 bindings under Expo SQLite's 32,766 limit. A 27k-row backfill drops
+  from 844 bridge calls to 68 without interpolating user data.
+- Cloud connections now decrypt SecureStore values and construct the backend
+  adapter once per connected lifecycle. The daemon's eager poll defaults to
+  10 seconds. Migration `0007` replaces the idle delta tail count with an
+  indexed `exists` probe and preserves the caller watermark on empty pages.
+- Live event responses use gzip when the phone advertises it; direct pull-to-
+  refresh now actually probes machines and displays the direct backend state.
+
+Validation on the branch: 114 Bun tests across all workspaces, one Rust test,
+workspace typecheck, Rust build/check, the existing 27k synthetic diagnostic,
+and the real exporter/live-handler smoke above. Release-build Android frame
+timing is still the remaining device-only check.

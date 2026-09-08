@@ -50,7 +50,7 @@ idempotent merges. The Supabase path remains fully functional and untouched
 - New `pullDirect(db, machines, …)` beside `pullCloud` — same write-lock,
   same cache-eviction-in-writer, same generation-based cancellation, same
   32-row chunking.
-- **Per-machine time cursors** (`kv: direct_since_<envId>` = lastPullAt minus
+- **Per-machine time cursors** (`kv: direct_since_v2_<envId>` = lastPullAt minus
   the overlap window), not one global revision watermark. The v1 protocol is
   time-cursor-based, identical to the push path's semantics.
 - **Merges commit at the machine's served data directly** — there is no
@@ -60,9 +60,16 @@ idempotent merges. The Supabase path remains fully functional and untouched
   message is the same row, and if a user ALSO runs cloud mode for the same
   machine, both paths still collide safely on one id.
 - **Quotas merge on day one in direct mode** — per-environment, env-scoped
-  row keys, `insert or replace` (no wholesale table replace, which is a
+  row keys, idempotent upserts (no wholesale table replace, which is a
   cloud-path-only hazard). ADR 0001's live-quota deferral was about the
   cloud pull's delete-all semantics; direct mode doesn't have that problem.
+- **Unchanged sources are cheap** — `burn-events --fingerprint` hashes the
+  exact tokscale scanner result's path/size/mtime evidence (including SQLite
+  WALs), pricing/settings metadata, parser pin, and machine timezone. The
+  reporter caches one validated full snapshot per generation; the phone
+  persists `direct_generation_v1_<envId>` and sends it on later pulls, so an
+  unchanged machine returns an empty page without another exporter parse or
+  overlap download. Missing/older exporters fall back to the uncached path.
 
 ### Modes and UI
 
