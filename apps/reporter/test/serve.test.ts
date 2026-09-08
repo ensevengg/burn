@@ -181,6 +181,19 @@ describe("live server", () => {
     expect(((await mismatched.json()) as { error: string }).error).toContain("pin");
   });
 
+  test("/live/events still enforces the exporter pin for an unchanged generation", async () => {
+    const fingerprint = "a".repeat(64);
+    const res = await createLiveFetch(
+      deps({
+        exporterCheck: async () => "0.0.1",
+        exporterFingerprint: async () => fingerprint,
+      }),
+    )(new Request(`http://machine/live/events?generation=${fingerprint}`));
+
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toContain("pin");
+  });
+
   test("/live/events fails loudly on schema drift (D2), never serves unvalidated rows", async () => {
     const res = await createLiveFetch(deps({ exporterScan: async () => '{"client": "x"}\n' }))(
       new Request("http://machine/live/events"),

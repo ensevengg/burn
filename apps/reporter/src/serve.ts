@@ -174,6 +174,11 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
     sinceMs: number,
     knownGeneration: string | null,
   ): Promise<EventPage | null> => {
+    // A generation match skips parsing, never contract validation. This stays
+    // cheap because exporterVersion() caches a successful process probe.
+    const exporter = await (deps.exporterCheck ?? exporterVersion)();
+    if (exporter === null) return null;
+    assertExporterMatchesPin(exporter, deps.config.tokscalePin);
     const fingerprint = await readFingerprint();
     // Missing/old development exporters remain correct, just uncached.
     if (fingerprint === null) return scanUncached(sinceMs);
