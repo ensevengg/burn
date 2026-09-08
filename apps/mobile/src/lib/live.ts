@@ -124,8 +124,8 @@ export function pullLiveFromMachines(
   db: SQLiteDatabase,
   options: LivePullOptions = {},
 ): Promise<LivePullStatus[]> {
-  inFlightController.get(db)?.abort();
-  inFlight.delete(db);
+  const existing = inFlight.get(db);
+  if (existing !== undefined) return existing;
   const generation = cloudGeneration(db);
   const internal = new AbortController();
   inFlightController.set(db, internal);
@@ -221,12 +221,13 @@ async function pullLiveUnlocked(
 
         // 3. Merge. Ids follow the server's recipe; revision stays 0; the
         // WHERE clause makes server rows (revision >= 1) untouchable.
+        let changedEvents = 0;
         await withWriteLock(async () => {
           assertActive();
           await db.withTransactionAsync(async () => {
             for (let i = 0; i < page.events.length; i += EVENT_WRITE_BATCH_SIZE) {
               const chunk = page.events.slice(i, i + EVENT_WRITE_BATCH_SIZE);
-              await db.runAsync(
+              const result = await db.runAsync(
                 `insert into usage_events
                (event_id, environment_id, client, provider_id, model_id, session_id, session_title,
                 workspace_key, workspace_label, agent, occurred_at_ms, source_offset_minutes, source_timezone,
@@ -252,7 +253,33 @@ async function pullLiveUnlocked(
                cost_source = excluded.cost_source, cost_is_complete = excluded.cost_is_complete,
                model_attribution_conflicted = excluded.model_attribution_conflicted,
                parser_version = excluded.parser_version, revision = excluded.revision
-             where usage_events.revision = 0`,
+             where usage_events.revision = 0 and (
+               usage_events.client is not excluded.client or
+               usage_events.provider_id is not excluded.provider_id or
+               usage_events.model_id is not excluded.model_id or
+               usage_events.session_id is not excluded.session_id or
+               usage_events.session_title is not excluded.session_title or
+               usage_events.workspace_key is not excluded.workspace_key or
+               usage_events.workspace_label is not excluded.workspace_label or
+               usage_events.agent is not excluded.agent or
+               usage_events.occurred_at_ms is not excluded.occurred_at_ms or
+               usage_events.source_offset_minutes is not excluded.source_offset_minutes or
+               usage_events.source_timezone is not excluded.source_timezone or
+               usage_events.source_local_date is not excluded.source_local_date or
+               usage_events.input_tokens is not excluded.input_tokens or
+               usage_events.output_tokens is not excluded.output_tokens or
+               usage_events.cache_read_tokens is not excluded.cache_read_tokens or
+               usage_events.cache_write_tokens is not excluded.cache_write_tokens or
+               usage_events.reasoning_tokens is not excluded.reasoning_tokens or
+               usage_events.message_count is not excluded.message_count or
+               usage_events.is_turn_start is not excluded.is_turn_start or
+               usage_events.duration_ms is not excluded.duration_ms or
+               usage_events.cost is not excluded.cost or
+               usage_events.cost_source is not excluded.cost_source or
+               usage_events.cost_is_complete is not excluded.cost_is_complete or
+               usage_events.model_attribution_conflicted is not excluded.model_attribution_conflicted or
+               usage_events.parser_version is not excluded.parser_version
+             )`,
                 chunk.flatMap((e) => [
                   liveEventId(target.slug, e.client, e.dedupKey),
                   target.environmentId,
@@ -284,13 +311,15 @@ async function pullLiveUnlocked(
                   0, // revision: live rows are provisional until the server confirms
                 ]),
               );
+              changedEvents += result.changes;
             }
           });
           // Post-commit eviction, inside the writer — same contract as
-          // resetDb and the cloud pull.
-          invalidateEventCache(db);
+          // resetDb and the cloud pull. An identical overlap keeps all
+          // derived screen data hot.
+          if (changedEvents > 0) invalidateEventCache(db);
         });
-        publishMirrorChange(db, "events");
+        if (changedEvents > 0) publishMirrorChange(db, "events");
 
         return {
           ...base,
