@@ -377,6 +377,42 @@ describe("direct pull", () => {
     }
   });
 
+  test("an event failure does not discard a successful quota refresh", async () => {
+    const fx = mirrorFixture();
+    const quotas = {
+      generatedAt: "2026-09-07T11:00:00.000Z",
+      quotas: [
+        {
+          provider: "codex",
+          accountKey: "shared",
+          accountLabel: "Personal",
+          plan: null,
+          metric: "5h",
+          usedPercent: 40,
+          remainingPercent: 60,
+          remainingLabel: null,
+          resetsAt: null,
+          status: "ok",
+          error: null,
+          sourceOffsetMinutes: 330,
+        },
+      ],
+    };
+    const apiFor = directApiFor({
+      "http://win:8787": { seenSince: [], failEvents: new Error("event scan failed"), quotas },
+    });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+
+    const statuses = await pullDirectFromMachines(fx.db, { apiFor });
+
+    expect(statuses[0]!.state).toBe("error");
+    const row = await fx.db.getFirstAsync<{ used_percent: number }>(
+      "select used_percent from quota_snapshots where environment_id = ?",
+      [directEnvId("win")],
+    );
+    expect(row?.used_percent).toBe(40);
+  });
+
   test("quotas upsert per-environment and never clobber other machines", async () => {
     const fx = mirrorFixture();
     await addDirectMachine(fx.db, "http://win:8787", { apiFor: directApiFor({ "http://win:8787": { seenSince: [] } }) });

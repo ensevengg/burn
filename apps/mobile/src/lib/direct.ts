@@ -52,6 +52,7 @@ export interface DirectPullStatus {
 export interface DirectPullOptions {
   pingTimeoutMs?: number;
   eventsTimeoutMs?: number;
+  quotaTimeoutMs?: number;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   /** Test seam. */
@@ -96,6 +97,76 @@ async function kvSetString(db: SQLiteDatabase, key: string, value: string): Prom
 
 async function kvDelete(db: SQLiteDatabase, key: string): Promise<void> {
   await db.runAsync("delete from kv where key = ?", [key]);
+}
+
+async function pullDirectQuotas(
+  db: SQLiteDatabase,
+  machine: DirectMachine,
+  api: LiveApi,
+  signal: AbortSignal,
+  assertActive: () => void,
+  timeoutMs: number,
+): Promise<number> {
+  const timeout = withTimeout(signal, timeoutMs);
+  let page;
+  try {
+    page = parseLiveQuotasPage(await api.quotas(timeout.signal));
+  } catch {
+    return 0;
+  } finally {
+    timeout.cancel();
+  }
+  if (page.quotas.length === 0) return 0;
+
+  let changed = 0;
+  await withWriteLock(async () => {
+    assertActive();
+    await db.withTransactionAsync(async () => {
+      for (const quota of page.quotas) {
+        const result = await db.runAsync(
+          `insert into quota_snapshots
+             (row_key, environment_id, provider, account_key, account_label, plan, metric,
+              used_percent, remaining_percent, remaining_label, resets_at, status, error, fetched_at)
+           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           on conflict (row_key) do update set
+             account_label = excluded.account_label, plan = excluded.plan,
+             used_percent = excluded.used_percent,
+             remaining_percent = excluded.remaining_percent,
+             remaining_label = excluded.remaining_label, resets_at = excluded.resets_at,
+             status = excluded.status, error = excluded.error,
+             fetched_at = excluded.fetched_at
+           where quota_snapshots.account_label is not excluded.account_label or
+             quota_snapshots.plan is not excluded.plan or
+             quota_snapshots.used_percent is not excluded.used_percent or
+             quota_snapshots.remaining_percent is not excluded.remaining_percent or
+             quota_snapshots.remaining_label is not excluded.remaining_label or
+             quota_snapshots.resets_at is not excluded.resets_at or
+             quota_snapshots.status is not excluded.status or
+             quota_snapshots.error is not excluded.error or
+             quota_snapshots.fetched_at is not excluded.fetched_at`,
+          [
+            `${machine.id}|${quota.provider}|${quota.accountKey}|${quota.metric}`,
+            machine.id,
+            quota.provider,
+            quota.accountKey,
+            quota.accountLabel,
+            quota.plan,
+            quota.metric,
+            quota.usedPercent,
+            quota.remainingPercent,
+            quota.remainingLabel,
+            quota.resetsAt,
+            quota.status,
+            quota.error,
+            page.generatedAt,
+          ],
+        );
+        changed += result.changes;
+      }
+    });
+  });
+  if (changed > 0) publishMirrorChange(db, "quotas");
+  return page.quotas.length;
 }
 
 export async function listDirectMachines(db: SQLiteDatabase): Promise<DirectMachine[]> {
@@ -284,6 +355,7 @@ async function pullDirectUnlocked(
       const api = options.apiFor
         ? options.apiFor(machine.baseUrl)
         : httpLiveApiFor(machine.baseUrl, options.fetchImpl ?? fetch);
+      let quotaPromise = Promise.resolve(0);
       try {
         const pingTimeout = withTimeout(probeSignal, options.pingTimeoutMs ?? 2_500);
         let ping;
@@ -315,17 +387,15 @@ async function pullDirectUnlocked(
 
         // Quotas are independent of event export. Start the vendor request
         // before the scan so its latency is hidden behind the slower path;
-        // failure remains best-effort and cannot discard event data.
-        const quotaPromise = (async () => {
-          const quotaTimeout = withTimeout(probeSignal, options.pingTimeoutMs ?? 15_000);
-          try {
-            return parseLiveQuotasPage(await api.quotas(quotaTimeout.signal));
-          } catch {
-            return null;
-          } finally {
-            quotaTimeout.cancel();
-          }
-        })();
+        // either result can commit even when the other path fails.
+        quotaPromise = pullDirectQuotas(
+          db,
+          machine,
+          api,
+          probeSignal,
+          assertActive,
+          options.quotaTimeoutMs ?? 15_000,
+        ).catch(() => 0);
         const eventsTimeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 60_000);
         let eventsPage;
         try {
@@ -457,61 +527,8 @@ async function pullDirectUnlocked(
         });
         if (changedEvents > 0) publishMirrorChange(db, "events");
 
-        // Quotas: env-scoped upsert only — never touches other machines'
-        // rows, so the cloud path's wholesale replace stays impossible here.
-        let pulledQuotas = 0;
-        const quotaPage = await quotaPromise;
-        if (quotaPage !== null && quotaPage.quotas.length > 0) {
-          let changedQuotas = 0;
-          await withWriteLock(async () => {
-            assertActive();
-            await db.withTransactionAsync(async () => {
-              for (const q of quotaPage.quotas) {
-                const result = await db.runAsync(
-                  `insert into quota_snapshots
-                     (row_key, environment_id, provider, account_key, account_label, plan, metric,
-                      used_percent, remaining_percent, remaining_label, resets_at, status, error, fetched_at)
-                   values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   on conflict (row_key) do update set
-                     account_label = excluded.account_label, plan = excluded.plan,
-                     used_percent = excluded.used_percent,
-                     remaining_percent = excluded.remaining_percent,
-                     remaining_label = excluded.remaining_label, resets_at = excluded.resets_at,
-                     status = excluded.status, error = excluded.error,
-                     fetched_at = excluded.fetched_at
-                   where quota_snapshots.account_label is not excluded.account_label or
-                     quota_snapshots.plan is not excluded.plan or
-                     quota_snapshots.used_percent is not excluded.used_percent or
-                     quota_snapshots.remaining_percent is not excluded.remaining_percent or
-                     quota_snapshots.remaining_label is not excluded.remaining_label or
-                     quota_snapshots.resets_at is not excluded.resets_at or
-                     quota_snapshots.status is not excluded.status or
-                     quota_snapshots.error is not excluded.error or
-                     quota_snapshots.fetched_at is not excluded.fetched_at`,
-                  [
-                    `${machine.id}|${q.provider}|${q.accountKey}|${q.metric}`,
-                    machine.id,
-                    q.provider,
-                    q.accountKey,
-                    q.accountLabel,
-                    q.plan,
-                    q.metric,
-                    q.usedPercent,
-                    q.remainingPercent,
-                    q.remainingLabel,
-                    q.resetsAt,
-                    q.status,
-                    q.error,
-                    quotaPage.generatedAt,
-                  ],
-                );
-                changedQuotas += result.changes;
-              }
-            });
-          });
-          pulledQuotas = quotaPage.quotas.length;
-          if (changedQuotas > 0) publishMirrorChange(db, "quotas");
-        }
+        const pulledQuotas = await quotaPromise;
+        assertActive();
 
         return {
           ...base,
@@ -521,6 +538,7 @@ async function pullDirectUnlocked(
           elapsedMs: now() - started,
         };
       } catch (err) {
+        await quotaPromise;
         assertActive();
         const failure = describeFailure(err);
         return { ...base, ...failure, elapsedMs: now() - started };
