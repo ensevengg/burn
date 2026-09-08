@@ -103,9 +103,9 @@ test("quotas commit before a slow event download finishes", async () => {
   }
 });
 
-test("cloud inserts are batched, decimal strings preserved, retries idempotent", async () => {
+test("cloud inserts use large bound batches, preserve decimals, and stay idempotent", async () => {
   const fixture = mirrorFixture();
-  const events = Array.from({ length: 65 }, (_, i) =>
+  const events = Array.from({ length: 401 }, (_, i) =>
     usage({ eventId: `e${i}`, cost: "0.123456", sessionTitle: "O'Brien ?" }),
   );
   const api = phone({
@@ -114,14 +114,14 @@ test("cloud inserts are batched, decimal strings preserved, retries idempotent",
   try {
     await pullCloud(fixture.db, api);
     const inserts = fixture.writes.filter((w) => w.sql.includes("insert or replace into usage_events"));
-    expect(inserts).toHaveLength(3);
-    expect(Math.max(...inserts.map((w) => w.count))).toBeLessThanOrEqual(999);
+    expect(inserts).toHaveLength(2);
+    expect(Math.max(...inserts.map((w) => w.count))).toBe(11_200);
     expect(fixture.native.query("select cost, session_title from usage_events limit 1").get()).toEqual({
       cost: "0.123456",
       session_title: "O'Brien ?",
     });
     await pullCloud(fixture.db, api);
-    expect(fixture.native.query("select count(*) as n from usage_events").get()).toEqual({ n: 65 });
+    expect(fixture.native.query("select count(*) as n from usage_events").get()).toEqual({ n: 401 });
     expect(fixture.native.query("select value from kv where key='watermark_revision'").get()).toEqual({
       value: "1",
     });

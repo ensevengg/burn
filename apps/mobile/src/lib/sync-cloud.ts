@@ -1,5 +1,6 @@
 import type { MobileSyncApi } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
+import { EVENT_WRITE_BATCH_SIZE } from "./mirror-write";
 import { withWriteLock } from "./writelock";
 
 export type MirrorChange = "events" | "machines" | "quotas";
@@ -76,12 +77,11 @@ export async function pullCloud(
               ],
             );
           }
-          // 32 rows × 28 bindings = 896 parameters, deliberately under the
-          // classic 999 SQLITE_MAX_VARIABLE_NUMBER cap of older system SQLite
-          // builds (expo-sqlite's bundled build allows far more). If a column
-          // is added, recheck the product or shrink the chunk.
-          for (let i = 0; i < delta.events.length; i += 32) {
-            const chunk = delta.events.slice(i, i + 32);
+          // Expo ships SQLite with a 32,766-variable limit; the shared batch
+          // is 400 rows × 28 bindings = 11,200. If a column is added, recheck
+          // the product in mirror-write.ts or shrink the batch.
+          for (let i = 0; i < delta.events.length; i += EVENT_WRITE_BATCH_SIZE) {
+            const chunk = delta.events.slice(i, i + EVENT_WRITE_BATCH_SIZE);
             await db.runAsync(
               `insert or replace into usage_events
              (event_id, environment_id, client, provider_id, model_id, session_id, session_title,

@@ -183,6 +183,29 @@ describe("direct pull", () => {
     expect(cursor!.value).toBe("10000");
   });
 
+  test("a full backfill crosses the native bridge in large bound batches", async () => {
+    const fx = mirrorFixture();
+    const events = Array.from({ length: 401 }, (_, index) =>
+      ingestRow({
+        sessionId: `s${index}`,
+        dedupKey: `v1:codex:s${index}:1725599000000:1`,
+      }),
+    );
+    const apiFor = directApiFor({
+      "http://win:8787": {
+        seenSince: [],
+        page: { sinceMs: null, generatedAt: "2026-09-07T10:00:00.000Z", events },
+      },
+    });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => 10_000_000 });
+
+    const inserts = fx.writes.filter((write) => write.sql.includes("insert into usage_events"));
+    expect(inserts).toHaveLength(2);
+    expect(Math.max(...inserts.map((write) => write.count))).toBe(11_200);
+  });
+
   test("the second pull passes cursor-minus-overlap and merges the fresh tail", async () => {
     const fx = mirrorFixture();
     const seen: FakeEntry = { seenSince: [], page: { sinceMs: null, generatedAt: "2026-09-07T10:00:00.000Z", events: [ingestRow()] } };

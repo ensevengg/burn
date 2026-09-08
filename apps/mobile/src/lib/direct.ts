@@ -21,6 +21,7 @@ import {
   type LiveApi,
 } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
+import { EVENT_WRITE_BATCH_SIZE } from "./mirror-write";
 import { invalidateEventCache } from "../data/repository";
 import { withWriteLock } from "./writelock";
 import { cloudGeneration, publishMirrorChange } from "./sync-state";
@@ -334,8 +335,8 @@ async function pullDirectUnlocked(
                 machine.id,
               ],
             );
-            for (let i = 0; i < eventsPage.events.length; i += 32) {
-              const chunk = eventsPage.events.slice(i, i + 32);
+            for (let i = 0; i < eventsPage.events.length; i += EVENT_WRITE_BATCH_SIZE) {
+              const chunk = eventsPage.events.slice(i, i + EVENT_WRITE_BATCH_SIZE);
               const result = await db.runAsync(
                 `insert into usage_events
                (event_id, environment_id, client, provider_id, model_id, session_id, session_title,
