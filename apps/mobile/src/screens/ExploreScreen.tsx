@@ -120,7 +120,7 @@ function BreakdownItem({ row, index, maxCost }: { row: BreakdownRow; index: numb
         </Text>
         <Text style={[type.body, { color: C.muted, fontWeight: "700" }]}>{formatCost(row.cost)}</Text>
       </View>
-      <MeterBar usedPercent={(row.cost / maxCost) * 100} tone={C.text} />
+      <MeterBar percent={(row.cost / maxCost) * 100} tone={C.text} />
       <View style={styles.rowStats}>
         <Text style={[type.muted, { color: C.muted }]}>
           {`${humanize(row.subtitle ?? "")} · ${formatTokens(row.outputTokens)} out · cache ${formatPercent(row.hitRate)}`}

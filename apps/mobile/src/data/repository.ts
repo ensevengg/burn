@@ -730,6 +730,7 @@ export interface QuotaCard {
   plan: string | null;
   metric: string;
   usedPercent: number | null;
+  remainingPercent: number | null;
   remainingLabel: string | null;
   resetsAt: string | null;
   fetchedAt: string;
@@ -808,7 +809,7 @@ export async function queryWindowOverview(
 
 export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
   const rows = await db.getAllAsync<Record<string, unknown>>(
-    "select provider, account_key, account_label, plan, metric, used_percent, remaining_label, resets_at, fetched_at from quota_snapshots where status = 'ok' order by provider, metric, fetched_at desc",
+    "select provider, account_key, account_label, plan, metric, used_percent, remaining_percent, remaining_label, resets_at, fetched_at from quota_snapshots where status = 'ok' order by provider, metric, fetched_at desc",
   );
   const seen = new Set<string>();
   const cards: QuotaCard[] = [];
@@ -818,13 +819,18 @@ export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
     const dedupKey = JSON.stringify([provider, String(r["account_key"]), metric]);
     if (seen.has(dedupKey)) continue; // freshest row wins (server pre-selects; demo rows may tie)
     seen.add(dedupKey);
+    const usedPercent = r["used_percent"] === null ? null : Number(r["used_percent"]);
+    const reportedRemaining = r["remaining_percent"] === null ? null : Number(r["remaining_percent"]);
+    const remainingPercent = reportedRemaining ?? (usedPercent === null ? null : 100 - usedPercent);
     cards.push({
       provider,
       accountKey: String(r["account_key"]),
       accountLabel: (r["account_label"] as string | null) ?? null,
       plan: (r["plan"] as string | null) ?? null,
       metric,
-      usedPercent: r["used_percent"] === null ? null : Number(r["used_percent"]),
+      usedPercent,
+      remainingPercent:
+        remainingPercent === null ? null : Math.max(0, Math.min(100, remainingPercent)),
       remainingLabel: (r["remaining_label"] as string | null) ?? null,
       resetsAt: (r["resets_at"] as string | null) ?? null,
       fetchedAt: String(r["fetched_at"]),

@@ -9,20 +9,21 @@ describe("quota account identity", () => {
     const db = new Database(":memory:");
     try {
       db.exec(`create table quota_snapshots(provider text, account_key text, account_label text, plan text,
-        metric text, used_percent real, remaining_label text, resets_at text, fetched_at text, status text)`);
+        metric text, used_percent real, remaining_percent real, remaining_label text, resets_at text,
+        fetched_at text, status text)`);
       const insert = db.prepare(
-        "insert into quota_snapshots values ('Codex', ?, ?, null, 'weekly', ?, null, null, ?, 'ok')",
+        "insert into quota_snapshots values ('Codex', ?, ?, null, 'weekly', ?, ?, null, null, ?, 'ok')",
       );
-      insert.run("one", "Linux", 20, "2026-09-06T10:00:00Z");
-      insert.run("one", "Personal", 50, "2026-09-06T11:00:00Z");
-      insert.run("two", "Personal", 70, "2026-09-06T12:00:00Z");
+      insert.run("one", "Linux", 20, 80, "2026-09-06T10:00:00Z");
+      insert.run("one", "Personal", 50, 48, "2026-09-06T11:00:00Z");
+      insert.run("two", "Personal", 70, null, "2026-09-06T12:00:00Z");
       const adapter = {
         getAllAsync: async (sql: string) => db.query(sql).all(),
       } as unknown as SQLiteDatabase;
       const cards = await queryQuotas(adapter);
-      expect(cards.map((q) => [q.accountKey, q.usedPercent]).sort()).toEqual([
-        ["one", 50],
-        ["two", 70],
+      expect(cards.map((q) => [q.accountKey, q.usedPercent, q.remainingPercent]).sort()).toEqual([
+        ["one", 50, 48],
+        ["two", 70, 30],
       ]);
     } finally {
       db.close();

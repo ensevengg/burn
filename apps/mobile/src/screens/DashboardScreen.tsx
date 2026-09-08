@@ -177,13 +177,18 @@ export function DashboardScreen() {
                       {humanize(metricQuota.metric)}
                     </Text>
                     <Text style={[type.muted, { color: C.muted }]}>
-                      {metricQuota.usedPercent === null
+                      {metricQuota.remainingPercent === null
                         ? "—"
-                        : `${metricQuota.usedPercent.toFixed(0)}% used`}
+                        : `${metricQuota.remainingPercent.toFixed(0)}% remaining`}
                       {metricQuota.remainingLabel !== null ? ` · ${metricQuota.remainingLabel}` : ""}
                     </Text>
                   </View>
-                  {metricQuota.usedPercent !== null && <MeterBar usedPercent={metricQuota.usedPercent} />}
+                  {metricQuota.remainingPercent !== null && (
+                    <MeterBar
+                      percent={metricQuota.remainingPercent}
+                      tone={metricQuota.remainingPercent <= 15 ? C.err : C.text}
+                    />
+                  )}
                 </View>
               ))}
             </Card>
