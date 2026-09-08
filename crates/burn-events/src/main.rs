@@ -263,6 +263,16 @@ fn fingerprint_paths(paths: &[PathBuf]) -> Result<String, String> {
     expanded.dedup();
 
     let mut hash = Sha256::new();
+    // A parser pin or timezone change can alter normalized output with no
+    // transcript metadata change. Keep those inputs in the generation so a
+    // phone never suppresses the required correction scan.
+    hash.update(b"burn-source-fingerprint-v1");
+    hash.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hash.update(
+        iana_time_zone::get_timezone()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     for path in expanded {
         let Ok(metadata) = std::fs::metadata(&path) else {
             continue;
