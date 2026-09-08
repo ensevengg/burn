@@ -12,6 +12,7 @@ const CONFIG: BurnConfig = {
   osKind: "windows",
   reportingTimezone: "Asia/Kolkata",
   intervalMinutes: 10,
+  syncPollSeconds: 10,
   tokscalePin: "4.15.1",
 };
 

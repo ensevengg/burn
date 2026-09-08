@@ -45,6 +45,7 @@ export function printConfigured(config: BurnConfig): void {
   console.log(`backend      ${config.supabaseUrl}`);
   console.log(`tokscale pin ${config.tokscalePin}`);
   console.log(`interval     every ${config.intervalMinutes} min`);
+  console.log(`eager poll   every ${config.syncPollSeconds} sec`);
 }
 
 // ── init ─────────────────────────────────────────────────────────────────────
@@ -54,7 +55,8 @@ export function runInit(args: Map<string, string>): void {
   if (missing.length > 0) {
     throw new Error(
       `init requires --url <supabase-url> --key <publishable-key> --slug <env-slug> --name <display-name>\n` +
-        `optional: --os <windows|wsl|linux|macos> --host-group <group> --tz <IANA zone>`,
+        `optional: --os <windows|wsl|linux|macos> --host-group <group> --tz <IANA zone> ` +
+        `--interval <minutes> --poll-seconds <seconds>`,
     );
   }
   const ingestToken = generateToken();
@@ -69,6 +71,7 @@ export function runInit(args: Map<string, string>): void {
     osKind: (args.get("os") ?? detectOsKind()) as BurnConfig["osKind"],
     reportingTimezone: args.get("tz") ?? "Asia/Kolkata",
     intervalMinutes: Number(args.get("interval") ?? 10),
+    syncPollSeconds: Number(args.get("poll-seconds") ?? 10),
     tokscalePin: args.get("tokscale-pin") ?? TOKSCALE_PIN,
   };
   saveConfig(config);
@@ -347,7 +350,7 @@ export async function runDaemon(args: Map<string, string> = new Map()): Promise<
   };
 
   console.log(
-    `[daemon] resident mode: polling sync_requests every 30s, scheduled push every ${config.intervalMinutes} min`,
+    `[daemon] resident mode: polling sync_requests every ${config.syncPollSeconds}s, scheduled push every ${config.intervalMinutes} min`,
   );
   await cycle("startup");
   let polling = false;
@@ -366,7 +369,7 @@ export async function runDaemon(args: Map<string, string> = new Map()): Promise<
         polling = false;
       }
     })();
-  }, 30_000);
+  }, config.syncPollSeconds * 1_000);
 
   await new Promise<never>(() => {
     process.on("SIGINT", () => {
