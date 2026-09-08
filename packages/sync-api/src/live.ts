@@ -38,6 +38,8 @@ export interface LivePing {
 export interface LiveEventsPage {
   sinceMs: number | null;
   generatedAt: string;
+  /** Stable source generation; null for older reporters without fingerprinting. */
+  generation?: string | null;
   events: IngestEventInput[];
 }
 
@@ -54,7 +56,11 @@ export interface LiveApi {
    * per-machine cursor; the cloud-mode live pull passes null and takes the
    * machine's tail.
    */
-  events(sinceMs: number | null, signal?: AbortSignal): Promise<LiveEventsPage>;
+  events(
+    sinceMs: number | null,
+    signal?: AbortSignal,
+    knownGeneration?: string | null,
+  ): Promise<LiveEventsPage>;
   quotas(signal?: AbortSignal): Promise<LiveQuotasPage>;
 }
 
@@ -111,8 +117,14 @@ export function httpLiveApiFor(baseUrl: string, fetchImpl: typeof fetch = fetch)
   }
   return {
     ping: (signal) => call<LivePing>("/ping", signal),
-    events: (sinceMs, signal) =>
-      call<LiveEventsPage>(sinceMs === null ? "/live/events" : `/live/events?since=${Math.floor(sinceMs)}`, signal),
+    events: (sinceMs, signal, knownGeneration) => {
+      const params = new URLSearchParams();
+      if (sinceMs !== null) params.set("since", String(Math.floor(sinceMs)));
+      if (knownGeneration) params.set("generation", knownGeneration);
+      const encoded = params.toString();
+      const query = encoded.length === 0 ? "" : `?${encoded}`;
+      return call<LiveEventsPage>(`/live/events${query}`, signal);
+    },
     quotas: (signal) => call<LiveQuotasPage>("/live/quotas", signal),
   };
 }
@@ -195,6 +207,7 @@ export function parseLiveEventsPage(raw: unknown): LiveEventsPage {
   return {
     sinceMs: orNullNumber(page.sinceMs),
     generatedAt: expectString(page.generatedAt, "generatedAt"),
+    generation: orNullString(page.generation),
     events,
   };
 }

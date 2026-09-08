@@ -76,10 +76,18 @@ function legacyCursorKey(envId: string): string {
   return `direct_since_${envId}`;
 }
 
+function generationKey(envId: string): string {
+  return `direct_generation_v1_${envId}`;
+}
+
 async function kvGetNumber(db: SQLiteDatabase, key: string): Promise<number | null> {
   const row = await db.getFirstAsync<{ value: string }>("select value from kv where key = ?", [key]);
   const parsed = row === null ? NaN : Number(row.value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function kvGetString(db: SQLiteDatabase, key: string): Promise<string | null> {
+  return (await db.getFirstAsync<{ value: string }>("select value from kv where key = ?", [key]))?.value ?? null;
 }
 
 async function kvSetString(db: SQLiteDatabase, key: string, value: string): Promise<void> {
@@ -201,6 +209,7 @@ export async function removeDirectMachine(db: SQLiteDatabase, environmentId: str
       await db.runAsync("delete from environments where id = ?", [environmentId]);
       await db.runAsync("delete from kv where key = ?", [cursorKey(environmentId)]);
       await db.runAsync("delete from kv where key = ?", [legacyCursorKey(environmentId)]);
+      await db.runAsync("delete from kv where key = ?", [generationKey(environmentId)]);
     });
     invalidateEventCache(db);
   });
@@ -298,7 +307,10 @@ async function pullDirectUnlocked(
         // mode explicitly sends epoch zero on the first pull: null omits the
         // query parameter and means "use the reporter push cursor", which is
         // only the recent cloud-live tail.
-        const storedCursor = await kvGetNumber(db, cursorKey(machine.id));
+        const [storedCursor, knownGeneration] = await Promise.all([
+          kvGetNumber(db, cursorKey(machine.id)),
+          kvGetString(db, generationKey(machine.id)),
+        ]);
         const since = storedCursor === null ? 0 : Math.max(0, storedCursor - LIVE_OVERLAP_MS);
 
         // Quotas are independent of event export. Start the vendor request
@@ -317,7 +329,9 @@ async function pullDirectUnlocked(
         const eventsTimeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 60_000);
         let eventsPage;
         try {
-          eventsPage = parseLiveEventsPage(await api.events(since, eventsTimeout.signal));
+          eventsPage = parseLiveEventsPage(
+            await api.events(since, eventsTimeout.signal, knownGeneration),
+          );
         } finally {
           eventsTimeout.cancel();
         }
@@ -435,6 +449,9 @@ async function pullDirectUnlocked(
             // Cursor advances only after the merge commits inside this
             // transaction — a crashed pull re-pulls its window (idempotent).
             await kvSetString(db, cursorKey(machine.id), String(now()));
+            if (eventsPage.generation !== null && eventsPage.generation !== undefined) {
+              await kvSetString(db, generationKey(machine.id), eventsPage.generation);
+            }
           });
           if (changedEvents > 0) invalidateEventCache(db);
         });

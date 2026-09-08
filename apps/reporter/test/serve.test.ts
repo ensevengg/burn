@@ -148,6 +148,11 @@ describe("live server", () => {
     );
     expect(((await second.json()) as { events: unknown[] }).events).toHaveLength(1);
     expect(scans).toBe(1);
+    const unchanged = await fetcher(
+      new Request(`http://machine/live/events?since=0&generation=${"a".repeat(64)}`),
+    );
+    expect(((await unchanged.json()) as { events: unknown[] }).events).toHaveLength(0);
+    expect(scans).toBe(1);
 
     fingerprint = "b".repeat(64);
     expect((await fetcher(new Request("http://machine/live/events?since=0"))).status).toBe(200);

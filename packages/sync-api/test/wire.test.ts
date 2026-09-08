@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { eventIdentityDescription, normalizeCostSource, quotaAccountKey, quotaMetricLabel } from "../src/keys";
 import { parseEventRow, parseEnvironmentRow, parseQuotaRow } from "../src/supabase";
+import { httpLiveApiFor, parseLiveEventsPage } from "../src/live";
 
 describe("keys", () => {
   test("event identity is server-side sha256 of slug|client|dedup_key", () => {
@@ -73,6 +74,29 @@ describe("wire parsing", () => {
     expect(ev.durationMs).toBeNull();
     expect(ev.workspaceLabel).toBeNull();
     expect(ev.costIsComplete).toBe(false);
+  });
+
+  test("live generation round-trips and is sent on the next request", async () => {
+    const generation = "a".repeat(64);
+    expect(
+      parseLiveEventsPage({
+        sinceMs: 0,
+        generatedAt: "2026-09-07T10:00:00.000Z",
+        generation,
+        events: [],
+      }).generation,
+    ).toBe(generation);
+    let requested = "";
+    const fetchImpl = (async (input: string | URL | Request) => {
+      requested = String(input);
+      return new Response(
+        JSON.stringify({ sinceMs: 0, generatedAt: "2026-09-07T10:00:00.000Z", generation, events: [] }),
+        { headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    const api = httpLiveApiFor("http://machine:8787", fetchImpl);
+    await api.events(0, undefined, generation);
+    expect(requested).toContain(`since=0&generation=${generation}`);
   });
 
   test("quota row maps percents leniently", () => {

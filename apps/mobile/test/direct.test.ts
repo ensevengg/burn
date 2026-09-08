@@ -67,6 +67,7 @@ interface FakeEntry {
   failEvents?: Error;
   quotas?: { generatedAt: string; quotas: Record<string, unknown>[] };
   seenSince: (number | null)[];
+  seenGenerations?: (string | null)[];
   seenPingSignal: AbortSignal | null;
 }
 
@@ -80,9 +81,10 @@ function directApiFor(map: Record<string, FakeEntry>): NonNullable<DirectPullOpt
         if (entry.failPing) throw entry.failPing;
         return entry.ping ?? ping();
       },
-      events: async (sinceMs, signal) => {
+      events: async (sinceMs, signal, knownGeneration) => {
         if (signal?.aborted) throw new LiveUnreachableError("aborted");
         entry.seenSince.push(sinceMs);
+        entry.seenGenerations?.push(knownGeneration ?? null);
         if (entry.failEvents) throw entry.failEvents;
         if (!entry.page) return { sinceMs, generatedAt: "2026-09-07T10:00:00.000Z", events: [] };
         return entry.page;
@@ -331,9 +333,11 @@ describe("direct pull", () => {
     const fx = mirrorFixture();
     const entry: FakeEntry = {
       seenSince: [],
+      seenGenerations: [],
       page: {
         sinceMs: null,
         generatedAt: "2026-09-07T10:00:00.000Z",
+        generation: "a".repeat(64),
         events: [ingestRow()],
       },
       quotas: {
@@ -367,6 +371,7 @@ describe("direct pull", () => {
       await pullDirectFromMachines(fx.db, { apiFor, now: () => 11_000_000 });
       expect(changes.filter((kind) => kind === "events")).toHaveLength(1);
       expect(changes.filter((kind) => kind === "quotas")).toHaveLength(1);
+      expect(entry.seenGenerations).toEqual([null, "a".repeat(64)]);
     } finally {
       unsubscribe();
     }

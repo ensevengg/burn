@@ -94,9 +94,10 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
   type EventPage = {
     sinceMs: number;
     generatedAt: string;
+    generation: string | null;
     events: IngestEventInput[];
   };
-  type EventSnapshot = Omit<EventPage, "sinceMs"> & { fingerprint: string };
+  type EventSnapshot = Omit<EventPage, "sinceMs" | "generation"> & { fingerprint: string };
   let activeScan: { sinceMs: number; promise: Promise<EventPage | null> } | null = null;
   let activeSnapshot: Promise<EventSnapshot | null> | null = null;
   let eventSnapshot: EventSnapshot | null = null;
@@ -137,6 +138,7 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
       return {
         sinceMs,
         generatedAt: new Date(now()).toISOString(),
+        generation: null,
         events: exportRowsToIngestInputs(rows, deps.config.tokscalePin),
       };
     })();
@@ -164,20 +166,32 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
   const pageFromSnapshot = (snapshot: EventSnapshot, sinceMs: number): EventPage => ({
     sinceMs,
     generatedAt: snapshot.generatedAt,
+    generation: snapshot.fingerprint,
     events: snapshot.events.filter((event) => event.occurredAtMs >= sinceMs),
   });
 
-  const scanEvents = async (sinceMs: number): Promise<EventPage | null> => {
+  const scanEvents = async (
+    sinceMs: number,
+    knownGeneration: string | null,
+  ): Promise<EventPage | null> => {
     const fingerprint = await readFingerprint();
     // Missing/old development exporters remain correct, just uncached.
     if (fingerprint === null) return scanUncached(sinceMs);
+    if (knownGeneration === fingerprint) {
+      return {
+        sinceMs,
+        generatedAt: eventSnapshot?.generatedAt ?? new Date(now()).toISOString(),
+        generation: fingerprint,
+        events: [],
+      };
+    }
     if (eventSnapshot?.fingerprint === fingerprint) {
       return pageFromSnapshot(eventSnapshot, sinceMs);
     }
     if (activeSnapshot !== null) {
       const snapshot = await activeSnapshot;
       if (snapshot?.fingerprint === fingerprint) return pageFromSnapshot(snapshot, sinceMs);
-      return scanEvents(sinceMs);
+      return scanEvents(sinceMs, knownGeneration);
     }
 
     const pending = (async (): Promise<EventSnapshot | null> => {
@@ -243,7 +257,8 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
           // The exact transform the push path applies: dedup fallback derived,
           // cost → decimal string, timezone shim, parser version pinned. The
           // phone receives the same rows its Supabase twin will have.
-          const page = await scanEvents(sinceMs);
+          const knownGeneration = new URL(req.url).searchParams.get("generation");
+          const page = await scanEvents(sinceMs, knownGeneration);
           if (page === null) {
             return jsonResponse({ error: "burn-events exporter not found on this machine" }, 503);
           }
