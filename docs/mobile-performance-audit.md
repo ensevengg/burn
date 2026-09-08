@@ -99,10 +99,10 @@ became primary:
 
 - The resident reporter fingerprints tokscale's discovered source files,
   SQLite WALs, scanner/pricing inputs, parser pin and timezone. It caches one
-  fully validated event snapshot per generation. A real local fingerprint
-  probe took about 5 ms; a production-path smoke test against real data took
-  29.8 s for the initial debug-build scan and 6 ms for the unchanged follow-up
-  (193 tail rows versus zero). Release exporter timings remain device-specific.
+  fully validated event snapshot per generation. Real local fingerprint probes
+  took 3–5 ms; a warm release build exported and schema-validated 1,896 real
+  rows in 58 ms. An earlier cold debug-path smoke took 29.8 s initially and
+  6 ms for the unchanged follow-up. Timings remain machine-specific.
 - Direct and cloud-live callers coalesce instead of cancelling/restarting the
   same machine scan. Direct events and quotas start concurrently; live quotas
   have a five-minute machine-side TTL.
@@ -119,7 +119,8 @@ became primary:
 - Live event responses use gzip when the phone advertises it; direct pull-to-
   refresh now actually probes machines and displays the direct backend state.
 
-Validation on the branch: 114 Bun tests across all workspaces, one Rust test,
-workspace typecheck, Rust build/check, the existing 27k synthetic diagnostic,
-and the real exporter/live-handler smoke above. Release-build Android frame
+Validation on the branch: 117 Bun tests across all workspaces, one Rust test,
+workspace typecheck, Rust release build/check, the existing 27k synthetic
+diagnostic, and the real exporter/live-handler smoke above. Release-build
+Android frame
 timing is still the remaining device-only check.
