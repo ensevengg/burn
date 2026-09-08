@@ -24,7 +24,12 @@ import {
   parseEventsJsonl,
   pushSinceMs,
 } from "./events.js";
-import { assertExporterMatchesPin, exporterVersion, fetchEventsJsonl } from "./exporter.js";
+import {
+  assertExporterMatchesPin,
+  exporterFingerprint,
+  exporterVersion,
+  fetchEventsJsonl,
+} from "./exporter.js";
 import { fetchUsage, spawnRunner, TokscaleError, tokscaleQuotaInputs, REPORTER_VERSION } from "./tokscale.js";
 
 export interface LiveDeps {
@@ -33,6 +38,7 @@ export interface LiveDeps {
   cursor?: () => ReporterCursor;
   exporterScan?: (sinceMs: number) => Promise<string>;
   exporterCheck?: () => Promise<string | null>;
+  exporterFingerprint?: () => Promise<string | null>;
   usage?: (pin: string) => Promise<unknown>;
 }
 
@@ -73,12 +79,16 @@ function errorText(err: unknown): string {
  */
 export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Response> {
   const now = deps.now ?? Date.now;
-  type EventScan = {
+  type EventPage = {
     sinceMs: number;
     generatedAt: string;
     events: IngestEventInput[];
   };
-  let activeScan: { sinceMs: number; promise: Promise<EventScan | null> } | null = null;
+  type EventSnapshot = Omit<EventPage, "sinceMs"> & { fingerprint: string };
+  let activeScan: { sinceMs: number; promise: Promise<EventPage | null> } | null = null;
+  let activeSnapshot: Promise<EventSnapshot | null> | null = null;
+  let eventSnapshot: EventSnapshot | null = null;
+  let fingerprintInFlight: Promise<string | null> | null = null;
   let quotaCache: { expiresAt: number; page: { generatedAt: string; quotas: IngestQuotaInput[] } } | null = null;
   let quotaInFlight: Promise<{ generatedAt: string; quotas: IngestQuotaInput[] }> | null = null;
 
@@ -99,15 +109,15 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
     };
   };
 
-  const scanEvents = async (sinceMs: number): Promise<EventScan | null> => {
+  const scanUncached = async (sinceMs: number): Promise<EventPage | null> => {
     if (activeScan !== null) {
       if (activeScan.sinceMs === sinceMs) return activeScan.promise;
       // A cloud-tail request and a direct request can use different cursors.
       // Serialize those scans instead of making one caller fail with a 503.
       await activeScan.promise.catch(() => null);
-      return scanEvents(sinceMs);
+      return scanUncached(sinceMs);
     }
-    const promise = (async (): Promise<EventScan | null> => {
+    const promise = (async (): Promise<EventPage | null> => {
       const exporter = await (deps.exporterCheck ?? exporterVersion)();
       if (exporter === null) return null;
       assertExporterMatchesPin(exporter, deps.config.tokscalePin);
@@ -125,6 +135,58 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
       })
       .catch(() => {});
     return promise;
+  };
+
+  const readFingerprint = (): Promise<string | null> => {
+    if (fingerprintInFlight !== null) return fingerprintInFlight;
+    const pending = (deps.exporterFingerprint ?? exporterFingerprint)();
+    fingerprintInFlight = pending;
+    void pending
+      .finally(() => {
+        if (fingerprintInFlight === pending) fingerprintInFlight = null;
+      })
+      .catch(() => {});
+    return pending;
+  };
+
+  const pageFromSnapshot = (snapshot: EventSnapshot, sinceMs: number): EventPage => ({
+    sinceMs,
+    generatedAt: snapshot.generatedAt,
+    events: snapshot.events.filter((event) => event.occurredAtMs >= sinceMs),
+  });
+
+  const scanEvents = async (sinceMs: number): Promise<EventPage | null> => {
+    const fingerprint = await readFingerprint();
+    // Missing/old development exporters remain correct, just uncached.
+    if (fingerprint === null) return scanUncached(sinceMs);
+    if (eventSnapshot?.fingerprint === fingerprint) {
+      return pageFromSnapshot(eventSnapshot, sinceMs);
+    }
+    if (activeSnapshot !== null) {
+      const snapshot = await activeSnapshot;
+      if (snapshot?.fingerprint === fingerprint) return pageFromSnapshot(snapshot, sinceMs);
+      return scanEvents(sinceMs);
+    }
+
+    const pending = (async (): Promise<EventSnapshot | null> => {
+      const page = await scanUncached(0);
+      if (page === null) return null;
+      const snapshot = {
+        fingerprint,
+        generatedAt: page.generatedAt,
+        events: page.events,
+      };
+      eventSnapshot = snapshot;
+      return snapshot;
+    })();
+    activeSnapshot = pending;
+    void pending
+      .finally(() => {
+        if (activeSnapshot === pending) activeSnapshot = null;
+      })
+      .catch(() => {});
+    const snapshot = await pending;
+    return snapshot === null ? null : pageFromSnapshot(snapshot, sinceMs);
   };
 
   const loadQuotas = (): Promise<{ generatedAt: string; quotas: IngestQuotaInput[] }> => {

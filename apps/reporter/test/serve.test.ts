@@ -55,6 +55,7 @@ function deps(overrides: Partial<LiveDeps> = {}): LiveDeps {
     now: () => Date.parse("2026-09-07T10:05:00.000Z"),
     cursor: () => CURSOR,
     exporterCheck: async () => "4.15.1",
+    exporterFingerprint: async () => null,
     exporterScan: async () => `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n${JSON.stringify(EXPORTER_ROW_WITHOUT_KEY)}\n`,
     usage: async () => [
       {
@@ -124,6 +125,33 @@ describe("live server", () => {
     release();
     expect((await first).status).toBe(200);
     expect((await second).status).toBe(200);
+  });
+
+  test("/live/events reuses a full snapshot while source fingerprints match", async () => {
+    let scans = 0;
+    let fingerprint = "a".repeat(64);
+    const fetcher = createLiveFetch(
+      deps({
+        exporterFingerprint: async () => fingerprint,
+        exporterScan: async (sinceMs) => {
+          scans += 1;
+          expect(sinceMs).toBe(0);
+          return `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n${JSON.stringify(EXPORTER_ROW_WITHOUT_KEY)}\n`;
+        },
+      }),
+    );
+
+    const first = await fetcher(new Request("http://machine/live/events?since=0"));
+    expect(((await first.json()) as { events: unknown[] }).events).toHaveLength(2);
+    const second = await fetcher(
+      new Request(`http://machine/live/events?since=${EXPORTER_ROW_WITHOUT_KEY.timestamp}`),
+    );
+    expect(((await second.json()) as { events: unknown[] }).events).toHaveLength(1);
+    expect(scans).toBe(1);
+
+    fingerprint = "b".repeat(64);
+    expect((await fetcher(new Request("http://machine/live/events?since=0"))).status).toBe(200);
+    expect(scans).toBe(2);
   });
 
   test("/live/events reports a missing exporter as 503, a pin mismatch as 500", async () => {

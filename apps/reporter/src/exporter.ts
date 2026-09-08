@@ -78,6 +78,20 @@ export function assertExporterMatchesPin(version: string, pin: string): void {
   }
 }
 
+/** Cheap source-generation probe; null falls back to an uncached scan. */
+export async function exporterFingerprint(): Promise<string | null> {
+  try {
+    const runner = await resolveExporter();
+    const { stdout } = await spawnRunner(runner, ["--fingerprint"], 60_000);
+    const fingerprint = stdout.trim();
+    return /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : null;
+  } catch {
+    // Older same-pin development binaries do not have this command. Serving
+    // uncached remains correct until they are rebuilt.
+    return null;
+  }
+}
+
 /** Full scan through the exporter; returns its raw JSONL stdout. */
 export async function fetchEventsJsonl(sinceMs: number, timeoutMs = 300_000): Promise<string> {
   const runner = await resolveExporter();
