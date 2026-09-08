@@ -24,7 +24,7 @@ import type { SQLiteDatabase } from "expo-sqlite";
 import { invalidateEventCache } from "../data/repository";
 import { withWriteLock } from "./writelock";
 import { cloudGeneration, publishMirrorChange } from "./sync-state";
-import { describeFailure, linkedSignals, withTimeout } from "./live";
+import { describeFailure, withTimeout } from "./live";
 
 export interface DirectMachine {
   id: string;
@@ -208,8 +208,8 @@ export function pullDirectFromMachines(
   db: SQLiteDatabase,
   options: DirectPullOptions = {},
 ): Promise<DirectPullStatus[]> {
-  inFlightController.get(db)?.abort();
-  inFlight.delete(db);
+  const existing = inFlight.get(db);
+  if (existing !== undefined) return existing;
   const generation = cloudGeneration(db);
   const internal = new AbortController();
   inFlightController.set(db, internal);
@@ -300,6 +300,7 @@ async function pullDirectUnlocked(
         }
         assertActive();
 
+        let changedEvents = 0;
         await withWriteLock(async () => {
           assertActive();
           await db.withTransactionAsync(async () => {
@@ -322,7 +323,7 @@ async function pullDirectUnlocked(
             );
             for (let i = 0; i < eventsPage.events.length; i += 32) {
               const chunk = eventsPage.events.slice(i, i + 32);
-              await db.runAsync(
+              const result = await db.runAsync(
                 `insert into usage_events
                (event_id, environment_id, client, provider_id, model_id, session_id, session_title,
                 workspace_key, workspace_label, agent, occurred_at_ms, source_offset_minutes, source_timezone,
@@ -348,7 +349,33 @@ async function pullDirectUnlocked(
                cost_source = excluded.cost_source, cost_is_complete = excluded.cost_is_complete,
                model_attribution_conflicted = excluded.model_attribution_conflicted,
                parser_version = excluded.parser_version, revision = excluded.revision
-             where usage_events.revision = 0`,
+             where usage_events.revision = 0 and (
+               usage_events.client is not excluded.client or
+               usage_events.provider_id is not excluded.provider_id or
+               usage_events.model_id is not excluded.model_id or
+               usage_events.session_id is not excluded.session_id or
+               usage_events.session_title is not excluded.session_title or
+               usage_events.workspace_key is not excluded.workspace_key or
+               usage_events.workspace_label is not excluded.workspace_label or
+               usage_events.agent is not excluded.agent or
+               usage_events.occurred_at_ms is not excluded.occurred_at_ms or
+               usage_events.source_offset_minutes is not excluded.source_offset_minutes or
+               usage_events.source_timezone is not excluded.source_timezone or
+               usage_events.source_local_date is not excluded.source_local_date or
+               usage_events.input_tokens is not excluded.input_tokens or
+               usage_events.output_tokens is not excluded.output_tokens or
+               usage_events.cache_read_tokens is not excluded.cache_read_tokens or
+               usage_events.cache_write_tokens is not excluded.cache_write_tokens or
+               usage_events.reasoning_tokens is not excluded.reasoning_tokens or
+               usage_events.message_count is not excluded.message_count or
+               usage_events.is_turn_start is not excluded.is_turn_start or
+               usage_events.duration_ms is not excluded.duration_ms or
+               usage_events.cost is not excluded.cost or
+               usage_events.cost_source is not excluded.cost_source or
+               usage_events.cost_is_complete is not excluded.cost_is_complete or
+               usage_events.model_attribution_conflicted is not excluded.model_attribution_conflicted or
+               usage_events.parser_version is not excluded.parser_version
+             )`,
                 chunk.flatMap((e) => [
                   liveEventId(machine.slug, e.client, e.dedupKey),
                   machine.id,
@@ -380,14 +407,15 @@ async function pullDirectUnlocked(
                   0,
                 ]),
               );
+              changedEvents += result.changes;
             }
             // Cursor advances only after the merge commits inside this
             // transaction — a crashed pull re-pulls its window (idempotent).
             await kvSetString(db, cursorKey(machine.id), String(now()));
           });
-          invalidateEventCache(db);
+          if (changedEvents > 0) invalidateEventCache(db);
         });
-        publishMirrorChange(db, "events");
+        if (changedEvents > 0) publishMirrorChange(db, "events");
 
         // Quotas: env-scoped upsert only — never touches other machines'
         // rows, so the cloud path's wholesale replace stays impossible here.

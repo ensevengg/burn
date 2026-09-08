@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { LIVE_OVERLAP_MS, liveEventId, LiveUnreachableError, type IngestEventInput, type LiveApi, type LiveEventsPage, type LivePing } from "@burn/sync-api";
 import { mirrorFixture } from "./mirror-fixture";
+import { subscribeMirrorChanges } from "../src/lib/sync-state";
 import {
   addDirectMachine,
   directEnvId,
@@ -206,6 +207,68 @@ describe("direct pull", () => {
     expect(row).not.toBeNull();
     const first = await fx.db.getFirstAsync<{ n: number }>("select count(*) as n from usage_events");
     expect(first!.n).toBe(2);
+  });
+
+  test("concurrent callers share one machine scan", async () => {
+    const fx = mirrorFixture();
+    await addDirectMachine(fx.db, "http://win:8787", {
+      apiFor: directApiFor({ "http://win:8787": { seenSince: [] } }),
+    });
+    let eventCalls = 0;
+    let started!: () => void;
+    const scanStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const apiFor: NonNullable<DirectPullOptions["apiFor"]> = () => ({
+      ping: async () => ping(),
+      events: async (sinceMs) => {
+        eventCalls += 1;
+        started();
+        await gate;
+        return { sinceMs, generatedAt: "2026-09-07T10:00:00.000Z", events: [ingestRow()] };
+      },
+      quotas: async () => {
+        throw new Error("no quotas configured");
+      },
+    });
+
+    const first = pullDirectFromMachines(fx.db, { apiFor, now: () => 10_000 });
+    await scanStarted;
+    const second = pullDirectFromMachines(fx.db, { apiFor, now: () => 10_000 });
+    release();
+
+    expect(second).toBe(first);
+    await expect(first).resolves.toHaveLength(1);
+    expect(eventCalls).toBe(1);
+  });
+
+  test("an identical overlap does not announce an event change", async () => {
+    const fx = mirrorFixture();
+    const entry: FakeEntry = {
+      seenSince: [],
+      page: {
+        sinceMs: null,
+        generatedAt: "2026-09-07T10:00:00.000Z",
+        events: [ingestRow()],
+      },
+    };
+    const apiFor = directApiFor({ "http://win:8787": entry });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+    const changes: string[] = [];
+    const unsubscribe = subscribeMirrorChanges((changedDb, kind) => {
+      if (changedDb === fx.db) changes.push(kind);
+    });
+    try {
+      await pullDirectFromMachines(fx.db, { apiFor, now: () => 10_000_000 });
+      await pullDirectFromMachines(fx.db, { apiFor, now: () => 11_000_000 });
+      expect(changes.filter((kind) => kind === "events")).toHaveLength(1);
+    } finally {
+      unsubscribe();
+    }
   });
 
   test("quotas upsert per-environment and never clobber other machines", async () => {
