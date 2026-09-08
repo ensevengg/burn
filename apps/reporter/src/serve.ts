@@ -60,8 +60,20 @@ export async function tailscaleIp(timeoutMs = 5_000): Promise<string | null> {
   }
 }
 
-function jsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
+function jsonResponse(payload: unknown, status = 200, request?: Request): Response {
+  const json = JSON.stringify(payload);
+  const acceptsGzip = request?.headers.get("accept-encoding")?.includes("gzip") === true;
+  if (acceptsGzip && json.length >= 1_024) {
+    return new Response(Bun.gzipSync(new TextEncoder().encode(json)), {
+      status,
+      headers: {
+        "content-type": "application/json",
+        "content-encoding": "gzip",
+        vary: "accept-encoding",
+      },
+    });
+  }
+  return new Response(json, {
     status,
     headers: { "content-type": "application/json" },
   });
@@ -235,7 +247,7 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
           if (page === null) {
             return jsonResponse({ error: "burn-events exporter not found on this machine" }, 503);
           }
-          return jsonResponse(page);
+          return jsonResponse(page, 200, req);
         } catch (err) {
           return jsonResponse({ error: errorText(err) }, 500);
         }

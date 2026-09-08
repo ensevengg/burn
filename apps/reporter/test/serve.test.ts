@@ -154,6 +154,16 @@ describe("live server", () => {
     expect(scans).toBe(2);
   });
 
+  test("/live/events compresses large responses when the phone accepts gzip", async () => {
+    const res = await createLiveFetch(deps())(
+      new Request("http://machine/live/events", { headers: { "accept-encoding": "gzip" } }),
+    );
+    expect(res.headers.get("content-encoding")).toBe("gzip");
+    const decoded = Bun.gunzipSync(new Uint8Array(await res.arrayBuffer()));
+    const body = JSON.parse(new TextDecoder().decode(decoded)) as { events: unknown[] };
+    expect(body.events).toHaveLength(2);
+  });
+
   test("/live/events reports a missing exporter as 503, a pin mismatch as 500", async () => {
     const missing = await createLiveFetch(deps({ exporterCheck: async () => null }))(
       new Request("http://machine/live/events"),
