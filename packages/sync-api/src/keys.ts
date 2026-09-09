@@ -16,8 +16,10 @@ import type { CostSource } from "./types";
  *     (pricing/parser fixes) upsert in place and advance the environment
  *     revision, which propagates to phones via the revision watermark.
  *
- * quota_snapshots: append-only, no dedup key — freshness selection happens at
- * read time per (provider, account_key, metric).
+ * Server quota_snapshots are append-only; freshness selection happens at read
+ * time per (provider, account_key, metric). The phone mirror keeps only the
+ * latest row from each environment under this stable key:
+ *   environment_id | provider | account_key | metric
  *
  * environments: natural key = slug (one reporter installation each; `windows`
  * and `wsl` are distinct slugs sharing a host_group).
@@ -167,6 +169,16 @@ export function quotaAccountKey(providerAccountId: string | null | undefined): s
 /** Metric label derived from a tokscale usage metric row. */
 export function quotaMetricLabel(label: string): string {
   return label.trim().toLowerCase().replace(/\s+/g, "_") || "unknown";
+}
+
+/** Stable primary key for one environment-scoped quota row in the phone mirror. */
+export function quotaMirrorRowKey(
+  environmentId: string | null | undefined,
+  provider: string,
+  accountKey: string,
+  metric: string,
+): string {
+  return `${environmentId ?? "no-env"}|${provider}|${accountKey}|${metric}`;
 }
 
 export function normalizeCostSource(raw: string | null | undefined): CostSource {

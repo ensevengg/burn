@@ -1,4 +1,4 @@
-import type { MobileSyncApi } from "@burn/sync-api";
+import { quotaMirrorRowKey, type MobileSyncApi } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
 import { EVENT_WRITE_BATCH_SIZE } from "./mirror-write";
 import { withWriteLock } from "./writelock";
@@ -155,7 +155,7 @@ export async function pullCloud(
               used_percent, remaining_percent, remaining_label, resets_at, status, error, fetched_at)
            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-              `${q.environmentId ?? "no-env"}|${q.provider}|${q.accountKey}|${q.metric}`,
+              quotaMirrorRowKey(q.environmentId, q.provider, q.accountKey, q.metric),
               q.environmentId,
               q.provider,
               q.accountKey,

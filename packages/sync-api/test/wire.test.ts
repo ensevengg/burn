@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { eventIdentityDescription, normalizeCostSource, quotaAccountKey, quotaMetricLabel } from "../src/keys";
+import {
+  eventIdentityDescription,
+  normalizeCostSource,
+  quotaAccountKey,
+  quotaMetricLabel,
+  quotaMirrorRowKey,
+} from "../src/keys";
 import { parseEventRow, parseEnvironmentRow, parseQuotaRow } from "../src/supabase";
 import { httpLiveApiFor, parseLiveEventsPage } from "../src/live";
 
@@ -17,6 +23,15 @@ describe("keys", () => {
   test("quota metric labels are snake_cased", () => {
     expect(quotaMetricLabel("Session (5h)")).toBe("session_(5h)");
     expect(quotaMetricLabel("")).toBe("unknown");
+  });
+
+  test("quota mirror rows are environment-scoped", () => {
+    expect(quotaMirrorRowKey("windows", "codex", "personal", "session_5h")).toBe(
+      "windows|codex|personal|session_5h",
+    );
+    expect(quotaMirrorRowKey(null, "codex", "personal", "weekly")).toBe(
+      "no-env|codex|personal|weekly",
+    );
   });
 
   test("cost source normalization accepts tokscale camelCase and snake_case", () => {

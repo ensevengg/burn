@@ -23,13 +23,12 @@
  */
 import {
   httpLiveApiFor,
-  liveEventId,
   parseLiveEventsPage,
   LiveError,
   type LiveApi,
 } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
-import { EVENT_WRITE_BATCH_SIZE } from "./mirror-write";
+import { upsertProvisionalEvents } from "./mirror-write";
 import { invalidateEventCache } from "../data/repository";
 import { withWriteLock } from "./writelock";
 import { cloudGeneration, publishMirrorChange } from "./sync-state";
@@ -225,94 +224,11 @@ async function pullLiveUnlocked(
         await withWriteLock(async () => {
           assertActive();
           await db.withTransactionAsync(async () => {
-            for (let i = 0; i < page.events.length; i += EVENT_WRITE_BATCH_SIZE) {
-              const chunk = page.events.slice(i, i + EVENT_WRITE_BATCH_SIZE);
-              const result = await db.runAsync(
-                `insert into usage_events
-               (event_id, environment_id, client, provider_id, model_id, session_id, session_title,
-                workspace_key, workspace_label, agent, occurred_at_ms, source_offset_minutes, source_timezone,
-                source_local_date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                reasoning_tokens, message_count, is_turn_start, duration_ms, cost, cost_source,
-                cost_is_complete, model_attribution_conflicted, parser_version, revision)
-             values ${chunk.map(() => "(" + Array(28).fill("?").join(",") + ")").join(",")}
-             on conflict (event_id) do update set
-               client = excluded.client, provider_id = excluded.provider_id,
-               model_id = excluded.model_id, session_id = excluded.session_id,
-               session_title = excluded.session_title, workspace_key = excluded.workspace_key,
-               workspace_label = excluded.workspace_label, agent = excluded.agent,
-               occurred_at_ms = excluded.occurred_at_ms,
-               source_offset_minutes = excluded.source_offset_minutes,
-               source_timezone = excluded.source_timezone,
-               source_local_date = excluded.source_local_date,
-               input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens,
-               cache_read_tokens = excluded.cache_read_tokens,
-               cache_write_tokens = excluded.cache_write_tokens,
-               reasoning_tokens = excluded.reasoning_tokens,
-               message_count = excluded.message_count, is_turn_start = excluded.is_turn_start,
-               duration_ms = excluded.duration_ms, cost = excluded.cost,
-               cost_source = excluded.cost_source, cost_is_complete = excluded.cost_is_complete,
-               model_attribution_conflicted = excluded.model_attribution_conflicted,
-               parser_version = excluded.parser_version, revision = excluded.revision
-             where usage_events.revision = 0 and (
-               usage_events.client is not excluded.client or
-               usage_events.provider_id is not excluded.provider_id or
-               usage_events.model_id is not excluded.model_id or
-               usage_events.session_id is not excluded.session_id or
-               usage_events.session_title is not excluded.session_title or
-               usage_events.workspace_key is not excluded.workspace_key or
-               usage_events.workspace_label is not excluded.workspace_label or
-               usage_events.agent is not excluded.agent or
-               usage_events.occurred_at_ms is not excluded.occurred_at_ms or
-               usage_events.source_offset_minutes is not excluded.source_offset_minutes or
-               usage_events.source_timezone is not excluded.source_timezone or
-               usage_events.source_local_date is not excluded.source_local_date or
-               usage_events.input_tokens is not excluded.input_tokens or
-               usage_events.output_tokens is not excluded.output_tokens or
-               usage_events.cache_read_tokens is not excluded.cache_read_tokens or
-               usage_events.cache_write_tokens is not excluded.cache_write_tokens or
-               usage_events.reasoning_tokens is not excluded.reasoning_tokens or
-               usage_events.message_count is not excluded.message_count or
-               usage_events.is_turn_start is not excluded.is_turn_start or
-               usage_events.duration_ms is not excluded.duration_ms or
-               usage_events.cost is not excluded.cost or
-               usage_events.cost_source is not excluded.cost_source or
-               usage_events.cost_is_complete is not excluded.cost_is_complete or
-               usage_events.model_attribution_conflicted is not excluded.model_attribution_conflicted or
-               usage_events.parser_version is not excluded.parser_version
-             )`,
-                chunk.flatMap((e) => [
-                  liveEventId(target.slug, e.client, e.dedupKey),
-                  target.environmentId,
-                  e.client,
-                  e.providerId,
-                  e.modelId,
-                  e.sessionId,
-                  e.sessionTitle,
-                  e.workspaceKey,
-                  e.workspaceLabel,
-                  e.agent,
-                  e.occurredAtMs,
-                  e.sourceOffsetMinutes,
-                  e.sourceTimezone,
-                  e.sourceLocalDate,
-                  e.inputTokens,
-                  e.outputTokens,
-                  e.cacheReadTokens,
-                  e.cacheWriteTokens,
-                  e.reasoningTokens,
-                  e.messageCount,
-                  e.isTurnStart ? 1 : 0,
-                  e.durationMs,
-                  e.cost,
-                  e.costSource,
-                  e.costIsComplete ? 1 : 0,
-                  e.modelAttributionConflicted ? 1 : 0,
-                  e.parserVersion,
-                  0, // revision: live rows are provisional until the server confirms
-                ]),
-              );
-              changedEvents += result.changes;
-            }
+            changedEvents = await upsertProvisionalEvents(
+              db,
+              { id: target.environmentId, slug: target.slug },
+              page.events,
+            );
           });
           // Post-commit eviction, inside the writer — same contract as
           // resetDb and the cloud pull. An identical overlap keeps all
