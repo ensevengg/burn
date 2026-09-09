@@ -113,8 +113,8 @@ became primary:
   11,200 bindings under Expo SQLite's 32,766 limit. A 27k-row backfill drops
   from 844 bridge calls to 68 without interpolating user data.
 - Cloud connections now decrypt SecureStore values and construct the backend
-  adapter once per connected lifecycle. The daemon's eager poll defaults to
-  10 seconds. Migration `0007` replaces the idle delta tail count with an
+  adapter once per connected lifecycle. The daemon's eager poll remains at
+  the D1 default of 30 seconds. Migration `0007` replaces the idle delta tail count with an
   indexed `exists` probe and preserves the caller watermark on empty pages.
 - Live event responses use gzip when the phone advertises it; direct pull-to-
   refresh now actually probes machines and displays the direct backend state.

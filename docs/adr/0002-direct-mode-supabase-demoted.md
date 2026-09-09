@@ -49,7 +49,7 @@ idempotent merges. The Supabase path remains fully functional and untouched
 
 - New `pullDirect(db, machines, …)` beside `pullCloud` — same write-lock,
   same cache-eviction-in-writer, same generation-based cancellation, same
-  32-row chunking.
+  shared 400-row chunking.
 - **Per-machine time cursors** (`kv: direct_since_v2_<envId>` = lastPullAt minus
   the overlap window), not one global revision watermark. The v1 protocol is
   time-cursor-based, identical to the push path's semantics.
