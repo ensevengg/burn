@@ -8,6 +8,7 @@ import type { SQLiteDatabase } from "expo-sqlite";
 import { bucketKey, bucketLabel, type Granularity } from "../lib/format";
 import { createYieldBudget, runCooperatively, runImmediately } from "../lib/cooperative";
 import { withWriteLock } from "../lib/writelock";
+import { usageWindowStart, type UsageWindowDays } from "../lib/usage-range";
 
 export const DAY_MS = 86_400_000;
 
@@ -45,6 +46,7 @@ export interface EnvironmentRow {
   lastSuccessAt: string | null;
   lastError: string | null;
   latestRevision: number;
+  directInitialSyncComplete: boolean | null;
 }
 
 export interface Totals {
@@ -563,6 +565,9 @@ export interface BreakdownRow extends Totals {
   key: string;
   title: string;
   subtitle: string | null;
+  providers: string[];
+  clients: string[];
+  sessions: number;
 }
 
 function* breakdownWork(
@@ -570,21 +575,28 @@ function* breakdownWork(
   keyFn: (e: EventRow) => { key: string; title: string; subtitle: string | null },
 ): Generator<void, BreakdownRow[]> {
   let processed = 0;
-  const groups = new Map<string, EventRow[]>();
+  const groups = new Map<string, Totals & { title: string; subtitle: string | null; providers: Set<string>; clients: Set<string>; sessions: Set<string>; events: number; costed: number }>();
   for (const e of events) {
     if (++processed % 256 === 0) yield;
-    const { key } = keyFn(e);
-    const list = groups.get(key);
-    if (list === undefined) groups.set(key, [e]);
-    else list.push(e);
+    const meta = keyFn(e);
+    let row = groups.get(meta.key);
+    if (row === undefined) {
+      row = { title: meta.title, subtitle: meta.subtitle, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, messages: 0, cost: 0, hitRate: 0, costCoverage: 0, providers: new Set(), clients: new Set(), sessions: new Set(), events: 0, costed: 0 };
+      groups.set(meta.key, row);
+    }
+    row.inputTokens += e.inputTokens; row.outputTokens += e.outputTokens;
+    row.cacheReadTokens += e.cacheReadTokens; row.cacheWriteTokens += e.cacheWriteTokens;
+    row.reasoningTokens += e.reasoningTokens; row.messages += e.messageCount; row.cost += e.cost;
+    row.providers.add(e.providerId); row.clients.add(e.client); row.sessions.add(sessionKey(e));
+    row.events += 1; if (e.costIsComplete) row.costed += 1;
   }
   const rows: BreakdownRow[] = [];
-  for (const [key, list] of groups) {
+  for (const [key, row] of groups) {
     yield;
-    const meta = keyFn(list[0]!);
-    rows.push({ key, title: meta.title, subtitle: meta.subtitle, ...(yield* summarizeEventsWork(list)) });
+    const cacheTotal = row.cacheReadTokens + row.inputTokens + row.cacheWriteTokens;
+    rows.push({ ...row, key, providers: [...row.providers].sort(), clients: [...row.clients].sort(), sessions: row.sessions.size, hitRate: cacheTotal === 0 ? 0 : row.cacheReadTokens / cacheTotal, costCoverage: row.events === 0 ? 0 : row.costed / row.events });
   }
-  return rows.sort((a, b) => b.cost - a.cost || b.outputTokens - a.outputTokens);
+  return rows.sort((a, b) => eventTokens(b) - eventTokens(a) || b.cost - a.cost);
 }
 
 export async function queryHistory(
@@ -592,12 +604,12 @@ export async function queryHistory(
   timeZone: string,
   granularity: Granularity,
   groupBy: "model" | "client" | "none",
-  days: number,
+  days: UsageWindowDays,
   environmentId: string | null,
   signal?: AbortSignal,
 ): Promise<{ series: SeriesBucket[]; totals: Totals }> {
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, environmentId);
+  const events = await loadEvents(db, usageWindowStart(days), Date.now() + DAY_MS, environmentId);
   if (signal?.aborted) throw new Error("Query cancelled");
   return {
     series: await runCooperatively(buildSeriesWork(events, timeZone, granularity, groupBy), signal),
@@ -607,18 +619,18 @@ export async function queryHistory(
 
 export async function queryModels(
   db: SQLiteDatabase,
-  days: number,
+  days: UsageWindowDays,
   environmentId: string | null,
   signal?: AbortSignal,
 ) {
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, environmentId);
+  const events = await loadEvents(db, usageWindowStart(days), Date.now() + DAY_MS, environmentId);
   if (signal?.aborted) throw new Error("Query cancelled");
   return runCooperatively(
     breakdownWork(events, (e) => ({
-      key: `${e.providerId}/${e.modelId}`,
+      key: e.modelId,
       title: e.modelId,
-      subtitle: e.providerId,
+      subtitle: null,
     })),
     signal,
   );
@@ -626,12 +638,12 @@ export async function queryModels(
 
 export async function queryClients(
   db: SQLiteDatabase,
-  days: number,
+  days: UsageWindowDays,
   environmentId: string | null,
   signal?: AbortSignal,
 ) {
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, environmentId);
+  const events = await loadEvents(db, usageWindowStart(days), Date.now() + DAY_MS, environmentId);
   if (signal?.aborted) throw new Error("Query cancelled");
   return runCooperatively(
     breakdownWork(events, (e) => ({ key: e.client, title: e.client, subtitle: null })),
@@ -641,12 +653,12 @@ export async function queryClients(
 
 export async function queryWorkspaces(
   db: SQLiteDatabase,
-  days: number,
+  days: UsageWindowDays,
   environmentId: string | null,
   signal?: AbortSignal,
 ) {
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, environmentId);
+  const events = await loadEvents(db, usageWindowStart(days), Date.now() + DAY_MS, environmentId);
   if (signal?.aborted) throw new Error("Query cancelled");
   return runCooperatively(
     breakdownWork(events, (e) => ({
@@ -673,7 +685,7 @@ export interface SessionRow {
 
 export async function querySessions(
   db: SQLiteDatabase,
-  days: number,
+  days: UsageWindowDays,
   environmentId: string | null,
   limit = 60,
   signal?: AbortSignal,
@@ -681,7 +693,7 @@ export async function querySessions(
   if (signal?.aborted) throw new Error("Query cancelled");
   const events = await loadEventsUncached(
     db,
-    Date.now() - days * DAY_MS,
+    usageWindowStart(days),
     Date.now() + DAY_MS,
     environmentId,
     Math.max(0, Math.floor(limit)),
@@ -757,17 +769,18 @@ export interface WindowOverview {
 export async function queryWindowOverview(
   db: SQLiteDatabase,
   timeZone: string,
-  days: number,
+  days: UsageWindowDays,
   metric: "cost" | "tokens",
+  granularity: Granularity = "daily",
   signal?: AbortSignal,
 ): Promise<WindowOverview> {
   const now = Date.now();
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, now - days * DAY_MS, now + DAY_MS, null);
+  const events = await loadEvents(db, usageWindowStart(days, now), now + DAY_MS, null);
   if (signal?.aborted) throw new Error("Query cancelled");
   const totals = await runCooperatively(summarizeEventsWork(events), signal);
   const sessionKeys = new Set<string>();
-  const series = await runCooperatively(buildSeriesWork(events, timeZone, "daily", "none"), signal);
+  const series = await runCooperatively(buildSeriesWork(events, timeZone, granularity, "none"), signal);
 
   const byClientMap = new Map<string, { tokens: number; cost: number; sessions: Set<string> }>();
   const yieldIfNeeded = createYieldBudget(signal);
@@ -841,9 +854,12 @@ export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
 
 export async function queryEnvironments(db: SQLiteDatabase): Promise<EnvironmentRow[]> {
   const rows = await db.getAllAsync<Record<string, unknown>>(
-    `select id, slug, display_name, host_group, os_kind, tokscale_version, reporter_version,
-            last_heartbeat_at, last_success_at, last_error, latest_revision
-       from environments order by slug`,
+    `select e.id, e.slug, e.display_name, e.host_group, e.os_kind, e.tokscale_version, e.reporter_version,
+            e.last_heartbeat_at, e.last_success_at, e.last_error, e.latest_revision,
+            case when d.id is null then null else exists(
+              select 1 from kv where key = 'direct_since_v2_' || e.id
+            ) end as direct_initial_sync_complete
+       from environments e left join direct_machines d on d.id = e.id order by e.slug`,
   );
   return rows.map((r) => ({
     id: String(r["id"]),
@@ -857,5 +873,6 @@ export async function queryEnvironments(db: SQLiteDatabase): Promise<Environment
     lastSuccessAt: (r["last_success_at"] as string | null) ?? null,
     lastError: (r["last_error"] as string | null) ?? null,
     latestRevision: Number(r["latest_revision"] ?? 0),
+    directInitialSyncComplete: r["direct_initial_sync_complete"] === null ? null : Number(r["direct_initial_sync_complete"]) === 1,
   }));
 }

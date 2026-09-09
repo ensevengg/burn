@@ -3,7 +3,7 @@ import type { BurnBackend, MobileSyncApi } from "@burn/sync-api";
 import { createConnectionCache } from "../src/lib/connection-cache";
 
 const phone: MobileSyncApi = {
-  fetchDelta: async () => ({ environments: [], events: [], maxRevision: 0, hasMore: false }),
+  fetchDelta: async () => ({ cursorVersion: 2, environments: [], events: [], maxRevision: 0, hasMore: false }),
   fetchQuotaLatest: async () => [],
   requestSync: async () => ({ generation: 1 }),
   removeEnvironment: async () => ({ removedSlug: "windows" }),

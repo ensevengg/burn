@@ -266,12 +266,14 @@ export function createBurnBackend(config: BurnBackendConfig): BurnBackend {
             events: unknown[];
             max_revision: number;
             has_more: boolean;
+            cursor_version?: number;
           }>("burn_fetch_delta", {
             p_read_token: token,
             p_since_revision: sinceRevision,
             p_limit: limit ?? 5000,
           });
           return {
+            cursorVersion: Number(out.cursor_version ?? 1),
             environments: (out.environments ?? []).map(parseEnvironmentRow),
             events: (out.events ?? []).map(parseEventRow),
             maxRevision: Number(out.max_revision ?? 0),

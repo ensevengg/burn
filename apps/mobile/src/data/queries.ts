@@ -17,6 +17,7 @@ import {
 } from "./repository";
 import type { SQLiteDatabase } from "expo-sqlite";
 import { useApp } from "../lib/app-context";
+import type { UsageWindowDays } from "../lib/usage-range";
 
 interface DbQueryOptions {
   enabled?: boolean;
@@ -73,7 +74,7 @@ function useDbQuery<T>(
 export function useHistoryQuery(
   granularity: Granularity,
   groupBy: "model" | "client" | "none",
-  days: number,
+  days: UsageWindowDays,
 ) {
   const { reportingTimezone } = useApp();
   return useDbQuery(
@@ -94,11 +95,11 @@ export function useGranularityMaxQuery(granularity: Granularity, metric: "cost" 
 }
 
 /** The restructured dashboard's single source: totals, sessions, series, client shares, cache savings. */
-export function useWindowOverviewQuery(days: number) {
+export function useWindowOverviewQuery(days: UsageWindowDays, metric: "cost" | "tokens", granularity: Granularity) {
   const { reportingTimezone } = useApp();
   return useDbQuery(
-    ["window-overview", reportingTimezone, days],
-    (db, signal) => queryWindowOverview(db, reportingTimezone, days, "cost", signal),
+    ["window-overview", reportingTimezone, days, metric, granularity],
+    (db, signal) => queryWindowOverview(db, reportingTimezone, days, metric, granularity, signal),
     { keepPrevious: true },
   );
 }
@@ -116,28 +117,28 @@ export function useRecordsQuery() {
   return useDbQuery(["records", reportingTimezone], (db, signal) => queryRecords(db, reportingTimezone, signal));
 }
 
-export function useModelsQuery(days: number, enabled = true) {
+export function useModelsQuery(days: UsageWindowDays, enabled = true) {
   return useDbQuery(["models", days], (db, signal) => queryModels(db, days, null, signal), {
     enabled,
     keepPrevious: true,
   });
 }
 
-export function useClientsQuery(days: number, enabled = true) {
+export function useClientsQuery(days: UsageWindowDays, enabled = true) {
   return useDbQuery(["clients", days], (db, signal) => queryClients(db, days, null, signal), {
     enabled,
     keepPrevious: true,
   });
 }
 
-export function useWorkspacesQuery(days: number, enabled = true) {
+export function useWorkspacesQuery(days: UsageWindowDays, enabled = true) {
   return useDbQuery(["workspaces", days], (db, signal) => queryWorkspaces(db, days, null, signal), {
     enabled,
     keepPrevious: true,
   });
 }
 
-export function useSessionsQuery(days: number, enabled = true) {
+export function useSessionsQuery(days: UsageWindowDays, enabled = true) {
   return useDbQuery(["sessions", days], (db, signal) => querySessions(db, days, null, 60, signal), {
     enabled,
     keepPrevious: true,

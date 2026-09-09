@@ -10,20 +10,13 @@ import { useTheme } from "../lib/theme-context";
 import { spacing, type } from "../theme";
 import { Card, Chip, Dot, Empty, MeterBar, SectionTitle, Segmented, Stat } from "../ui/primitives";
 import { AreaChart } from "../ui/charts";
+import { DASHBOARD_RANGES, USAGE_RANGES, type UsageRangeId } from "../lib/usage-range";
 
 type Metric = "cost" | "tokens";
-type WindowDays = 1 | 7 | 30 | 90;
 
 const METRICS = [
   { label: "Cost", value: "cost" },
   { label: "Tokens", value: "tokens" },
-] as const;
-
-const WINDOWS = [
-  { label: "Past 24h", value: "1" },
-  { label: "7 days", value: "7" },
-  { label: "30 days", value: "30" },
-  { label: "90 days", value: "90" },
 ] as const;
 
 export function DashboardScreen() {
@@ -31,10 +24,11 @@ export function DashboardScreen() {
   const { syncError, syncNotice, refreshingMachines, checkingMachines } = useSyncStatus();
   const { C } = useTheme();
   const [metric, setMetric] = useState<Metric>("cost");
-  const [days, setDays] = useState<WindowDays>(30);
+  const [rangeId, setRangeId] = useState<UsageRangeId>("30");
+  const range = USAGE_RANGES[rangeId];
   const [demoRefreshing, setDemoRefreshing] = useState(false);
-  const overview = useWindowOverviewQuery(days);
-  const dailyMax = useGranularityMaxQuery("daily", metric);
+  const overview = useWindowOverviewQuery(range.days, metric, range.granularity);
+  const dailyMax = useGranularityMaxQuery(range.granularity, metric);
   const quotas = useQuotasQuery();
   const machines = useMachinesQuery();
   // Cloud pull-to-refresh is covered by the machine-refresh spinner (which
@@ -74,7 +68,7 @@ export function DashboardScreen() {
         </View>
 
         <Segmented options={METRICS} value={metric} onChange={setMetric} />
-        <Segmented options={WINDOWS} value={String(days)} onChange={(value) => setDays(Number(value) as WindowDays)} />
+        <Segmented options={DASHBOARD_RANGES} value={rangeId} onChange={setRangeId} />
 
         {overview.data !== undefined && overview.data.byClient.length > 0 ? (
           <View style={styles.providerRows}>
@@ -116,9 +110,9 @@ export function DashboardScreen() {
           </Card>
         )}
 
-        <SectionTitle trailing={`${metric} / day`}>Daily</SectionTitle>
+        <SectionTitle trailing={`${metric} / ${range.granularity === "daily" ? "day" : range.granularity === "monthly" ? "month" : "year"}`}>Usage</SectionTitle>
         {overview.data === undefined || overview.data.series.length === 0 ? (
-          <Empty message={`No usage in the last ${days}d.`} />
+          <Empty message={`No usage in ${range.label.toLowerCase()}.`} />
         ) : (
           <Card>
             <AreaChart

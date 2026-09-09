@@ -10,7 +10,9 @@ export interface SyncResult {
   watermark: number;
   hasMore: boolean;
 }
-const WATERMARK_KEY = "watermark_revision";
+// v2 is intentionally a new key: replay all rows after migration 0008 rather
+// than treating the old, environment-local watermark as globally meaningful.
+const WATERMARK_KEY = "watermark_sync_revision_v2";
 const MAX_PAGES = 8;
 async function kvGet(db: SQLiteDatabase, key: string): Promise<string | null> {
   return (
@@ -40,6 +42,9 @@ export async function pullCloud(
     for (let page = 0; page < MAX_PAGES; page++) {
       assertActive();
       const delta = await phone.fetchDelta(watermark);
+      if (delta.cursorVersion !== 2) {
+        throw new Error("Cloud backend is missing migration 0008_global_sync_revision.sql; event sync was stopped safely.");
+      }
       hasMore = delta.hasMore;
       await withWriteLock(async () => {
         assertActive();

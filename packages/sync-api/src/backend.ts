@@ -88,7 +88,7 @@ export interface ReporterSyncApi {
 }
 
 export interface MobileSyncApi {
-  /** Revision-keyed delta: corrected old events propagate (D5). */
+  /** Database-global revision delta: corrected old events and every machine propagate (D5). */
   fetchDelta(sinceRevision: number, limit?: number): Promise<DeltaPage>;
   fetchQuotaLatest(): Promise<QuotaSnapshot[]>;
   /** Flip the rendezvous flag (D1); targets one environment or all. */

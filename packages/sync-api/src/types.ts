@@ -85,9 +85,11 @@ export interface QuotaSnapshot {
 }
 
 export interface DeltaPage {
+  /** Cursor contract version. Version 2 is database-global across machines. */
+  cursorVersion: number;
   environments: EnvironmentInfo[];
   events: UsageEvent[];
-  /** Greatest revision present in `events`; the phone's next watermark. */
+  /** Greatest global sync revision present in `events`; the phone's next watermark. */
   maxRevision: number;
   hasMore: boolean;
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { FlatList, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useClientsQuery, useModelsQuery, useSessionsQuery, useWorkspacesQuery } from "../data/queries";
@@ -7,7 +7,8 @@ import { humanize } from "../lib/labels";
 import { useTheme } from "../lib/theme-context";
 import { spacing, type } from "../theme";
 import { Card, Empty, MeterBar, SectionTitle, Segmented } from "../ui/primitives";
-import type { BreakdownRow, SessionRow } from "../data/repository";
+import { eventTokens, type BreakdownRow, type SessionRow } from "../data/repository";
+import { EXPLORE_RANGES, USAGE_RANGES, type UsageRangeId } from "../lib/usage-range";
 
 type Tab = "models" | "clients" | "workspaces" | "sessions";
 
@@ -18,27 +19,32 @@ const TABS = [
   { label: "Sessions", value: "sessions" },
 ] as const;
 
-const WINDOWS = [
-  { label: "7d", value: "7" },
-  { label: "30d", value: "30" },
-  { label: "365d", value: "365" },
-] as const;
-
 export function ExploreScreen() {
   const [tab, setTab] = useState<Tab>("models");
-  const [windowDays, setWindowDays] = useState(30);
+  const [rangeId, setRangeId] = useState<UsageRangeId>("30");
+  const windowDays = USAGE_RANGES[rangeId].days;
   const { C } = useTheme();
 
   const models = useModelsQuery(windowDays, tab === "models");
   const clients = useClientsQuery(windowDays, tab === "clients");
   const workspaces = useWorkspacesQuery(windowDays, tab === "workspaces");
   const sessions = useSessionsQuery(windowDays, tab === "sessions");
+  const breakdownData =
+    (tab === "models" ? models.data : tab === "clients" ? clients.data : workspaces.data) ?? [];
+  const modelMode = tab === "models";
+  const { maxValue, totalValue } = useMemo(() => {
+    const value = (row: BreakdownRow) => (modelMode ? eventTokens(row) : row.cost);
+    return {
+      maxValue: Math.max(value(breakdownData[0] ?? EMPTY_BREAKDOWN), 0.000001),
+      totalValue: breakdownData.reduce((sum, row) => sum + value(row), 0),
+    };
+  }, [breakdownData, modelMode]);
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: C.bg }]} edges={["top"]}>
       {tab === "sessions" ? (
         <FlatList<SessionRow>
-          key={`sessions-${windowDays}`}
+          key={`sessions-${rangeId}`}
           data={sessions.data ?? []}
           keyExtractor={(row) => row.key}
           initialNumToRender={8}
@@ -50,9 +56,9 @@ export function ExploreScreen() {
               <Text style={[type.title, { color: C.text }, styles.title]}>Explore</Text>
               <Segmented options={TABS} value={tab} onChange={setTab} />
               <Segmented
-                options={WINDOWS}
-                value={String(windowDays)}
-                onChange={(v) => setWindowDays(Number(v))}
+                options={EXPLORE_RANGES}
+                value={rangeId}
+                onChange={setRangeId}
               />
               <SectionTitle trailing="recent first">{sessions.data?.length ?? 0} sessions</SectionTitle>
             </>
@@ -64,8 +70,8 @@ export function ExploreScreen() {
         />
       ) : (
         <FlatList<BreakdownRow>
-          key={`${tab}-${windowDays}`}
-          data={(tab === "models" ? models.data : tab === "clients" ? clients.data : workspaces.data) ?? []}
+          key={`${tab}-${rangeId}`}
+          data={breakdownData}
           keyExtractor={(row) => row.key}
           initialNumToRender={8}
           maxToRenderPerBatch={8}
@@ -76,11 +82,11 @@ export function ExploreScreen() {
               <Text style={[type.title, { color: C.text }, styles.title]}>Explore</Text>
               <Segmented options={TABS} value={tab} onChange={setTab} />
               <Segmented
-                options={WINDOWS}
-                value={String(windowDays)}
-                onChange={(v) => setWindowDays(Number(v))}
+                options={EXPLORE_RANGES}
+                value={rangeId}
+                onChange={setRangeId}
               />
-              <SectionTitle trailing="by spend">{humanize(tab)}</SectionTitle>
+              <SectionTitle trailing={tab === "models" ? "by processed tokens" : "by spend"}>{humanize(tab)}</SectionTitle>
             </>
           }
           ListEmptyComponent={
@@ -97,11 +103,9 @@ export function ExploreScreen() {
             <BreakdownItem
               row={item}
               index={index}
-              maxCost={Math.max(
-                (tab === "models" ? models.data : tab === "clients" ? clients.data : workspaces.data)?.[0]
-                  ?.cost ?? 0,
-                0.000001,
-              )}
+              maxValue={maxValue}
+              modelMode={modelMode}
+              totalValue={totalValue}
             />
           )}
         />
@@ -110,22 +114,64 @@ export function ExploreScreen() {
   );
 }
 
-function BreakdownItem({ row, index, maxCost }: { row: BreakdownRow; index: number; maxCost: number }) {
+const EMPTY_BREAKDOWN: BreakdownRow = {
+  key: "",
+  title: "",
+  subtitle: null,
+  providers: [],
+  clients: [],
+  sessions: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  reasoningTokens: 0,
+  messages: 0,
+  cost: 0,
+  hitRate: 0,
+  costCoverage: 0,
+};
+
+function BreakdownItem({
+  row,
+  index,
+  maxValue,
+  totalValue,
+  modelMode,
+}: {
+  row: BreakdownRow;
+  index: number;
+  maxValue: number;
+  totalValue: number;
+  modelMode: boolean;
+}) {
   const { C } = useTheme();
+  const processed = eventTokens(row);
+  const primary = modelMode ? processed : row.cost;
+  const attribution = [...new Set([...row.providers, ...row.clients].map(humanize))].join(" · ");
   return (
     <Card>
       <View style={styles.rowHeader}>
         <Text style={[type.body, { color: C.text, flex: 1, fontWeight: "600" }]} numberOfLines={1}>
           {`${index + 1}. ${humanize(row.title)}`}
         </Text>
-        <Text style={[type.body, { color: C.muted, fontWeight: "700" }]}>{formatCost(row.cost)}</Text>
-      </View>
-      <MeterBar percent={(row.cost / maxCost) * 100} tone={C.text} />
-      <View style={styles.rowStats}>
-        <Text style={[type.muted, { color: C.muted }]}>
-          {`${humanize(row.subtitle ?? "")} · ${formatTokens(row.outputTokens)} out · cache ${formatPercent(row.hitRate)}`}
+        <Text style={[type.body, { color: C.muted, fontWeight: "700" }]}>
+          {modelMode ? formatTokens(processed) : formatCost(row.cost)}
         </Text>
       </View>
+      <MeterBar percent={(primary / maxValue) * 100} tone={C.text} />
+      <View style={styles.rowStats}>
+        <Text style={[type.muted, { color: C.muted }]}>
+          {modelMode
+            ? `${attribution} · ${row.sessions} sessions · ${formatCost(row.cost)} · ${formatPercent(processed / (totalValue || 1))} share · cache ${formatPercent(row.hitRate)}`
+            : `${humanize(row.subtitle ?? "")} · ${formatTokens(processed)} processed · cache ${formatPercent(row.hitRate)}`}
+        </Text>
+      </View>
+      {modelMode && (
+        <Text style={[type.muted, { color: C.faint, marginTop: 4 }]}>
+          {`${formatTokens(row.inputTokens)} in · ${formatTokens(row.cacheReadTokens)} cached · ${formatTokens(row.cacheWriteTokens)} written · ${formatTokens(row.outputTokens)} out · ${formatTokens(row.reasoningTokens)} reasoning`}
+        </Text>
+      )}
     </Card>
   );
 }
