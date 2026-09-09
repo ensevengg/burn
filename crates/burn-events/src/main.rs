@@ -315,6 +315,22 @@ fn fingerprint_paths(paths: &[PathBuf]) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+fn load_scanner_settings() -> ScannerSettings {
+    let path = paths::get_config_dir().join("settings.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return ScannerSettings::default();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return ScannerSettings::default();
+    };
+    value
+        .get("scanner")
+        .cloned()
+        .map(serde_json::from_value::<ScannerSettings>)
+        .unwrap_or_else(|| Ok(ScannerSettings::default()))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{capabilities, fingerprint_paths};
@@ -347,20 +363,4 @@ mod tests {
         assert_eq!(value["protocol"], 2);
         assert_eq!(value["capabilities"][0], "fingerprint-v1");
     }
-}
-
-fn load_scanner_settings() -> ScannerSettings {
-    let path = paths::get_config_dir().join("settings.json");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return ScannerSettings::default();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return ScannerSettings::default();
-    };
-    value
-        .get("scanner")
-        .cloned()
-        .map(serde_json::from_value::<ScannerSettings>)
-        .unwrap_or_else(|| Ok(ScannerSettings::default()))
-        .unwrap_or_default()
 }
