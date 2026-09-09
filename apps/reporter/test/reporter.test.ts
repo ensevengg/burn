@@ -39,7 +39,7 @@ describe("config", () => {
     const loaded = loadConfig();
     expect(loaded.environmentSlug).toBe("cachyos");
     expect(loaded.intervalMinutes).toBe(10);
-    expect(loaded.syncPollSeconds).toBe(10);
+    expect(loaded.syncPollSeconds).toBe(30);
   });
 
   test("rejects a bad slug", () => {

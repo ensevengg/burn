@@ -78,7 +78,7 @@ export function runInit(args: Map<string, string>): void {
     osKind: (args.get("os") ?? detectOsKind()) as BurnConfig["osKind"],
     reportingTimezone: args.get("tz") ?? "Asia/Kolkata",
     intervalMinutes: Number(args.get("interval") ?? 10),
-    syncPollSeconds: Number(args.get("poll-seconds") ?? 10),
+    syncPollSeconds: Number(args.get("poll-seconds") ?? 30),
     tokscalePin: args.get("tokscale-pin") ?? TOKSCALE_PIN,
   };
   saveConfig(config);

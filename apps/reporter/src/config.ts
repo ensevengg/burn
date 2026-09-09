@@ -24,7 +24,7 @@ export const configSchema = z.object({
   /** Minutes between scheduled pushes. */
   intervalMinutes: z.number().int().min(1).max(1440).default(10),
   /** Seconds between eager sync-request polls while the daemon is resident. */
-  syncPollSeconds: z.number().int().min(5).max(300).default(10),
+  syncPollSeconds: z.number().int().min(5).max(300).default(30),
   tokscalePin: z.string().default(TOKSCALE_PIN),
 });
 
