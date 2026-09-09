@@ -26,6 +26,7 @@ export function DashboardScreen() {
   const [metric, setMetric] = useState<Metric>("cost");
   const [rangeId, setRangeId] = useState<UsageRangeId>("30");
   const range = USAGE_RANGES[rangeId];
+  const metricLabel = humanize(metric);
   const [demoRefreshing, setDemoRefreshing] = useState(false);
   const overview = useWindowOverviewQuery(range.days, metric, range.granularity);
   const dailyMax = useGranularityMaxQuery(range.granularity, metric);
@@ -83,7 +84,7 @@ export function DashboardScreen() {
                     {`${client.sessions} sessions`}
                   </Text>
                   <Text style={[type.muted, { color: C.muted }]}>
-                    {`${formatPercent(share)} of ${metric} · ${formatTokens(client.tokens)}`}
+                    {`${formatPercent(share)} of ${metricLabel} · ${formatTokens(client.tokens)}`}
                   </Text>
                 </View>
               );
@@ -110,7 +111,7 @@ export function DashboardScreen() {
           </Card>
         )}
 
-        <SectionTitle trailing={`${metric} / ${range.granularity === "daily" ? "day" : range.granularity === "monthly" ? "month" : "year"}`}>Usage</SectionTitle>
+        <SectionTitle trailing={`${metricLabel} / ${range.granularity === "daily" ? "day" : range.granularity === "monthly" ? "month" : "year"}`}>Usage</SectionTitle>
         {overview.data === undefined || overview.data.series.length === 0 ? (
           <Empty message={`No usage in ${range.label.toLowerCase()}.`} />
         ) : (
