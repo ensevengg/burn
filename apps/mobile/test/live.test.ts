@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { liveEventId, LiveUnreachableError } from "@burn/sync-api";
 import { mirrorFixture } from "./mirror-fixture";
 import { pullLiveFromMachines, type LivePullOptions } from "../src/lib/live";
-import { queryDailyTotals } from "../src/data/repository";
+import { queryWindowOverview } from "../src/data/repository";
 import { subscribeMirrorChanges } from "../src/lib/sync-state";
 import type { IngestEventInput, LiveApi, LiveEventsPage, LivePing } from "@burn/sync-api";
 
@@ -233,12 +233,12 @@ describe("live pull merge", () => {
       dedupKey: "v1:codex:recent:1:1",
     });
     const api = apiForByEndpoint({ "http://127.0.0.1:8787": { page: page([recent]) } });
-    const before = await queryDailyTotals(fx.db, "Asia/Kolkata", 30);
-    expect(Object.keys(before.byKey)).toHaveLength(0);
+    const before = await queryWindowOverview(fx.db, "Asia/Kolkata", 30, "tokens");
+    expect(before.totals.messages).toBe(0);
     await pullLiveFromMachines(fx.db, { apiFor: api });
-    const after = await queryDailyTotals(fx.db, "Asia/Kolkata", 30);
-    expect(Object.keys(after.byKey).length).toBeGreaterThan(0);
-    expect(after.max).toBeGreaterThan(0);
+    const after = await queryWindowOverview(fx.db, "Asia/Kolkata", 30, "tokens");
+    expect(after.totals.messages).toBeGreaterThan(0);
+    expect(after.series.some((bucket) => bucket.tokens > 0)).toBe(true);
   });
 
   test("an identical live overlap does not announce another event change", async () => {

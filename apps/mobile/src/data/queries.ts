@@ -4,13 +4,10 @@ import { keepPreviousData, useQuery, useQueryClient, type UseQueryOptions } from
 import type { Granularity } from "../lib/format";
 import {
   queryClients,
-  queryDailyTotals,
   queryEnvironments,
   queryGranularityMax,
-  queryHistory,
   queryModels,
   queryQuotas,
-  queryRecords,
   querySessions,
   queryWindowOverview,
   queryWorkspaces,
@@ -71,19 +68,6 @@ function useDbQuery<T>(
   return useQuery(queryOptions);
 }
 
-export function useHistoryQuery(
-  granularity: Granularity,
-  groupBy: "model" | "client" | "none",
-  days: UsageWindowDays,
-) {
-  const { reportingTimezone } = useApp();
-  return useDbQuery(
-    ["history", reportingTimezone, granularity, groupBy, days],
-    (db, signal) => queryHistory(db, reportingTimezone, granularity, groupBy, days, null, signal),
-    { keepPrevious: true },
-  );
-}
-
 /** Historical peak bucket for the granularity — the fixed Y ceiling (user direction). */
 export function useGranularityMaxQuery(granularity: Granularity, metric: "cost" | "tokens" = "tokens") {
   const { reportingTimezone } = useApp();
@@ -102,19 +86,6 @@ export function useWindowOverviewQuery(days: UsageWindowDays, metric: "cost" | "
     (db, signal) => queryWindowOverview(db, reportingTimezone, days, metric, granularity, signal),
     { keepPrevious: true },
   );
-}
-
-/** Contribution grid always feeds on a trailing year, independent of the window selector. */
-export function useDailyTotalsQuery() {
-  const { reportingTimezone } = useApp();
-  return useDbQuery(["daily-totals", reportingTimezone], (db, signal) =>
-    queryDailyTotals(db, reportingTimezone, 365, signal),
-  );
-}
-
-export function useRecordsQuery() {
-  const { reportingTimezone } = useApp();
-  return useDbQuery(["records", reportingTimezone], (db, signal) => queryRecords(db, reportingTimezone, signal));
 }
 
 export function useModelsQuery(days: UsageWindowDays, enabled = true) {

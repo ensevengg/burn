@@ -328,122 +328,6 @@ export function computeCacheSavings(
   return savings;
 }
 
-export interface DailyTotals {
-  /** Day key (reporting-tz "YYYY-MM-DD") → tokens/cost. Missing key = no usage. */
-  byKey: Record<string, { tokens: number; cost: number }>;
-  max: number;
-}
-
-/** Per-day totals over the given events — the contribution grid's feed. */
-export function computeDailyTotals(events: EventRow[], timeZone: string): DailyTotals {
-  const byKey: Record<string, { tokens: number; cost: number }> = {};
-  let max = 0;
-  for (const [key, agg] of bucketEvents(events, timeZone, "daily")) {
-    byKey[key] = { tokens: agg.tokens, cost: agg.cost };
-    if (agg.tokens > max) max = agg.tokens;
-  }
-  return { byKey, max };
-}
-
-export interface RecordStats {
-  biggestDay: { key: string; tokens: number; cost: number } | null;
-  longestStreak: number;
-  currentStreak: number;
-  topSession: {
-    sessionId: string;
-    title: string | null;
-    client: string;
-    cost: number;
-    tokens: number;
-  } | null;
-}
-
-/** Streaks walk real calendar ordinals so gaps break them correctly. */
-function computeStreaks(
-  activeOrdinals: Set<number>,
-  now: number,
-): { longestStreak: number; currentStreak: number } {
-  // Walk the active days themselves — not every calendar day since the epoch —
-  // so cost scales with history, not with years since 2000.
-  let longestStreak = 0;
-  let run = 0;
-  let previous = -Infinity;
-  for (const ordinal of [...activeOrdinals].sort((a, b) => a - b)) {
-    run = ordinal === previous + 1 ? run + 1 : 1;
-    if (run > longestStreak) longestStreak = run;
-    previous = ordinal;
-  }
-  // Current streak counts back from today; an inactive today doesn't break it
-  // until tomorrow (GitHub convention).
-  let currentStreak = 0;
-  const lastOrdinal = Math.floor(now / DAY_MS);
-  let cursor = activeOrdinals.has(lastOrdinal) ? lastOrdinal : lastOrdinal - 1;
-  while (activeOrdinals.has(cursor)) {
-    currentStreak += 1;
-    cursor -= 1;
-  }
-  return { longestStreak, currentStreak };
-}
-
-/** All-time records: biggest day, longest + current streak, priciest session. */
-export function computeRecords(events: EventRow[], timeZone: string, now = Date.now()): RecordStats {
-  return runImmediately(computeRecordsWork(events, timeZone, now));
-}
-
-function* computeRecordsWork(
-  events: EventRow[],
-  timeZone: string,
-  now = Date.now(),
-): Generator<void, RecordStats> {
-  let processed = 0;
-  const perDay = yield* bucketEventsWork(events, timeZone, "daily");
-  const perSession = new Map<
-    string,
-    { sessionId: string; title: string | null; client: string; cost: number; tokens: number }
-  >();
-  for (const e of events) {
-    if (++processed % 256 === 0) yield;
-    const session = perSession.get(sessionKey(e)) ?? {
-      sessionId: e.sessionId,
-      title: e.sessionTitle,
-      client: e.client,
-      cost: 0,
-      tokens: 0,
-    };
-    session.cost += e.cost;
-    session.tokens += eventTokens(e);
-    if (session.title === null && e.sessionTitle !== null) session.title = e.sessionTitle;
-    perSession.set(sessionKey(e), session);
-  }
-
-  let biggestDay: RecordStats["biggestDay"] = null;
-  for (const [key, agg] of perDay) {
-    if (biggestDay === null || agg.tokens > biggestDay.tokens) {
-      biggestDay = { key, tokens: agg.tokens, cost: agg.cost };
-    }
-  }
-
-  const activeOrdinals = new Set(
-    [...perDay.keys()].map((key) => Math.floor(Date.parse(`${key}T12:00:00Z`) / DAY_MS)),
-  );
-  const { longestStreak, currentStreak } = computeStreaks(activeOrdinals, now);
-
-  let topSession: RecordStats["topSession"] = null;
-  for (const session of perSession.values()) {
-    if (topSession === null || session.cost > topSession.cost) {
-      topSession = {
-        sessionId: session.sessionId,
-        title: session.title,
-        client: session.client,
-        cost: session.cost,
-        tokens: session.tokens,
-      };
-    }
-  }
-
-  return { biggestDay, longestStreak, currentStreak, topSession };
-}
-
 export function buildSeries(
   events: EventRow[],
   timeZone: string,
@@ -491,21 +375,6 @@ function* buildSeriesWork(
   return [...byKey.values()].sort((a, b) => (a.key < b.key ? -1 : 1));
 }
 
-/** Cumulative per-layer series for stacked area charts (bottom-up by stack key). */
-export function buildStackLayers(
-  buckets: SeriesBucket[],
-  stackKeys: string[],
-): { key: string; values: number[] }[] {
-  const running = buckets.map(() => 0);
-  return stackKeys.map((key) => {
-    const values = buckets.map((bucket, i) => {
-      running[i] = running[i]! + (bucket.stacks[key] ?? 0);
-      return running[i]!;
-    });
-    return { key, values };
-  });
-}
-
 export async function queryGranularityMax(
   db: SQLiteDatabase,
   timeZone: string,
@@ -532,33 +401,6 @@ export function removeEnvironmentLocal(db: SQLiteDatabase, environmentId: string
     // so the cache must be cleared only after the writes are durable.
     invalidateEventCache(db);
   });
-}
-
-/** Per-day totals over the trailing `days` window — the contribution grid's feed. */
-export async function queryDailyTotals(
-  db: SQLiteDatabase,
-  timeZone: string,
-  days: number,
-  signal?: AbortSignal,
-): Promise<DailyTotals> {
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, null);
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const buckets = await cachedBuckets(events, timeZone, "daily");
-  const byKey = Object.fromEntries([...buckets].map(([key, b]) => [key, { tokens: b.tokens, cost: b.cost }]));
-  return { byKey, max: Math.max(0, ...[...buckets.values()].map((b) => b.tokens)) };
-}
-
-/** All-time records: biggest day, longest + current streak, priciest session. */
-export async function queryRecords(
-  db: SQLiteDatabase,
-  timeZone: string,
-  signal?: AbortSignal,
-): Promise<RecordStats> {
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, 0, Date.now() + DAY_MS, null);
-  if (signal?.aborted) throw new Error("Query cancelled");
-  return runCooperatively(computeRecordsWork(events, timeZone), signal);
 }
 
 export interface BreakdownRow extends Totals {
@@ -597,24 +439,6 @@ function* breakdownWork(
     rows.push({ ...row, key, providers: [...row.providers].sort(), clients: [...row.clients].sort(), sessions: row.sessions.size, hitRate: cacheTotal === 0 ? 0 : row.cacheReadTokens / cacheTotal, costCoverage: row.events === 0 ? 0 : row.costed / row.events });
   }
   return rows.sort((a, b) => eventTokens(b) - eventTokens(a) || b.cost - a.cost);
-}
-
-export async function queryHistory(
-  db: SQLiteDatabase,
-  timeZone: string,
-  granularity: Granularity,
-  groupBy: "model" | "client" | "none",
-  days: UsageWindowDays,
-  environmentId: string | null,
-  signal?: AbortSignal,
-): Promise<{ series: SeriesBucket[]; totals: Totals }> {
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, usageWindowStart(days), Date.now() + DAY_MS, environmentId);
-  if (signal?.aborted) throw new Error("Query cancelled");
-  return {
-    series: await runCooperatively(buildSeriesWork(events, timeZone, granularity, groupBy), signal),
-    totals: await runCooperatively(summarizeEventsWork(events), signal),
-  };
 }
 
 export async function queryModels(
