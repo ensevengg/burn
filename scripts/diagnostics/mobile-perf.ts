@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import {
   queryQuotas,
   computeGranularityMax,
@@ -6,6 +5,7 @@ import {
   type EventRow,
 } from "../../apps/mobile/src/data/repository";
 import type { SQLiteDatabase } from "expo-sqlite";
+import { mirrorFixture } from "../../apps/mobile/test/mirror-fixture";
 const rows = Array.from(
   { length: 27000 },
   (_, i) =>
@@ -29,14 +29,15 @@ console.log(
     timerDelayMs: Math.round(await tick),
   }),
 );
-const db = new Database(":memory:");
-db.exec(
-  `create table quota_snapshots(provider text,account_key text,account_label text,plan text,metric text,used_percent real,remaining_label text,resets_at text,fetched_at text,status text)`,
-);
-const insert = db.prepare("insert into quota_snapshots values (?,?,?,?,?,?,?,?,?,?)");
+const quotaFixture = mirrorFixture();
+const db = quotaFixture.native;
+const insert = db.prepare(`insert into quota_snapshots
+  (row_key, provider, account_key, account_label, plan, metric, used_percent,
+   remaining_percent, remaining_label, resets_at, fetched_at, status)
+  values (?, 'Codex', ?, ?, 'chatgpt_plus', 'weekly', ?, ?, null, null, ?, 'ok')`);
 const put = (key: string, label: string, time: string, used: number) =>
-  insert.run("Codex", key, label, "chatgpt_plus", "weekly", used, null, null, time, "ok");
-const adapter = { getAllAsync: async (sql: string) => db.query(sql).all() } as unknown as SQLiteDatabase;
+  insert.run(`${key}|${time}`, key, label, used, 100 - used, time);
+const adapter = quotaFixture.db;
 put("same-account", "Personal", "2026-09-06T10:00:00Z", 20);
 put("same-account", "Personal", "2026-09-06T11:00:00Z", 50);
 console.log(
