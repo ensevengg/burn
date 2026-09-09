@@ -21,6 +21,49 @@ export class ExporterError extends Error {
 let cachedExporter: Runner | null = null;
 let cachedExporterVersion: string | null = null;
 let exporterVersionProbe: Promise<string | null> | null = null;
+let cachedCapabilities: ExporterCapabilities | null = null;
+let capabilitiesProbe: Promise<ExporterCapabilities | null> | null = null;
+
+export interface ExporterCapabilities {
+  protocol: number;
+  tokscaleVersion: string;
+  capabilities: string[];
+}
+
+export function parseExporterCapabilities(stdout: string): ExporterCapabilities | null {
+  try {
+    const value = JSON.parse(stdout) as Record<string, unknown>;
+    if (typeof value["protocol"] !== "number" || typeof value["tokscale_version"] !== "string" || !Array.isArray(value["capabilities"]) || !value["capabilities"].every((item) => typeof item === "string")) return null;
+    return { protocol: value["protocol"], tokscaleVersion: value["tokscale_version"], capabilities: value["capabilities"] as string[] };
+  } catch {
+    return null;
+  }
+}
+
+export function assertExporterCapabilities(value: ExporterCapabilities | null, pin: string): void {
+  if (value === null || value.tokscaleVersion !== pin || !value.capabilities.includes("fingerprint-v1")) {
+    throw new ExporterError(`burn-events ${pin} is missing the fingerprint-v1 capability — rebuild it: cargo install --path crates/burn-events`);
+  }
+}
+
+export function exporterCapabilities(): Promise<ExporterCapabilities | null> {
+  if (cachedCapabilities !== null) return Promise.resolve(cachedCapabilities);
+  if (capabilitiesProbe !== null) return capabilitiesProbe;
+  const pending = (async () => {
+    try {
+      const runner = await resolveExporter();
+      const { stdout } = await spawnRunner(runner, ["--capabilities"], 60_000);
+      const parsed = parseExporterCapabilities(stdout);
+      if (parsed !== null) cachedCapabilities = parsed;
+      return parsed;
+    } catch {
+      return null;
+    }
+  })();
+  capabilitiesProbe = pending;
+  void pending.finally(() => { if (capabilitiesProbe === pending) capabilitiesProbe = null; });
+  return pending;
+}
 
 export async function resolveExporter(): Promise<Runner> {
   if (cachedExporter !== null) return cachedExporter;

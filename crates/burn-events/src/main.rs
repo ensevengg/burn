@@ -31,6 +31,7 @@ const USAGE: &str = "burn-events — emit tokscale UnifiedMessage records as JSO
 
 Usage: burn-events [--since-ms <epoch-ms>]
        burn-events --fingerprint
+       burn-events --capabilities
        burn-events --version
 
 stdout: one JSON object per line. stderr: scan summary.";
@@ -41,6 +42,21 @@ struct ExportRow<'a> {
     msg: &'a UnifiedMessage,
     source_offset_minutes: i32,
     source_timezone: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Capabilities<'a> {
+    protocol: u8,
+    tokscale_version: &'a str,
+    capabilities: [&'a str; 1],
+}
+
+fn capabilities() -> Capabilities<'static> {
+    Capabilities {
+        protocol: 2,
+        tokscale_version: env!("CARGO_PKG_VERSION"),
+        capabilities: ["fingerprint-v1"],
+    }
 }
 
 /// AGENTS.md (D2): for sources tokscale leaves without a dedup_key, derive
@@ -107,6 +123,13 @@ fn main() {
         match arg.as_str() {
             "--version" => {
                 println!("burn-events {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            "--capabilities" => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&capabilities()).expect("serialize capabilities")
+                );
                 return;
             }
             "-h" | "--help" => {
@@ -294,7 +317,7 @@ fn fingerprint_paths(paths: &[PathBuf]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::fingerprint_paths;
+    use super::{capabilities, fingerprint_paths};
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -316,6 +339,13 @@ mod tests {
         let second = fingerprint_paths(std::slice::from_ref(&path)).unwrap();
         std::fs::remove_file(path).unwrap();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn advertises_the_fingerprint_fast_path() {
+        let value = serde_json::to_value(capabilities()).unwrap();
+        assert_eq!(value["protocol"], 2);
+        assert_eq!(value["capabilities"][0], "fingerprint-v1");
     }
 }
 

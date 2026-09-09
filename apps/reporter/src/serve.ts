@@ -25,7 +25,9 @@ import {
   pushSinceMs,
 } from "./events.js";
 import {
+  assertExporterCapabilities,
   assertExporterMatchesPin,
+  exporterCapabilities,
   exporterFingerprint,
   exporterVersion,
   fetchEventsJsonl,
@@ -317,6 +319,7 @@ export async function startLiveServer(
  */
 export async function runServe(args: Map<string, string>): Promise<void> {
   const config = loadConfig();
+  assertExporterCapabilities(await exporterCapabilities(), config.tokscalePin);
   const options: { bind?: string; port?: number } = {};
   const bindArg = args.get("bind");
   if (bindArg) options.bind = bindArg;

@@ -25,7 +25,14 @@ import {
   TokscaleError,
 } from "./tokscale.js";
 import { exportRowsToIngestInputs, parseEventsJsonl, planBatches, pushSinceMs } from "./events.js";
-import { assertExporterMatchesPin, ExporterError, exporterVersion, fetchEventsJsonl } from "./exporter.js";
+import {
+  assertExporterCapabilities,
+  assertExporterMatchesPin,
+  ExporterError,
+  exporterCapabilities,
+  exporterVersion,
+  fetchEventsJsonl,
+} from "./exporter.js";
 import { quotaAccountKey, quotaMetricLabel, TOKSCALE_PIN } from "@burn/sync-api";
 import { writeFileSync } from "node:fs";
 import { platform } from "node:os";
@@ -83,7 +90,7 @@ export function runInit(args: Map<string, string>): void {
   console.log(`\nconfig       ${configPath()}`);
   console.log("\nNext steps (one-time):");
   console.log(
-    `  1. Paste supabase/migrations/0001_schema.sql into your project's SQL editor, then 0002_api.sql.`,
+    `  1. Paste every numbered supabase/migrations/*.sql file into your project's SQL editor, in order.`,
   );
   console.log(`  2. Paste ${setupSqlPath()} into the SQL editor (registers this machine + your phone).`);
   console.log(
@@ -122,15 +129,18 @@ export async function runDoctor(): Promise<number> {
     detail: tokscale ? `reachable at pin ${config.tokscalePin}` : `npx tokscale@${config.tokscalePin} failed`,
   });
 
-  const exporter = await exporterVersion();
+  const [exporter, capabilities] = await Promise.all([exporterVersion(), exporterCapabilities()]);
+  const capabilitiesOk = capabilities !== null && capabilities.tokscaleVersion === config.tokscalePin && capabilities.capabilities.includes("fingerprint-v1");
   checks.push({
     name: "burn-events",
-    ok: exporter !== null && exporter === config.tokscalePin,
+    ok: exporter !== null && exporter === config.tokscalePin && capabilitiesOk,
     detail:
       exporter === null
         ? "exporter not found — cargo install --path crates/burn-events (or set BURN_EVENTS_BIN)"
-        : exporter === config.tokscalePin
-          ? `matches pin ${config.tokscalePin}`
+        : exporter === config.tokscalePin && capabilitiesOk
+          ? `matches pin ${config.tokscalePin}; fingerprint cache supported`
+          : exporter === config.tokscalePin
+            ? `version matches, but fingerprint capability is missing — rebuild: cargo install --path crates/burn-events`
           : `version ${exporter} ≠ pin ${config.tokscalePin} — rebuild: cargo install --path crates/burn-events`,
   });
 
@@ -315,6 +325,7 @@ export async function runDaemon(args: Map<string, string> = new Map()): Promise<
   let live: import("./serve.js").LiveServerHandle | null = null;
   if (!args.has("no-live") && liveUrl === null) {
     try {
+      assertExporterCapabilities(await exporterCapabilities(), config.tokscalePin);
       const { startLiveServer } = await import("./serve.js");
       live = await startLiveServer(config, liveOptions);
       liveUrl = live.url;
