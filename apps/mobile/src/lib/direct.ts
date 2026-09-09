@@ -35,6 +35,7 @@ export interface DirectMachine {
   addedAt: string;
   lastPingAt: string | null;
   lastError: string | null;
+  initialSyncComplete: boolean;
 }
 
 export interface DirectPullStatus {
@@ -44,9 +45,11 @@ export interface DirectPullStatus {
   state: "live" | "offline" | "error" | "skipped";
   pulledEvents: number;
   pulledQuotas: number;
+  quotaError: string | null;
   clockSkewMs: number | null;
   error: string | null;
   elapsedMs: number;
+  initialSyncComplete: boolean;
 }
 
 export interface DirectPullOptions {
@@ -111,8 +114,6 @@ async function pullDirectQuotas(
   let page;
   try {
     page = parseLiveQuotasPage(await api.quotas(timeout.signal));
-  } catch {
-    return 0;
   } finally {
     timeout.cancel();
   }
@@ -178,7 +179,10 @@ export async function listDirectMachines(db: SQLiteDatabase): Promise<DirectMach
     added_at: string;
     last_ping_at: string | null;
     last_error: string | null;
-  }>("select * from direct_machines order by added_at");
+    initial_sync_complete: number;
+  }>(`select d.*,
+          exists(select 1 from kv where key = 'direct_since_v2_' || d.id) as initial_sync_complete
+       from direct_machines d order by d.added_at`);
   return rows.map((r) => ({
     id: r.id,
     slug: r.slug,
@@ -187,6 +191,7 @@ export async function listDirectMachines(db: SQLiteDatabase): Promise<DirectMach
     addedAt: r.added_at,
     lastPingAt: r.last_ping_at,
     lastError: r.last_error,
+    initialSyncComplete: Number(r.initial_sync_complete) === 1,
   }));
 }
 
@@ -317,10 +322,6 @@ export function pullDirectFromMachines(
         inFlight.delete(db);
         inFlightController.delete(db);
       }
-    })
-    .catch((err: unknown) => {
-      if (err instanceof LiveError && err.message === "direct pull cancelled") throw err;
-      return [] as DirectPullStatus[];
     });
   inFlight.set(db, pending);
   return pending;
@@ -348,14 +349,16 @@ async function pullDirectUnlocked(
         state: "live",
         pulledEvents: 0,
         pulledQuotas: 0,
+        quotaError: null,
         clockSkewMs: null,
         error: null,
         elapsedMs: 0,
+        initialSyncComplete: machine.initialSyncComplete,
       };
       const api = options.apiFor
         ? options.apiFor(machine.baseUrl)
         : httpLiveApiFor(machine.baseUrl, options.fetchImpl ?? fetch);
-      let quotaPromise = Promise.resolve(0);
+      let quotaPromise: Promise<{ count: number; error: string | null }> = Promise.resolve({ count: 0, error: null });
       try {
         const pingTimeout = withTimeout(probeSignal, options.pingTimeoutMs ?? 2_500);
         let ping;
@@ -395,7 +398,7 @@ async function pullDirectUnlocked(
           probeSignal,
           assertActive,
           options.quotaTimeoutMs ?? 15_000,
-        ).catch(() => 0);
+        ).then((count) => ({ count, error: null }), (err: unknown) => ({ count: 0, error: (err as Error).message }));
         const eventsTimeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 60_000);
         let eventsPage;
         try {
@@ -527,15 +530,17 @@ async function pullDirectUnlocked(
         });
         if (changedEvents > 0) publishMirrorChange(db, "events");
 
-        const pulledQuotas = await quotaPromise;
+        const quotaResult = await quotaPromise;
         assertActive();
 
         return {
           ...base,
           pulledEvents: eventsPage.events.length,
-          pulledQuotas,
+          pulledQuotas: quotaResult.count,
+          quotaError: quotaResult.error,
           clockSkewMs,
           elapsedMs: now() - started,
+          initialSyncComplete: true,
         };
       } catch (err) {
         await quotaPromise;
@@ -545,5 +550,25 @@ async function pullDirectUnlocked(
       }
     }),
   );
+  assertActive();
+  await withWriteLock(async () => {
+    await db.withTransactionAsync(async () => {
+      for (const status of statuses) {
+        const checkedAt = new Date(now()).toISOString();
+        const error = status.state === "live" ? status.quotaError : status.error;
+        await db.runAsync(
+          "update direct_machines set last_ping_at = ?, last_error = ? where id = ?",
+          [checkedAt, error, status.environmentId],
+        );
+        await db.runAsync(
+          `update environments set last_heartbeat_at = ?,
+             last_success_at = case when ? = 'live' then ? else last_success_at end,
+             last_error = ? where id = ?`,
+          [checkedAt, status.state, checkedAt, error, status.environmentId],
+        );
+      }
+    });
+  });
+  publishMirrorChange(db, "machines");
   return statuses;
 }

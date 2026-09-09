@@ -174,13 +174,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const statuses = await pullDirectFromMachines(db);
         if (epoch !== lifecycle.current) return;
         const failed = statuses.filter((s) => s.state === "error").length;
+        const incomplete = statuses.filter((s) => !s.initialSyncComplete).length;
+        const quotaFailed = statuses.filter((s) => s.quotaError !== null).length;
+        const successful = statuses.filter((s) => s.state === "live").length;
         patchStatus({
-          lastSync: new Date(),
+          ...(successful > 0 ? { lastSync: new Date() } : {}),
           syncError: null,
           syncNotice:
             failed > 0
               ? `${failed} machine${failed === 1 ? "" : "s"} failed to answer — showing pushed/cached data.`
-              : null,
+              : incomplete > 0
+                ? `Initial history sync is still incomplete on ${incomplete} machine${incomplete === 1 ? "" : "s"}.`
+                : quotaFailed > 0
+                  ? `Token usage synced, but quota refresh failed on ${quotaFailed} machine${quotaFailed === 1 ? "" : "s"}.`
+                  : null,
           liveMachines: statuses,
         });
         return;

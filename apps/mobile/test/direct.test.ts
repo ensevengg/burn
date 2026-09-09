@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { LIVE_OVERLAP_MS, liveEventId, LiveUnreachableError, type IngestEventInput, type LiveApi, type LiveEventsPage, type LivePing } from "@burn/sync-api";
 import { mirrorFixture } from "./mirror-fixture";
 import { subscribeMirrorChanges } from "../src/lib/sync-state";
+import { queryEnvironments } from "../src/data/repository";
 import {
   addDirectMachine,
   directEnvId,
@@ -145,6 +146,7 @@ describe("direct mode registry", () => {
     const env = await fx.db.getFirstAsync<Record<string, unknown>>("select * from environments where id = ?", [directEnvId("win")]);
     expect(env!.slug).toBe("win");
     expect(env!.live_endpoint).toBe("http://win:8787");
+    expect((await queryEnvironments(fx.db))[0]?.directInitialSyncComplete).toBe(false);
   });
 
   test("adding reuses an existing cloud environment id with the same slug", async () => {
@@ -411,6 +413,23 @@ describe("direct pull", () => {
       [directEnvId("win")],
     );
     expect(row?.used_percent).toBe(40);
+  });
+
+  test("a quota failure is visible while successful token usage is kept", async () => {
+    const fx = mirrorFixture();
+    const apiFor = directApiFor({
+      "http://win:8787": { seenSince: [], page: { sinceMs: null, generatedAt: "x", events: [ingestRow()] } },
+    });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+    const statuses = await pullDirectFromMachines(fx.db, { apiFor });
+    expect(statuses[0]).toMatchObject({ state: "live", pulledEvents: 1, pulledQuotas: 0, quotaError: "no quotas configured", initialSyncComplete: true });
+    expect((await queryEnvironments(fx.db))[0]?.directInitialSyncComplete).toBe(true);
+  });
+
+  test("unexpected registry/database failures reject instead of masquerading as zero machines", async () => {
+    const fx = mirrorFixture();
+    fx.native.close();
+    await expect(pullDirectFromMachines(fx.db)).rejects.toThrow();
   });
 
   test("quotas upsert per-environment and never clobber other machines", async () => {
