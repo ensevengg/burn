@@ -18,6 +18,12 @@ cursor contract v2. The phone uses a new v2 watermark key, forcing one safe
 replay after migration 0008. It rejects v1 responses rather than advancing a
 cursor with incomplete multi-machine semantics.
 
+PostgreSQL sequences allocate values before commit, so the migration also
+serializes `usage_events` insert/update statements behind one transaction-level
+advisory lock. Without that lock, a later sequence value could commit first and
+move the phone watermark past an earlier value that was still in flight. The
+lock is held only for an ingest transaction and does not serialize phone reads.
+
 Direct mode is unchanged: it has one time cursor per machine and merges stable
 event ids locally. All app range queries aggregate every environment in the
 mirror; `All` is truly unbounded rather than an arbitrary 100-year window.

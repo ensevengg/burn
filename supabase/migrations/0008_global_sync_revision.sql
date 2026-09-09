@@ -1,7 +1,10 @@
 -- burn · 0008_global_sync_revision.sql
 -- Environment-local revisions overlap (every machine starts at 1), so they
 -- cannot be used as one phone-wide watermark. Stamp each inserted/corrected
--- row with a database-global sequence and page on that instead.
+-- row with a database-global sequence and page on that instead. Writers take
+-- one transaction-scoped lock before allocating sequence values: nextval()
+-- alone is allocation-ordered, not commit-ordered, and could otherwise let a
+-- phone advance past a concurrent transaction that commits later.
 
 create sequence if not exists burn.usage_event_sync_revision_seq;
 
@@ -14,6 +17,22 @@ alter table burn.usage_events alter column sync_revision set not null;
 alter sequence burn.usage_event_sync_revision_seq owned by burn.usage_events.sync_revision;
 create unique index if not exists usage_events_sync_rev_idx on burn.usage_events (sync_revision);
 
+create or replace function burn_api._serialize_usage_event_sync_revision()
+returns trigger language plpgsql volatile set search_path = '' as $$
+begin
+  perform pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('burn.usage_events.sync_revision', 0)
+  );
+  return null;
+end;
+$$;
+revoke all on function burn_api._serialize_usage_event_sync_revision() from public, anon, authenticated;
+
+drop trigger if exists usage_events_sync_revision_serialize on burn.usage_events;
+create trigger usage_events_sync_revision_serialize
+before insert or update on burn.usage_events
+for each statement execute function burn_api._serialize_usage_event_sync_revision();
+
 create or replace function burn_api._stamp_usage_event_sync_revision()
 returns trigger language plpgsql volatile set search_path = '' as $$
 begin
@@ -21,6 +40,7 @@ begin
   return new;
 end;
 $$;
+revoke all on function burn_api._stamp_usage_event_sync_revision() from public, anon, authenticated;
 
 drop trigger if exists usage_events_sync_revision_update on burn.usage_events;
 create trigger usage_events_sync_revision_update
