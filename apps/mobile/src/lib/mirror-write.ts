@@ -1,4 +1,10 @@
-import { liveEventId, type IngestEventInput } from "@burn/sync-api";
+import {
+  liveEventId,
+  machineMetricId,
+  type IngestEventInput,
+  type IngestMachineMetricInput,
+  type MachineMetric,
+} from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
 
 /**
@@ -6,6 +12,43 @@ import type { SQLiteDatabase } from "expo-sqlite";
  * 400 rows × 28 columns = 11,200 bindings, below Expo SQLite's 32,766 limit.
  */
 export const EVENT_WRITE_BATCH_SIZE = 400;
+
+export async function upsertMachineMetrics(
+  db: SQLiteDatabase,
+  environmentId: string,
+  metrics: (IngestMachineMetricInput | MachineMetric)[],
+): Promise<number> {
+  let changed = 0;
+  for (const metric of metrics) {
+    const cloud = "id" in metric;
+    const result = await db.runAsync(
+      `insert into machine_metrics
+         (id, environment_id, captured_at_ms, cpu_load_pct, cpu_temp_c, ram_used_pct,
+          ram_temp_c, gpu_util_pct, gpu_temp_c, revision)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       on conflict (id) do update set
+         cpu_load_pct = excluded.cpu_load_pct, cpu_temp_c = excluded.cpu_temp_c,
+         ram_used_pct = excluded.ram_used_pct, ram_temp_c = excluded.ram_temp_c,
+         gpu_util_pct = excluded.gpu_util_pct, gpu_temp_c = excluded.gpu_temp_c,
+         revision = excluded.revision
+       where machine_metrics.revision = 0 or excluded.revision > machine_metrics.revision`,
+      [
+        cloud ? metric.id : machineMetricId(environmentId, metric.capturedAtMs),
+        environmentId,
+        metric.capturedAtMs,
+        metric.cpuLoadPct,
+        metric.cpuTempC,
+        metric.ramUsedPct,
+        metric.ramTempC,
+        metric.gpuUtilPct,
+        metric.gpuTempC,
+        cloud ? metric.revision : 0,
+      ],
+    );
+    changed += result.changes;
+  }
+  return changed;
+}
 
 /**
  * Merge machine-served rows into the phone mirror without letting a

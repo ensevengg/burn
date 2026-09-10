@@ -15,13 +15,14 @@ import {
   LIVE_OVERLAP_MS,
   httpLiveApiFor,
   parseLiveEventsPage,
+  parseLiveMetricsPage,
   parseLiveQuotasPage,
   quotaMirrorRowKey,
   LiveError,
   type LiveApi,
 } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
-import { upsertProvisionalEvents } from "./mirror-write";
+import { upsertMachineMetrics, upsertProvisionalEvents } from "./mirror-write";
 import { invalidateEventCache } from "../data/repository";
 import { withWriteLock } from "./writelock";
 import { cloudGeneration, publishMirrorChange } from "./sync-state";
@@ -170,6 +171,32 @@ async function pullDirectQuotas(
   return page.quotas.length;
 }
 
+async function pullDirectMetrics(
+  db: SQLiteDatabase,
+  machine: DirectMachine,
+  api: LiveApi,
+  signal: AbortSignal,
+  assertActive: () => void,
+): Promise<number> {
+  if (api.metrics === undefined) return 0;
+  const timeout = withTimeout(signal, 15_000);
+  let page;
+  try {
+    page = parseLiveMetricsPage(await api.metrics(Date.now() - 24 * 60 * 60_000, timeout.signal));
+  } finally {
+    timeout.cancel();
+  }
+  if (page.metrics.length === 0) return 0;
+  await withWriteLock(async () => {
+    assertActive();
+    await db.withTransactionAsync(async () => {
+      await upsertMachineMetrics(db, machine.id, page.metrics);
+    });
+  });
+  publishMirrorChange(db, "systems");
+  return page.metrics.length;
+}
+
 export async function listDirectMachines(db: SQLiteDatabase): Promise<DirectMachine[]> {
   const rows = await db.getAllAsync<{
     id: string;
@@ -282,6 +309,7 @@ export async function removeDirectMachine(db: SQLiteDatabase, environmentId: str
       await db.runAsync("delete from direct_machines where id = ?", [environmentId]);
       await db.runAsync("delete from usage_events where environment_id = ?", [environmentId]);
       await db.runAsync("delete from quota_snapshots where environment_id = ?", [environmentId]);
+      await db.runAsync("delete from machine_metrics where environment_id = ?", [environmentId]);
       await db.runAsync("delete from environments where id = ?", [environmentId]);
       await db.runAsync("delete from kv where key = ?", [cursorKey(environmentId)]);
       await db.runAsync("delete from kv where key = ?", [legacyCursorKey(environmentId)]);
@@ -377,6 +405,9 @@ async function pullDirectUnlocked(
           };
         }
         const clockSkewMs = Math.abs(ping.serverNowMs - now());
+        const metricPromise = ping.osKind !== "wsl" && api.metrics !== undefined
+          ? pullDirectMetrics(db, machine, api, probeSignal, assertActive).catch(() => 0)
+          : Promise.resolve(0);
 
         // Per-machine time cursor; the machine applies its own overlap. Direct
         // mode explicitly sends epoch zero on the first pull: null omits the
@@ -448,6 +479,7 @@ async function pullDirectUnlocked(
         if (changedEvents > 0) publishMirrorChange(db, "events");
 
         const quotaResult = await quotaPromise;
+        await metricPromise;
         assertActive();
 
         return {

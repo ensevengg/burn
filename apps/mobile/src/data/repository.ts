@@ -49,6 +49,21 @@ export interface EnvironmentRow {
   directInitialSyncComplete: boolean | null;
 }
 
+export interface MachineMetricRow {
+  id: string;
+  capturedAtMs: number;
+  cpuLoadPct: number;
+  cpuTempC: number | null;
+  ramUsedPct: number;
+  ramTempC: number | null;
+  gpuUtilPct: number | null;
+  gpuTempC: number | null;
+}
+
+export interface SystemRow extends EnvironmentRow {
+  metrics: MachineMetricRow[];
+}
+
 export interface Totals {
   inputTokens: number;
   outputTokens: number;
@@ -395,6 +410,7 @@ export function removeEnvironmentLocal(db: SQLiteDatabase, environmentId: string
     await db.withTransactionAsync(async () => {
       await db.runAsync("delete from usage_events where environment_id = ?", [environmentId]);
       await db.runAsync("delete from quota_snapshots where environment_id = ?", [environmentId]);
+      await db.runAsync("delete from machine_metrics where environment_id = ?", [environmentId]);
       await db.runAsync("delete from environments where id = ?", [environmentId]);
     });
     // Post-commit eviction: a read racing the delete can cache pre-delete rows,
@@ -698,5 +714,37 @@ export async function queryEnvironments(db: SQLiteDatabase): Promise<Environment
     lastError: (r["last_error"] as string | null) ?? null,
     latestRevision: Number(r["latest_revision"] ?? 0),
     directInitialSyncComplete: r["direct_initial_sync_complete"] === null ? null : Number(r["direct_initial_sync_complete"]) === 1,
+  }));
+}
+
+/** Physical machine vitals only: WSL shares its Windows host's hardware. */
+export async function querySystems(db: SQLiteDatabase): Promise<SystemRow[]> {
+  const environments = (await queryEnvironments(db)).filter((environment) => environment.osKind !== "wsl");
+  const since = Date.now() - DAY_MS;
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    `select id, environment_id, captured_at_ms, cpu_load_pct, cpu_temp_c,
+            ram_used_pct, ram_temp_c, gpu_util_pct, gpu_temp_c
+       from machine_metrics where captured_at_ms >= ? order by captured_at_ms`,
+    [since],
+  );
+  const byEnvironment = new Map<string, MachineMetricRow[]>();
+  for (const row of rows) {
+    const environmentId = String(row["environment_id"]);
+    const metrics = byEnvironment.get(environmentId) ?? [];
+    metrics.push({
+      id: String(row["id"]),
+      capturedAtMs: Number(row["captured_at_ms"]),
+      cpuLoadPct: Number(row["cpu_load_pct"]),
+      cpuTempC: row["cpu_temp_c"] === null ? null : Number(row["cpu_temp_c"]),
+      ramUsedPct: Number(row["ram_used_pct"]),
+      ramTempC: row["ram_temp_c"] === null ? null : Number(row["ram_temp_c"]),
+      gpuUtilPct: row["gpu_util_pct"] === null ? null : Number(row["gpu_util_pct"]),
+      gpuTempC: row["gpu_temp_c"] === null ? null : Number(row["gpu_temp_c"]),
+    });
+    byEnvironment.set(environmentId, metrics);
+  }
+  return environments.map((environment) => ({
+    ...environment,
+    metrics: byEnvironment.get(environment.id) ?? [],
   }));
 }

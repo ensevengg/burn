@@ -3,7 +3,7 @@
  * SQLite transaction per page, watermark advanced only after commit. Demo
  * mode: the bundled generator writes the same mirror schema locally.
  */
-import { quotaMirrorRowKey } from "@burn/sync-api";
+import { machineMetricId, quotaMirrorRowKey } from "@burn/sync-api";
 import { pullCloud, type SyncResult } from "./sync-cloud";
 import { cloudGeneration, advanceCloudGeneration, publishMirrorChange } from "./sync-state";
 import { invalidateEventCache } from "../data/repository";
@@ -97,6 +97,27 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
           quota.status,
           quota.error,
           new Date(dataset.now - quota.ageMinutes * 60_000).toISOString(),
+        ],
+      );
+    }
+
+    for (const metric of dataset.metrics) {
+      const environmentId = envId[metric.environmentSlug] ?? metric.environmentSlug;
+      await db.runAsync(
+        `insert or replace into machine_metrics
+           (id, environment_id, captured_at_ms, cpu_load_pct, cpu_temp_c, ram_used_pct,
+            ram_temp_c, gpu_util_pct, gpu_temp_c, revision)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [
+          machineMetricId(environmentId, metric.capturedAtMs),
+          environmentId,
+          metric.capturedAtMs,
+          metric.cpuLoadPct,
+          metric.cpuTempC,
+          metric.ramUsedPct,
+          metric.ramTempC,
+          metric.gpuUtilPct,
+          metric.gpuTempC,
         ],
       );
     }

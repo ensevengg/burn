@@ -12,6 +12,7 @@ import {
   removeEnvironmentLocal,
   queryModels,
   queryWindowOverview,
+  querySystems,
 } from "../src/data/repository";
 import { generateDemoDataset } from "../src/data/demo-generator";
 import { mirrorFixture } from "./mirror-fixture";
@@ -37,6 +38,7 @@ const quota: QuotaSnapshot = {
 const phone = (overrides: Partial<MobileSyncApi> = {}): MobileSyncApi => ({
   fetchDelta: async () => ({ cursorVersion: 2, environments: [], events: [], maxRevision: 0, hasMore: false }),
   fetchQuotaLatest: async () => [quota],
+  fetchMachineMetrics: async () => [],
   requestSync: async () => ({ generation: 1 }),
   removeEnvironment: async () => ({ removedSlug: "windows" }),
   ...overrides,
@@ -67,6 +69,32 @@ test("a failed event download does not prevent the newer Windows quota from rend
     ).rejects.toThrow("events offline");
     expect(changes).toEqual(["quotas"]);
     expect((await queryQuotas(fixture.db))[0]?.usedPercent).toBe(50);
+  } finally {
+    fixture.native.close();
+  }
+});
+
+test("cloud machine metrics land in the local Systems mirror", async () => {
+  const fixture = mirrorFixture();
+  const capturedAtMs = Date.now();
+  try {
+    await fixture.db.runAsync(
+      `insert into environments (id, slug, display_name, os_kind) values (?, ?, ?, ?)`,
+      ["windows", "windows", "Windows", "windows"],
+    );
+    await fixture.db.runAsync(
+      `insert into environments (id, slug, display_name, os_kind) values (?, ?, ?, ?)`,
+      ["wsl", "wsl", "WSL", "wsl"],
+    );
+    const baseMetric = { capturedAtMs, cpuLoadPct: 10, cpuTempC: null, ramUsedPct: 64,
+      ramTempC: 43, gpuUtilPct: 72, gpuTempC: 68, revision: 1 };
+    await pullCloud(fixture.db, phone({ fetchMachineMetrics: async () => [
+      { ...baseMetric, id: "metric-1", environmentId: "windows" },
+      { ...baseMetric, id: "metric-wsl", environmentId: "wsl" },
+    ] }));
+    const systems = await querySystems(fixture.db);
+    expect(systems).toHaveLength(1);
+    expect(systems[0]?.metrics[0]).toMatchObject({ ramUsedPct: 64, ramTempC: 43 });
   } finally {
     fixture.native.close();
   }

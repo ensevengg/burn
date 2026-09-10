@@ -24,11 +24,12 @@
 import {
   httpLiveApiFor,
   parseLiveEventsPage,
+  parseLiveMetricsPage,
   LiveError,
   type LiveApi,
 } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
-import { upsertProvisionalEvents } from "./mirror-write";
+import { upsertMachineMetrics, upsertProvisionalEvents } from "./mirror-write";
 import { invalidateEventCache } from "../data/repository";
 import { withWriteLock } from "./writelock";
 import { cloudGeneration, publishMirrorChange } from "./sync-state";
@@ -207,6 +208,21 @@ async function pullLiveUnlocked(
         }
         const clockSkewMs = Math.abs(ping.serverNowMs - Date.now());
 
+        const metricsPromise = ping.osKind !== "wsl" && api.metrics !== undefined
+          ? (async () => {
+              const metricsPage = parseLiveMetricsPage(
+                await api.metrics!(Date.now() - 24 * 60 * 60_000, probeSignal),
+              );
+              await withWriteLock(async () => {
+                assertActive();
+                await db.withTransactionAsync(async () => {
+                  await upsertMachineMetrics(db, target.environmentId, metricsPage.metrics);
+                });
+              });
+              if (metricsPage.metrics.length > 0) publishMirrorChange(db, "systems");
+            })().catch(() => {})
+          : Promise.resolve();
+
         // 2. Fetch + validate the tail. Machine-side scans take seconds on
         // real histories — generous timeout, still abortable.
         const eventsTimeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 60_000);
@@ -236,6 +252,7 @@ async function pullLiveUnlocked(
           if (changedEvents > 0) invalidateEventCache(db);
         });
         if (changedEvents > 0) publishMirrorChange(db, "events");
+        await metricsPromise;
 
         return {
           ...base,

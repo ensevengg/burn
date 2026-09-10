@@ -9,6 +9,7 @@ import {
   queryModels,
   queryQuotas,
   querySessions,
+  querySystems,
   queryWindowOverview,
   queryWorkspaces,
 } from "./repository";
@@ -122,4 +123,8 @@ export function useQuotasQuery() {
 
 export function useMachinesQuery() {
   return useDbQuery(["machines"], (db) => queryEnvironments(db), { heartbeatMs: 60_000 });
+}
+
+export function useSystemsQuery() {
+  return useDbQuery(["systems"], (db) => querySystems(db), { heartbeatMs: 60_000 });
 }

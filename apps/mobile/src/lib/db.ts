@@ -100,6 +100,20 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           cache_read_cost_per_m real not null,
           output_cost_per_m real
         );
+        create table if not exists machine_metrics (
+          id text primary key,
+          environment_id text not null,
+          captured_at_ms integer not null,
+          cpu_load_pct real not null,
+          cpu_temp_c real,
+          ram_used_pct real not null,
+          ram_temp_c real,
+          gpu_util_pct real,
+          gpu_temp_c real,
+          revision integer not null default 0
+        );
+        create index if not exists machine_metrics_env_time_idx
+          on machine_metrics (environment_id, captured_at_ms);
       `);
       // C1 parity: installs created before export_schema existed get the column
       // added here; fresh installs already have it from the create block.
@@ -111,6 +125,11 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
       // Same parity for the live-pull advertisement (D1 v2, ADR 0001).
       try {
         await db.execAsync("alter table environments add column live_endpoint text");
+      } catch {
+        /* column already exists */
+      }
+      try {
+        await db.execAsync("alter table machine_metrics add column ram_temp_c real");
       } catch {
         /* column already exists */
       }
@@ -152,6 +171,7 @@ export async function wipeForReseed(db: SQLite.SQLiteDatabase): Promise<void> {
     await db.runAsync("delete from usage_events");
     await db.runAsync("delete from environments");
     await db.runAsync("delete from quota_snapshots");
+    await db.runAsync("delete from machine_metrics");
     await db.runAsync(
       "delete from kv where key not in ('reporting_timezone', 'theme_mode')",
     );

@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { LIVE_OVERLAP_MS, liveEventId, LiveUnreachableError, type IngestEventInput, type LiveApi, type LiveEventsPage, type LivePing } from "@burn/sync-api";
+import { LIVE_OVERLAP_MS, liveEventId, LiveUnreachableError, type IngestEventInput, type LiveApi, type LiveEventsPage, type LiveMetricsPage, type LivePing } from "@burn/sync-api";
 import { mirrorFixture } from "./mirror-fixture";
 import { subscribeMirrorChanges } from "../src/lib/sync-state";
-import { queryEnvironments } from "../src/data/repository";
+import { queryEnvironments, querySystems } from "../src/data/repository";
 import {
   addDirectMachine,
   directEnvId,
@@ -67,6 +67,7 @@ interface FakeEntry {
   page?: LiveEventsPage;
   failEvents?: Error;
   quotas?: { generatedAt: string; quotas: Record<string, unknown>[] };
+  metrics?: LiveMetricsPage;
   seenSince: (number | null)[];
   seenGenerations?: (string | null)[];
   seenPingSignal: AbortSignal | null;
@@ -94,6 +95,10 @@ function directApiFor(map: Record<string, FakeEntry>): NonNullable<DirectPullOpt
         if (signal?.aborted) throw new LiveUnreachableError("aborted");
         if (!entry.quotas) throw new Error("no quotas configured");
         return entry.quotas as never;
+      },
+      metrics: async (_sinceMs, signal) => {
+        if (signal?.aborted) throw new LiveUnreachableError("aborted");
+        return entry.metrics ?? { generatedAt: "2026-09-07T10:00:00.000Z", metrics: [] };
       },
     } satisfies LiveApi;
   };
@@ -166,6 +171,26 @@ describe("direct mode registry", () => {
 });
 
 describe("direct pull", () => {
+  test("merges live machine vitals for the Systems screen", async () => {
+    const fx = mirrorFixture();
+    const entry: FakeEntry = {
+      seenSince: [],
+      seenPingSignal: null,
+      page: { sinceMs: 0, generatedAt: "2026-09-10T10:00:00.000Z", events: [] },
+      metrics: { generatedAt: "2026-09-10T10:00:00.000Z", metrics: [{
+        capturedAtMs: Date.now(), cpuLoadPct: 10, cpuTempC: null,
+        ramUsedPct: 62, ramTempC: 44, gpuUtilPct: 71, gpuTempC: 68,
+      }] },
+    };
+    const apiFor = directApiFor({ "http://win:8787": entry });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+    await pullDirectFromMachines(fx.db, { apiFor });
+    const systems = await querySystems(fx.db);
+    expect(systems).toHaveLength(1);
+    expect(systems[0]?.metrics[0]).toMatchObject({ ramUsedPct: 62, ramTempC: 44, gpuUtilPct: 71 });
+    fx.native.close();
+  });
+
   test("first pull takes full history, commits revision 0, and sets the cursor", async () => {
     const fx = mirrorFixture();
     const seen: FakeEntry = { seenSince: [], seenPingSignal: null, page: { sinceMs: null, generatedAt: "2026-09-07T10:00:00.000Z", events: [ingestRow()] } };

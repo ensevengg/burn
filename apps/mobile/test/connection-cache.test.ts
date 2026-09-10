@@ -5,6 +5,7 @@ import { createConnectionCache } from "../src/lib/connection-cache";
 const phone: MobileSyncApi = {
   fetchDelta: async () => ({ cursorVersion: 2, environments: [], events: [], maxRevision: 0, hasMore: false }),
   fetchQuotaLatest: async () => [],
+  fetchMachineMetrics: async () => [],
   requestSync: async () => ({ generation: 1 }),
   removeEnvironment: async () => ({ removedSlug: "windows" }),
 };
