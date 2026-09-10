@@ -39,6 +39,7 @@ describe("config", () => {
     const loaded = loadConfig();
     expect(loaded.environmentSlug).toBe("cachyos");
     expect(loaded.intervalMinutes).toBe(10);
+    expect(loaded.syncPollSeconds).toBe(30);
   });
 
   test("rejects a bad slug", () => {
@@ -66,7 +67,7 @@ describe("tokens", () => {
 
 describe("setup sql", () => {
   test("embeds token hashes and escapes quotes", () => {
-    const config = { ...baseConfig, environmentName: "Cachy's Box" };
+    const config = configSchema.parse({ ...baseConfig, environmentName: "Cachy's Box" });
     const sql = renderSetupSql({ config, ingestToken: "ing-1234567890123456", readToken: "read-1234567890123456" });
     expect(sql).toContain(sha256Hex("ing-1234567890123456"));
     expect(sql).toContain(sha256Hex("read-1234567890123456"));

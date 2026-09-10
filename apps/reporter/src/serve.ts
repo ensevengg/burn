@@ -13,15 +13,27 @@
  * copy wins the upsert once the real push lands — the two paths converge by
  * construction instead of by reconciliation.
  */
-import { EVENT_EXPORT_SCHEMA, type IngestQuotaInput } from "@burn/sync-api";
+import {
+  EVENT_EXPORT_SCHEMA,
+  type IngestEventInput,
+  type IngestQuotaInput,
+} from "@burn/sync-api";
 import { loadConfig, loadCursor, type BurnConfig, type ReporterCursor } from "./config.js";
 import {
   exportRowsToIngestInputs,
   parseEventsJsonl,
   pushSinceMs,
 } from "./events.js";
-import { assertExporterMatchesPin, exporterVersion, fetchEventsJsonl } from "./exporter.js";
+import {
+  assertExporterCapabilities,
+  assertExporterMatchesPin,
+  exporterCapabilities,
+  exporterFingerprint,
+  exporterVersion,
+  fetchEventsJsonl,
+} from "./exporter.js";
 import { fetchUsage, spawnRunner, TokscaleError, tokscaleQuotaInputs, REPORTER_VERSION } from "./tokscale.js";
+import { SystemMetricHistory } from "./system-metrics.js";
 
 export interface LiveDeps {
   config: BurnConfig;
@@ -29,7 +41,9 @@ export interface LiveDeps {
   cursor?: () => ReporterCursor;
   exporterScan?: (sinceMs: number) => Promise<string>;
   exporterCheck?: () => Promise<string | null>;
+  exporterFingerprint?: () => Promise<string | null>;
   usage?: (pin: string) => Promise<unknown>;
+  metricHistory?: SystemMetricHistory;
 }
 
 export interface LiveServerHandle {
@@ -50,8 +64,20 @@ export async function tailscaleIp(timeoutMs = 5_000): Promise<string | null> {
   }
 }
 
-function jsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
+function jsonResponse(payload: unknown, status = 200, request?: Request): Response {
+  const json = JSON.stringify(payload);
+  const acceptsGzip = request?.headers.get("accept-encoding")?.includes("gzip") === true;
+  if (acceptsGzip && json.length >= 1_024) {
+    return new Response(Bun.gzipSync(new TextEncoder().encode(json)), {
+      status,
+      headers: {
+        "content-type": "application/json",
+        "content-encoding": "gzip",
+        vary: "accept-encoding",
+      },
+    });
+  }
+  return new Response(json, {
     status,
     headers: { "content-type": "application/json" },
   });
@@ -68,11 +94,21 @@ function errorText(err: unknown): string {
  * is a 404/405.
  */
 export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Response> {
-  // One exporter scan at a time: it spawns the pinned binary and can take
-  // seconds on real histories; overlapping scans would thrash the machine
-  // for no information (the second caller gets a 503 and retries).
-  let scanInFlight = false;
   const now = deps.now ?? Date.now;
+  type EventPage = {
+    sinceMs: number;
+    generatedAt: string;
+    generation: string | null;
+    events: IngestEventInput[];
+  };
+  type EventSnapshot = Omit<EventPage, "sinceMs" | "generation"> & { fingerprint: string };
+  let activeScan: { sinceMs: number; promise: Promise<EventPage | null> } | null = null;
+  let activeSnapshot: Promise<EventSnapshot | null> | null = null;
+  let eventSnapshot: EventSnapshot | null = null;
+  let fingerprintInFlight: Promise<string | null> | null = null;
+  let quotaCache: { expiresAt: number; page: { generatedAt: string; quotas: IngestQuotaInput[] } } | null = null;
+  let quotaInFlight: Promise<{ generatedAt: string; quotas: IngestQuotaInput[] }> | null = null;
+  const metricHistory = deps.metricHistory ?? new SystemMetricHistory();
 
   const pingPayload = () => {
     const cursor = (deps.cursor ?? loadCursor)();
@@ -91,6 +127,125 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
     };
   };
 
+  const scanUncached = async (sinceMs: number): Promise<EventPage | null> => {
+    if (activeScan !== null) {
+      if (activeScan.sinceMs === sinceMs) return activeScan.promise;
+      // A cloud-tail request and a direct request can use different cursors.
+      // Serialize those scans instead of making one caller fail with a 503.
+      await activeScan.promise.catch(() => null);
+      return scanUncached(sinceMs);
+    }
+    const promise = (async (): Promise<EventPage | null> => {
+      const exporter = await (deps.exporterCheck ?? exporterVersion)();
+      if (exporter === null) return null;
+      assertExporterMatchesPin(exporter, deps.config.tokscalePin);
+      const rows = parseEventsJsonl(await (deps.exporterScan ?? fetchEventsJsonl)(sinceMs));
+      return {
+        sinceMs,
+        generatedAt: new Date(now()).toISOString(),
+        generation: null,
+        events: exportRowsToIngestInputs(rows, deps.config.tokscalePin),
+      };
+    })();
+    activeScan = { sinceMs, promise };
+    void promise
+      .finally(() => {
+        if (activeScan?.promise === promise) activeScan = null;
+      })
+      .catch(() => {});
+    return promise;
+  };
+
+  const readFingerprint = (): Promise<string | null> => {
+    if (fingerprintInFlight !== null) return fingerprintInFlight;
+    const pending = (deps.exporterFingerprint ?? exporterFingerprint)();
+    fingerprintInFlight = pending;
+    void pending
+      .finally(() => {
+        if (fingerprintInFlight === pending) fingerprintInFlight = null;
+      })
+      .catch(() => {});
+    return pending;
+  };
+
+  const pageFromSnapshot = (snapshot: EventSnapshot, sinceMs: number): EventPage => ({
+    sinceMs,
+    generatedAt: snapshot.generatedAt,
+    generation: snapshot.fingerprint,
+    events: snapshot.events.filter((event) => event.occurredAtMs >= sinceMs),
+  });
+
+  const scanEvents = async (
+    sinceMs: number,
+    knownGeneration: string | null,
+  ): Promise<EventPage | null> => {
+    // A generation match skips parsing, never contract validation. This stays
+    // cheap because exporterVersion() caches a successful process probe.
+    const exporter = await (deps.exporterCheck ?? exporterVersion)();
+    if (exporter === null) return null;
+    assertExporterMatchesPin(exporter, deps.config.tokscalePin);
+    const fingerprint = await readFingerprint();
+    // Missing/old development exporters remain correct, just uncached.
+    if (fingerprint === null) return scanUncached(sinceMs);
+    if (knownGeneration === fingerprint) {
+      return {
+        sinceMs,
+        generatedAt: eventSnapshot?.generatedAt ?? new Date(now()).toISOString(),
+        generation: fingerprint,
+        events: [],
+      };
+    }
+    if (eventSnapshot?.fingerprint === fingerprint) {
+      return pageFromSnapshot(eventSnapshot, sinceMs);
+    }
+    if (activeSnapshot !== null) {
+      const snapshot = await activeSnapshot;
+      if (snapshot?.fingerprint === fingerprint) return pageFromSnapshot(snapshot, sinceMs);
+      return scanEvents(sinceMs, knownGeneration);
+    }
+
+    const pending = (async (): Promise<EventSnapshot | null> => {
+      const page = await scanUncached(0);
+      if (page === null) return null;
+      const snapshot = {
+        fingerprint,
+        generatedAt: page.generatedAt,
+        events: page.events,
+      };
+      eventSnapshot = snapshot;
+      return snapshot;
+    })();
+    activeSnapshot = pending;
+    void pending
+      .finally(() => {
+        if (activeSnapshot === pending) activeSnapshot = null;
+      })
+      .catch(() => {});
+    const snapshot = await pending;
+    return snapshot === null ? null : pageFromSnapshot(snapshot, sinceMs);
+  };
+
+  const loadQuotas = (): Promise<{ generatedAt: string; quotas: IngestQuotaInput[] }> => {
+    if (quotaCache !== null && quotaCache.expiresAt > now()) return Promise.resolve(quotaCache.page);
+    if (quotaInFlight !== null) return quotaInFlight;
+    const pending = (async () => {
+      const outputs = await (deps.usage ?? fetchUsage)(deps.config.tokscalePin);
+      const page = {
+        generatedAt: new Date(now()).toISOString(),
+        quotas: tokscaleQuotaInputs(outputs as Awaited<ReturnType<typeof fetchUsage>>),
+      };
+      quotaCache = { expiresAt: now() + 5 * 60_000, page };
+      return page;
+    })();
+    quotaInFlight = pending;
+    void pending
+      .finally(() => {
+        if (quotaInFlight === pending) quotaInFlight = null;
+      })
+      .catch(() => {});
+    return pending;
+  };
+
   return async (req: Request): Promise<Response> => {
     const path = new URL(req.url).pathname;
     if (req.method !== "GET") return jsonResponse({ error: "GET only" }, 405);
@@ -98,14 +253,7 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
       case "/ping":
         return jsonResponse(pingPayload());
       case "/live/events": {
-        if (scanInFlight) return jsonResponse({ error: "an events scan is already running" }, 503);
-        scanInFlight = true;
         try {
-          const exporter = await (deps.exporterCheck ?? exporterVersion)();
-          if (exporter === null) {
-            return jsonResponse({ error: "burn-events exporter not found on this machine" }, 503);
-          }
-          assertExporterMatchesPin(exporter, deps.config.tokscalePin);
           // Direct mode (ADR 0002) passes the phone's per-machine cursor;
           // without it, serve the machine's own push cursor minus overlap —
           // exactly the next push's window.
@@ -116,25 +264,34 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
             requested !== null && Number.isFinite(requested) && requested >= 0
               ? Math.floor(requested)
               : pushSinceMs(cursor.lastPushAt, false);
-          const rows = parseEventsJsonl(await (deps.exporterScan ?? fetchEventsJsonl)(sinceMs));
           // The exact transform the push path applies: dedup fallback derived,
           // cost → decimal string, timezone shim, parser version pinned. The
           // phone receives the same rows its Supabase twin will have.
-          const events = exportRowsToIngestInputs(rows, deps.config.tokscalePin);
-          return jsonResponse({ sinceMs, generatedAt: new Date(now()).toISOString(), events });
+          const knownGeneration = new URL(req.url).searchParams.get("generation");
+          const page = await scanEvents(sinceMs, knownGeneration);
+          if (page === null) {
+            return jsonResponse({ error: "burn-events exporter not found on this machine" }, 503);
+          }
+          return jsonResponse(page, 200, req);
         } catch (err) {
           return jsonResponse({ error: errorText(err) }, 500);
-        } finally {
-          scanInFlight = false;
         }
       }
       case "/live/quotas": {
         try {
-          const outputs = await (deps.usage ?? fetchUsage)(deps.config.tokscalePin);
-          const quotas: IngestQuotaInput[] = tokscaleQuotaInputs(
-            outputs as Awaited<ReturnType<typeof fetchUsage>>,
-          );
-          return jsonResponse({ generatedAt: new Date(now()).toISOString(), quotas });
+          return jsonResponse(await loadQuotas());
+        } catch (err) {
+          return jsonResponse({ error: errorText(err) }, 500);
+        }
+      }
+      case "/live/metrics": {
+        try {
+          const requested = Number(new URL(req.url).searchParams.get("since") ?? 0);
+          const sinceMs = Number.isFinite(requested) && requested >= 0 ? Math.floor(requested) : 0;
+          return jsonResponse({
+            generatedAt: new Date(now()).toISOString(),
+            metrics: deps.config.osKind === "wsl" ? [] : await metricHistory.since(sinceMs),
+          });
         } catch (err) {
           return jsonResponse({ error: errorText(err) }, 500);
         }
@@ -177,6 +334,7 @@ export async function startLiveServer(
  */
 export async function runServe(args: Map<string, string>): Promise<void> {
   const config = loadConfig();
+  assertExporterCapabilities(await exporterCapabilities(), config.tokscalePin);
   const options: { bind?: string; port?: number } = {};
   const bindArg = args.get("bind");
   if (bindArg) options.bind = bindArg;

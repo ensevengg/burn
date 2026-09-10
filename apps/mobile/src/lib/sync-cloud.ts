@@ -1,15 +1,18 @@
-import type { MobileSyncApi } from "@burn/sync-api";
+import { quotaMirrorRowKey, type MobileSyncApi } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
+import { EVENT_WRITE_BATCH_SIZE, upsertMachineMetrics } from "./mirror-write";
 import { withWriteLock } from "./writelock";
 
-export type MirrorChange = "events" | "machines" | "quotas";
+export type MirrorChange = "events" | "machines" | "quotas" | "systems";
 export interface SyncResult {
   pulledEvents: number;
   pages: number;
   watermark: number;
   hasMore: boolean;
 }
-const WATERMARK_KEY = "watermark_revision";
+// v2 is intentionally a new key: replay all rows after migration 0008 rather
+// than treating the old, environment-local watermark as globally meaningful.
+const WATERMARK_KEY = "watermark_sync_revision_v2";
 const MAX_PAGES = 8;
 async function kvGet(db: SQLiteDatabase, key: string): Promise<string | null> {
   return (
@@ -39,6 +42,9 @@ export async function pullCloud(
     for (let page = 0; page < MAX_PAGES; page++) {
       assertActive();
       const delta = await phone.fetchDelta(watermark);
+      if (delta.cursorVersion !== 2) {
+        throw new Error("Cloud backend is missing migration 0008_global_sync_revision.sql; event sync was stopped safely.");
+      }
       hasMore = delta.hasMore;
       await withWriteLock(async () => {
         assertActive();
@@ -76,12 +82,11 @@ export async function pullCloud(
               ],
             );
           }
-          // 32 rows × 28 bindings = 896 parameters, deliberately under the
-          // classic 999 SQLITE_MAX_VARIABLE_NUMBER cap of older system SQLite
-          // builds (expo-sqlite's bundled build allows far more). If a column
-          // is added, recheck the product or shrink the chunk.
-          for (let i = 0; i < delta.events.length; i += 32) {
-            const chunk = delta.events.slice(i, i + 32);
+          // Expo ships SQLite with a 32,766-variable limit; the shared batch
+          // is 400 rows × 28 bindings = 11,200. If a column is added, recheck
+          // the product in mirror-write.ts or shrink the batch.
+          for (let i = 0; i < delta.events.length; i += EVENT_WRITE_BATCH_SIZE) {
+            const chunk = delta.events.slice(i, i + EVENT_WRITE_BATCH_SIZE);
             await db.runAsync(
               `insert or replace into usage_events
              (event_id, environment_id, client, provider_id, model_id, session_id, session_title,
@@ -150,7 +155,7 @@ export async function pullCloud(
               used_percent, remaining_percent, remaining_label, resets_at, status, error, fetched_at)
            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-              `${q.environmentId ?? "no-env"}|${q.provider}|${q.accountKey}|${q.metric}`,
+              quotaMirrorRowKey(q.environmentId, q.provider, q.accountKey, q.metric),
               q.environmentId,
               q.provider,
               q.accountKey,
@@ -172,7 +177,24 @@ export async function pullCloud(
       onChange("quotas");
     });
   };
-  const results = await Promise.allSettled([pullEvents(), pullQuotas()]);
+  const pullMetrics = async (): Promise<void> => {
+    const metrics = await phone.fetchMachineMetrics(Date.now() - 24 * 60 * 60_000);
+    await withWriteLock(async () => {
+      assertActive();
+      await db.withTransactionAsync(async () => {
+        const grouped = new Map<string, typeof metrics>();
+        for (const metric of metrics) {
+          const rows = grouped.get(metric.environmentId) ?? [];
+          rows.push(metric);
+          grouped.set(metric.environmentId, rows);
+        }
+        for (const [environmentId, rows] of grouped) await upsertMachineMetrics(db, environmentId, rows);
+        await db.runAsync("delete from machine_metrics where captured_at_ms < ?", [Date.now() - 7 * 24 * 60 * 60_000]);
+      });
+    });
+    if (metrics.length > 0) onChange("systems");
+  };
+  const results = await Promise.allSettled([pullEvents(), pullQuotas(), pullMetrics()]);
   for (const result of results) if (result.status === "rejected") throw result.reason;
   const events = results[0];
   if (events.status !== "fulfilled") throw new Error("Event sync failed");

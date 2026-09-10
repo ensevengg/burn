@@ -3,13 +3,13 @@
  * SQLite transaction per page, watermark advanced only after commit. Demo
  * mode: the bundled generator writes the same mirror schema locally.
  */
+import { machineMetricId, quotaMirrorRowKey } from "@burn/sync-api";
 import { pullCloud, type SyncResult } from "./sync-cloud";
 import { cloudGeneration, advanceCloudGeneration, publishMirrorChange } from "./sync-state";
 import { invalidateEventCache } from "../data/repository";
-import { createBurnBackend } from "@burn/sync-api";
 import { kvSet, wipeForReseed, type SQLiteDatabase } from "./db";
 import { withWriteLock } from "./writelock";
-import { loadConnection } from "./settings";
+import { loadConnectedPhone } from "./connection";
 import { generateDemoDataset, MODELS } from "../data/demo-generator";
 
 /** Demo data is generator-controlled, so literal interpolation is safe here. */
@@ -71,7 +71,12 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
     }
 
     for (const quota of dataset.quotas) {
-      const rowKey = `${quota.environmentSlug}|${quota.provider}|${quota.accountKey}|${quota.metric}`;
+      const rowKey = quotaMirrorRowKey(
+        quota.environmentSlug,
+        quota.provider,
+        quota.accountKey,
+        quota.metric,
+      );
       await db.runAsync(
         `insert or replace into quota_snapshots
            (row_key, environment_id, provider, account_key, account_label, plan, metric,
@@ -92,6 +97,27 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
           quota.status,
           quota.error,
           new Date(dataset.now - quota.ageMinutes * 60_000).toISOString(),
+        ],
+      );
+    }
+
+    for (const metric of dataset.metrics) {
+      const environmentId = envId[metric.environmentSlug] ?? metric.environmentSlug;
+      await db.runAsync(
+        `insert or replace into machine_metrics
+           (id, environment_id, captured_at_ms, cpu_load_pct, cpu_temp_c, ram_used_pct,
+            ram_temp_c, gpu_util_pct, gpu_temp_c, revision)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [
+          machineMetricId(environmentId, metric.capturedAtMs),
+          environmentId,
+          metric.capturedAtMs,
+          metric.cpuLoadPct,
+          metric.cpuTempC,
+          metric.ramUsedPct,
+          metric.ramTempC,
+          metric.gpuUtilPct,
+          metric.gpuTempC,
         ],
       );
     }
@@ -132,10 +158,10 @@ export function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
     if (cloudGeneration(db) !== generation) throw new Error("Sync cancelled");
   };
   const pending = (async () => {
-    const connection = await loadConnection();
+    const connected = await loadConnectedPhone();
     assertActive();
-    if (connection === null) throw new Error("Not connected to a backend");
-    return pullCloud(db, createBurnBackend(connection).phone(connection.readToken), assertActive, (kind) => {
+    if (connected === null) throw new Error("Not connected to a backend");
+    return pullCloud(db, connected.phone, assertActive, (kind) => {
       if (kind === "events") invalidateEventCache(db);
       publishMirrorChange(db, kind);
     });
@@ -158,9 +184,8 @@ export function cancelCloudSync(db: SQLiteDatabase): void {
 
 export async function requestMachineSync(db: SQLiteDatabase, environmentId: string | null): Promise<void> {
   const generation = cloudGeneration(db);
-  const connection = await loadConnection();
+  const connected = await loadConnectedPhone();
   if (cloudGeneration(db) !== generation) throw new Error("Sync cancelled");
-  if (connection === null) throw new Error("Not connected to a backend");
-  const phone = createBurnBackend(connection).phone(connection.readToken);
-  await phone.requestSync(environmentId ?? undefined);
+  if (connected === null) throw new Error("Not connected to a backend");
+  await connected.phone.requestSync(environmentId ?? undefined);
 }

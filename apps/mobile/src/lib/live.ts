@@ -23,12 +23,13 @@
  */
 import {
   httpLiveApiFor,
-  liveEventId,
   parseLiveEventsPage,
+  parseLiveMetricsPage,
   LiveError,
   type LiveApi,
 } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
+import { upsertMachineMetrics, upsertProvisionalEvents } from "./mirror-write";
 import { invalidateEventCache } from "../data/repository";
 import { withWriteLock } from "./writelock";
 import { cloudGeneration, publishMirrorChange } from "./sync-state";
@@ -115,16 +116,16 @@ export function describeFailure(err: unknown): { state: "offline" | "error"; err
 
 /**
  * Probe every advertising machine and merge its event tail. Concurrent calls
- * are safe: a new call aborts the previous probe's network work and starts
- * fresh (the dying probe never commits, and its discarded "offline" statuses
- * are not shown). Cancelling — reset/disconnect — aborts before any commit.
+ * share the active probe so foreground/refresh races cannot restart expensive
+ * exporter work. Cancelling the owning call — reset/disconnect — aborts before
+ * any commit.
  */
 export function pullLiveFromMachines(
   db: SQLiteDatabase,
   options: LivePullOptions = {},
 ): Promise<LivePullStatus[]> {
-  inFlightController.get(db)?.abort();
-  inFlight.delete(db);
+  const existing = inFlight.get(db);
+  if (existing !== undefined) return existing;
   const generation = cloudGeneration(db);
   const internal = new AbortController();
   inFlightController.set(db, internal);
@@ -207,6 +208,21 @@ async function pullLiveUnlocked(
         }
         const clockSkewMs = Math.abs(ping.serverNowMs - Date.now());
 
+        const metricsPromise = ping.osKind !== "wsl" && api.metrics !== undefined
+          ? (async () => {
+              const metricsPage = parseLiveMetricsPage(
+                await api.metrics!(Date.now() - 24 * 60 * 60_000, probeSignal),
+              );
+              await withWriteLock(async () => {
+                assertActive();
+                await db.withTransactionAsync(async () => {
+                  await upsertMachineMetrics(db, target.environmentId, metricsPage.metrics);
+                });
+              });
+              if (metricsPage.metrics.length > 0) publishMirrorChange(db, "systems");
+            })().catch(() => {})
+          : Promise.resolve();
+
         // 2. Fetch + validate the tail. Machine-side scans take seconds on
         // real histories — generous timeout, still abortable.
         const eventsTimeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 60_000);
@@ -220,76 +236,23 @@ async function pullLiveUnlocked(
 
         // 3. Merge. Ids follow the server's recipe; revision stays 0; the
         // WHERE clause makes server rows (revision >= 1) untouchable.
+        let changedEvents = 0;
         await withWriteLock(async () => {
           assertActive();
           await db.withTransactionAsync(async () => {
-            for (let i = 0; i < page.events.length; i += 32) {
-              const chunk = page.events.slice(i, i + 32);
-              await db.runAsync(
-                `insert into usage_events
-               (event_id, environment_id, client, provider_id, model_id, session_id, session_title,
-                workspace_key, workspace_label, agent, occurred_at_ms, source_offset_minutes, source_timezone,
-                source_local_date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                reasoning_tokens, message_count, is_turn_start, duration_ms, cost, cost_source,
-                cost_is_complete, model_attribution_conflicted, parser_version, revision)
-             values ${chunk.map(() => "(" + Array(28).fill("?").join(",") + ")").join(",")}
-             on conflict (event_id) do update set
-               client = excluded.client, provider_id = excluded.provider_id,
-               model_id = excluded.model_id, session_id = excluded.session_id,
-               session_title = excluded.session_title, workspace_key = excluded.workspace_key,
-               workspace_label = excluded.workspace_label, agent = excluded.agent,
-               occurred_at_ms = excluded.occurred_at_ms,
-               source_offset_minutes = excluded.source_offset_minutes,
-               source_timezone = excluded.source_timezone,
-               source_local_date = excluded.source_local_date,
-               input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens,
-               cache_read_tokens = excluded.cache_read_tokens,
-               cache_write_tokens = excluded.cache_write_tokens,
-               reasoning_tokens = excluded.reasoning_tokens,
-               message_count = excluded.message_count, is_turn_start = excluded.is_turn_start,
-               duration_ms = excluded.duration_ms, cost = excluded.cost,
-               cost_source = excluded.cost_source, cost_is_complete = excluded.cost_is_complete,
-               model_attribution_conflicted = excluded.model_attribution_conflicted,
-               parser_version = excluded.parser_version, revision = excluded.revision
-             where usage_events.revision = 0`,
-                chunk.flatMap((e) => [
-                  liveEventId(target.slug, e.client, e.dedupKey),
-                  target.environmentId,
-                  e.client,
-                  e.providerId,
-                  e.modelId,
-                  e.sessionId,
-                  e.sessionTitle,
-                  e.workspaceKey,
-                  e.workspaceLabel,
-                  e.agent,
-                  e.occurredAtMs,
-                  e.sourceOffsetMinutes,
-                  e.sourceTimezone,
-                  e.sourceLocalDate,
-                  e.inputTokens,
-                  e.outputTokens,
-                  e.cacheReadTokens,
-                  e.cacheWriteTokens,
-                  e.reasoningTokens,
-                  e.messageCount,
-                  e.isTurnStart ? 1 : 0,
-                  e.durationMs,
-                  e.cost,
-                  e.costSource,
-                  e.costIsComplete ? 1 : 0,
-                  e.modelAttributionConflicted ? 1 : 0,
-                  e.parserVersion,
-                  0, // revision: live rows are provisional until the server confirms
-                ]),
-              );
-            }
+            changedEvents = await upsertProvisionalEvents(
+              db,
+              { id: target.environmentId, slug: target.slug },
+              page.events,
+            );
           });
           // Post-commit eviction, inside the writer — same contract as
-          // resetDb and the cloud pull.
-          invalidateEventCache(db);
+          // resetDb and the cloud pull. An identical overlap keeps all
+          // derived screen data hot.
+          if (changedEvents > 0) invalidateEventCache(db);
         });
-        publishMirrorChange(db, "events");
+        if (changedEvents > 0) publishMirrorChange(db, "events");
+        await metricsPromise;
 
         return {
           ...base,

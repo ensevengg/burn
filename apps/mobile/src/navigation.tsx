@@ -8,7 +8,7 @@ import { darkColors, lightColors } from "./theme";
 import { useTheme } from "./lib/theme-context";
 import { useApp } from "./lib/app-context";
 import { DashboardScreen } from "./screens/DashboardScreen";
-import { HistoryScreen } from "./screens/HistoryScreen";
+import { SystemsScreen } from "./screens/SystemsScreen";
 import { ExploreScreen } from "./screens/ExploreScreen";
 import { MachinesScreen } from "./screens/MachinesScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
@@ -17,7 +17,7 @@ import { SetupScreen } from "./screens/SetupScreen";
 const Stack = createNativeStackNavigator<{ setup: undefined; main: undefined }>();
 const Tabs = createBottomTabNavigator<{
   dashboard: undefined;
-  history: undefined;
+  systems: undefined;
   explore: undefined;
   machines: undefined;
   settings: undefined;
@@ -38,10 +38,12 @@ function TabIcon({ name, color, focused, bg }: { name: string; color: string; fo
           <Path {...common} d="M3 12h4l2.5-7 4 14 2.5-7h5" />
         </Svg>
       );
-    case "history":
+    case "systems":
       return (
         <Svg width={24} height={24} viewBox="0 0 24 24">
-          <Path {...common} d="M4 20V10M10 20V4M16 20v-8M22 20H2" />
+          <Rect {...common} x={2.5} y={4} width={19} height={14} rx={2} />
+          <Path {...common} d="M5.5 11h3l1.5-3 3 6 1.5-3h4" />
+          <Path {...common} d="M9 21h6M12 18v3" />
         </Svg>
       );
     case "explore":
@@ -119,7 +121,7 @@ function MainTabs() {
       })}
     >
       <Tabs.Screen name="dashboard" component={DashboardScreen} />
-      <Tabs.Screen name="history" component={HistoryScreen} />
+      <Tabs.Screen name="systems" component={SystemsScreen} />
       <Tabs.Screen name="explore" component={ExploreScreen} />
       <Tabs.Screen name="machines" component={MachinesScreen} />
       <Tabs.Screen name="settings" component={SettingsScreen} />

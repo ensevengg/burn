@@ -8,6 +8,7 @@ import type { SQLiteDatabase } from "expo-sqlite";
 import { bucketKey, bucketLabel, type Granularity } from "../lib/format";
 import { createYieldBudget, runCooperatively, runImmediately } from "../lib/cooperative";
 import { withWriteLock } from "../lib/writelock";
+import { usageWindowStart, type UsageWindowDays } from "../lib/usage-range";
 
 export const DAY_MS = 86_400_000;
 
@@ -45,6 +46,22 @@ export interface EnvironmentRow {
   lastSuccessAt: string | null;
   lastError: string | null;
   latestRevision: number;
+  directInitialSyncComplete: boolean | null;
+}
+
+export interface MachineMetricRow {
+  id: string;
+  capturedAtMs: number;
+  cpuLoadPct: number;
+  cpuTempC: number | null;
+  ramUsedPct: number;
+  ramTempC: number | null;
+  gpuUtilPct: number | null;
+  gpuTempC: number | null;
+}
+
+export interface SystemRow extends EnvironmentRow {
+  metrics: MachineMetricRow[];
 }
 
 export interface Totals {
@@ -326,122 +343,6 @@ export function computeCacheSavings(
   return savings;
 }
 
-export interface DailyTotals {
-  /** Day key (reporting-tz "YYYY-MM-DD") → tokens/cost. Missing key = no usage. */
-  byKey: Record<string, { tokens: number; cost: number }>;
-  max: number;
-}
-
-/** Per-day totals over the given events — the contribution grid's feed. */
-export function computeDailyTotals(events: EventRow[], timeZone: string): DailyTotals {
-  const byKey: Record<string, { tokens: number; cost: number }> = {};
-  let max = 0;
-  for (const [key, agg] of bucketEvents(events, timeZone, "daily")) {
-    byKey[key] = { tokens: agg.tokens, cost: agg.cost };
-    if (agg.tokens > max) max = agg.tokens;
-  }
-  return { byKey, max };
-}
-
-export interface RecordStats {
-  biggestDay: { key: string; tokens: number; cost: number } | null;
-  longestStreak: number;
-  currentStreak: number;
-  topSession: {
-    sessionId: string;
-    title: string | null;
-    client: string;
-    cost: number;
-    tokens: number;
-  } | null;
-}
-
-/** Streaks walk real calendar ordinals so gaps break them correctly. */
-function computeStreaks(
-  activeOrdinals: Set<number>,
-  now: number,
-): { longestStreak: number; currentStreak: number } {
-  // Walk the active days themselves — not every calendar day since the epoch —
-  // so cost scales with history, not with years since 2000.
-  let longestStreak = 0;
-  let run = 0;
-  let previous = -Infinity;
-  for (const ordinal of [...activeOrdinals].sort((a, b) => a - b)) {
-    run = ordinal === previous + 1 ? run + 1 : 1;
-    if (run > longestStreak) longestStreak = run;
-    previous = ordinal;
-  }
-  // Current streak counts back from today; an inactive today doesn't break it
-  // until tomorrow (GitHub convention).
-  let currentStreak = 0;
-  const lastOrdinal = Math.floor(now / DAY_MS);
-  let cursor = activeOrdinals.has(lastOrdinal) ? lastOrdinal : lastOrdinal - 1;
-  while (activeOrdinals.has(cursor)) {
-    currentStreak += 1;
-    cursor -= 1;
-  }
-  return { longestStreak, currentStreak };
-}
-
-/** All-time records: biggest day, longest + current streak, priciest session. */
-export function computeRecords(events: EventRow[], timeZone: string, now = Date.now()): RecordStats {
-  return runImmediately(computeRecordsWork(events, timeZone, now));
-}
-
-function* computeRecordsWork(
-  events: EventRow[],
-  timeZone: string,
-  now = Date.now(),
-): Generator<void, RecordStats> {
-  let processed = 0;
-  const perDay = yield* bucketEventsWork(events, timeZone, "daily");
-  const perSession = new Map<
-    string,
-    { sessionId: string; title: string | null; client: string; cost: number; tokens: number }
-  >();
-  for (const e of events) {
-    if (++processed % 256 === 0) yield;
-    const session = perSession.get(sessionKey(e)) ?? {
-      sessionId: e.sessionId,
-      title: e.sessionTitle,
-      client: e.client,
-      cost: 0,
-      tokens: 0,
-    };
-    session.cost += e.cost;
-    session.tokens += eventTokens(e);
-    if (session.title === null && e.sessionTitle !== null) session.title = e.sessionTitle;
-    perSession.set(sessionKey(e), session);
-  }
-
-  let biggestDay: RecordStats["biggestDay"] = null;
-  for (const [key, agg] of perDay) {
-    if (biggestDay === null || agg.tokens > biggestDay.tokens) {
-      biggestDay = { key, tokens: agg.tokens, cost: agg.cost };
-    }
-  }
-
-  const activeOrdinals = new Set(
-    [...perDay.keys()].map((key) => Math.floor(Date.parse(`${key}T12:00:00Z`) / DAY_MS)),
-  );
-  const { longestStreak, currentStreak } = computeStreaks(activeOrdinals, now);
-
-  let topSession: RecordStats["topSession"] = null;
-  for (const session of perSession.values()) {
-    if (topSession === null || session.cost > topSession.cost) {
-      topSession = {
-        sessionId: session.sessionId,
-        title: session.title,
-        client: session.client,
-        cost: session.cost,
-        tokens: session.tokens,
-      };
-    }
-  }
-
-  return { biggestDay, longestStreak, currentStreak, topSession };
-}
-
 export function buildSeries(
   events: EventRow[],
   timeZone: string,
@@ -489,21 +390,6 @@ function* buildSeriesWork(
   return [...byKey.values()].sort((a, b) => (a.key < b.key ? -1 : 1));
 }
 
-/** Cumulative per-layer series for stacked area charts (bottom-up by stack key). */
-export function buildStackLayers(
-  buckets: SeriesBucket[],
-  stackKeys: string[],
-): { key: string; values: number[] }[] {
-  const running = buckets.map(() => 0);
-  return stackKeys.map((key) => {
-    const values = buckets.map((bucket, i) => {
-      running[i] = running[i]! + (bucket.stacks[key] ?? 0);
-      return running[i]!;
-    });
-    return { key, values };
-  });
-}
-
 export async function queryGranularityMax(
   db: SQLiteDatabase,
   timeZone: string,
@@ -524,6 +410,7 @@ export function removeEnvironmentLocal(db: SQLiteDatabase, environmentId: string
     await db.withTransactionAsync(async () => {
       await db.runAsync("delete from usage_events where environment_id = ?", [environmentId]);
       await db.runAsync("delete from quota_snapshots where environment_id = ?", [environmentId]);
+      await db.runAsync("delete from machine_metrics where environment_id = ?", [environmentId]);
       await db.runAsync("delete from environments where id = ?", [environmentId]);
     });
     // Post-commit eviction: a read racing the delete can cache pre-delete rows,
@@ -532,37 +419,13 @@ export function removeEnvironmentLocal(db: SQLiteDatabase, environmentId: string
   });
 }
 
-/** Per-day totals over the trailing `days` window — the contribution grid's feed. */
-export async function queryDailyTotals(
-  db: SQLiteDatabase,
-  timeZone: string,
-  days: number,
-  signal?: AbortSignal,
-): Promise<DailyTotals> {
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, null);
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const buckets = await cachedBuckets(events, timeZone, "daily");
-  const byKey = Object.fromEntries([...buckets].map(([key, b]) => [key, { tokens: b.tokens, cost: b.cost }]));
-  return { byKey, max: Math.max(0, ...[...buckets.values()].map((b) => b.tokens)) };
-}
-
-/** All-time records: biggest day, longest + current streak, priciest session. */
-export async function queryRecords(
-  db: SQLiteDatabase,
-  timeZone: string,
-  signal?: AbortSignal,
-): Promise<RecordStats> {
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, 0, Date.now() + DAY_MS, null);
-  if (signal?.aborted) throw new Error("Query cancelled");
-  return runCooperatively(computeRecordsWork(events, timeZone), signal);
-}
-
 export interface BreakdownRow extends Totals {
   key: string;
   title: string;
   subtitle: string | null;
+  providers: string[];
+  clients: string[];
+  sessions: number;
 }
 
 function* breakdownWork(
@@ -570,55 +433,44 @@ function* breakdownWork(
   keyFn: (e: EventRow) => { key: string; title: string; subtitle: string | null },
 ): Generator<void, BreakdownRow[]> {
   let processed = 0;
-  const groups = new Map<string, EventRow[]>();
+  const groups = new Map<string, Totals & { title: string; subtitle: string | null; providers: Set<string>; clients: Set<string>; sessions: Set<string>; events: number; costed: number }>();
   for (const e of events) {
     if (++processed % 256 === 0) yield;
-    const { key } = keyFn(e);
-    const list = groups.get(key);
-    if (list === undefined) groups.set(key, [e]);
-    else list.push(e);
+    const meta = keyFn(e);
+    let row = groups.get(meta.key);
+    if (row === undefined) {
+      row = { title: meta.title, subtitle: meta.subtitle, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, messages: 0, cost: 0, hitRate: 0, costCoverage: 0, providers: new Set(), clients: new Set(), sessions: new Set(), events: 0, costed: 0 };
+      groups.set(meta.key, row);
+    }
+    row.inputTokens += e.inputTokens; row.outputTokens += e.outputTokens;
+    row.cacheReadTokens += e.cacheReadTokens; row.cacheWriteTokens += e.cacheWriteTokens;
+    row.reasoningTokens += e.reasoningTokens; row.messages += e.messageCount; row.cost += e.cost;
+    row.providers.add(e.providerId); row.clients.add(e.client); row.sessions.add(sessionKey(e));
+    row.events += 1; if (e.costIsComplete) row.costed += 1;
   }
   const rows: BreakdownRow[] = [];
-  for (const [key, list] of groups) {
+  for (const [key, row] of groups) {
     yield;
-    const meta = keyFn(list[0]!);
-    rows.push({ key, title: meta.title, subtitle: meta.subtitle, ...(yield* summarizeEventsWork(list)) });
+    const cacheTotal = row.cacheReadTokens + row.inputTokens + row.cacheWriteTokens;
+    rows.push({ ...row, key, providers: [...row.providers].sort(), clients: [...row.clients].sort(), sessions: row.sessions.size, hitRate: cacheTotal === 0 ? 0 : row.cacheReadTokens / cacheTotal, costCoverage: row.events === 0 ? 0 : row.costed / row.events });
   }
-  return rows.sort((a, b) => b.cost - a.cost || b.outputTokens - a.outputTokens);
-}
-
-export async function queryHistory(
-  db: SQLiteDatabase,
-  timeZone: string,
-  granularity: Granularity,
-  groupBy: "model" | "client" | "none",
-  days: number,
-  environmentId: string | null,
-  signal?: AbortSignal,
-): Promise<{ series: SeriesBucket[]; totals: Totals }> {
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, environmentId);
-  if (signal?.aborted) throw new Error("Query cancelled");
-  return {
-    series: await runCooperatively(buildSeriesWork(events, timeZone, granularity, groupBy), signal),
-    totals: await runCooperatively(summarizeEventsWork(events), signal),
-  };
+  return rows.sort((a, b) => eventTokens(b) - eventTokens(a) || b.cost - a.cost);
 }
 
 export async function queryModels(
   db: SQLiteDatabase,
-  days: number,
+  days: UsageWindowDays,
   environmentId: string | null,
   signal?: AbortSignal,
 ) {
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, environmentId);
+  const events = await loadEvents(db, usageWindowStart(days), Date.now() + DAY_MS, environmentId);
   if (signal?.aborted) throw new Error("Query cancelled");
   return runCooperatively(
     breakdownWork(events, (e) => ({
-      key: `${e.providerId}/${e.modelId}`,
+      key: e.modelId,
       title: e.modelId,
-      subtitle: e.providerId,
+      subtitle: null,
     })),
     signal,
   );
@@ -626,12 +478,12 @@ export async function queryModels(
 
 export async function queryClients(
   db: SQLiteDatabase,
-  days: number,
+  days: UsageWindowDays,
   environmentId: string | null,
   signal?: AbortSignal,
 ) {
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, environmentId);
+  const events = await loadEvents(db, usageWindowStart(days), Date.now() + DAY_MS, environmentId);
   if (signal?.aborted) throw new Error("Query cancelled");
   return runCooperatively(
     breakdownWork(events, (e) => ({ key: e.client, title: e.client, subtitle: null })),
@@ -641,12 +493,12 @@ export async function queryClients(
 
 export async function queryWorkspaces(
   db: SQLiteDatabase,
-  days: number,
+  days: UsageWindowDays,
   environmentId: string | null,
   signal?: AbortSignal,
 ) {
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, Date.now() - days * DAY_MS, Date.now() + DAY_MS, environmentId);
+  const events = await loadEvents(db, usageWindowStart(days), Date.now() + DAY_MS, environmentId);
   if (signal?.aborted) throw new Error("Query cancelled");
   return runCooperatively(
     breakdownWork(events, (e) => ({
@@ -673,7 +525,7 @@ export interface SessionRow {
 
 export async function querySessions(
   db: SQLiteDatabase,
-  days: number,
+  days: UsageWindowDays,
   environmentId: string | null,
   limit = 60,
   signal?: AbortSignal,
@@ -681,7 +533,7 @@ export async function querySessions(
   if (signal?.aborted) throw new Error("Query cancelled");
   const events = await loadEventsUncached(
     db,
-    Date.now() - days * DAY_MS,
+    usageWindowStart(days),
     Date.now() + DAY_MS,
     environmentId,
     Math.max(0, Math.floor(limit)),
@@ -730,6 +582,7 @@ export interface QuotaCard {
   plan: string | null;
   metric: string;
   usedPercent: number | null;
+  remainingPercent: number | null;
   remainingLabel: string | null;
   resetsAt: string | null;
   fetchedAt: string;
@@ -756,17 +609,18 @@ export interface WindowOverview {
 export async function queryWindowOverview(
   db: SQLiteDatabase,
   timeZone: string,
-  days: number,
+  days: UsageWindowDays,
   metric: "cost" | "tokens",
+  granularity: Granularity = "daily",
   signal?: AbortSignal,
 ): Promise<WindowOverview> {
   const now = Date.now();
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, now - days * DAY_MS, now + DAY_MS, null);
+  const events = await loadEvents(db, usageWindowStart(days, now), now + DAY_MS, null);
   if (signal?.aborted) throw new Error("Query cancelled");
   const totals = await runCooperatively(summarizeEventsWork(events), signal);
   const sessionKeys = new Set<string>();
-  const series = await runCooperatively(buildSeriesWork(events, timeZone, "daily", "none"), signal);
+  const series = await runCooperatively(buildSeriesWork(events, timeZone, granularity, "none"), signal);
 
   const byClientMap = new Map<string, { tokens: number; cost: number; sessions: Set<string> }>();
   const yieldIfNeeded = createYieldBudget(signal);
@@ -808,7 +662,7 @@ export async function queryWindowOverview(
 
 export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
   const rows = await db.getAllAsync<Record<string, unknown>>(
-    "select provider, account_key, account_label, plan, metric, used_percent, remaining_label, resets_at, fetched_at from quota_snapshots where status = 'ok' order by provider, metric, fetched_at desc",
+    "select provider, account_key, account_label, plan, metric, used_percent, remaining_percent, remaining_label, resets_at, fetched_at from quota_snapshots where status = 'ok' order by provider, metric, fetched_at desc",
   );
   const seen = new Set<string>();
   const cards: QuotaCard[] = [];
@@ -818,13 +672,18 @@ export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
     const dedupKey = JSON.stringify([provider, String(r["account_key"]), metric]);
     if (seen.has(dedupKey)) continue; // freshest row wins (server pre-selects; demo rows may tie)
     seen.add(dedupKey);
+    const usedPercent = r["used_percent"] === null ? null : Number(r["used_percent"]);
+    const reportedRemaining = r["remaining_percent"] === null ? null : Number(r["remaining_percent"]);
+    const remainingPercent = reportedRemaining ?? (usedPercent === null ? null : 100 - usedPercent);
     cards.push({
       provider,
       accountKey: String(r["account_key"]),
       accountLabel: (r["account_label"] as string | null) ?? null,
       plan: (r["plan"] as string | null) ?? null,
       metric,
-      usedPercent: r["used_percent"] === null ? null : Number(r["used_percent"]),
+      usedPercent,
+      remainingPercent:
+        remainingPercent === null ? null : Math.max(0, Math.min(100, remainingPercent)),
       remainingLabel: (r["remaining_label"] as string | null) ?? null,
       resetsAt: (r["resets_at"] as string | null) ?? null,
       fetchedAt: String(r["fetched_at"]),
@@ -835,9 +694,12 @@ export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
 
 export async function queryEnvironments(db: SQLiteDatabase): Promise<EnvironmentRow[]> {
   const rows = await db.getAllAsync<Record<string, unknown>>(
-    `select id, slug, display_name, host_group, os_kind, tokscale_version, reporter_version,
-            last_heartbeat_at, last_success_at, last_error, latest_revision
-       from environments order by slug`,
+    `select e.id, e.slug, e.display_name, e.host_group, e.os_kind, e.tokscale_version, e.reporter_version,
+            e.last_heartbeat_at, e.last_success_at, e.last_error, e.latest_revision,
+            case when d.id is null then null else exists(
+              select 1 from kv where key = 'direct_since_v2_' || e.id
+            ) end as direct_initial_sync_complete
+       from environments e left join direct_machines d on d.id = e.id order by e.slug`,
   );
   return rows.map((r) => ({
     id: String(r["id"]),
@@ -851,5 +713,38 @@ export async function queryEnvironments(db: SQLiteDatabase): Promise<Environment
     lastSuccessAt: (r["last_success_at"] as string | null) ?? null,
     lastError: (r["last_error"] as string | null) ?? null,
     latestRevision: Number(r["latest_revision"] ?? 0),
+    directInitialSyncComplete: r["direct_initial_sync_complete"] === null ? null : Number(r["direct_initial_sync_complete"]) === 1,
+  }));
+}
+
+/** Physical machine vitals only: WSL shares its Windows host's hardware. */
+export async function querySystems(db: SQLiteDatabase): Promise<SystemRow[]> {
+  const environments = (await queryEnvironments(db)).filter((environment) => environment.osKind !== "wsl");
+  const since = Date.now() - DAY_MS;
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    `select id, environment_id, captured_at_ms, cpu_load_pct, cpu_temp_c,
+            ram_used_pct, ram_temp_c, gpu_util_pct, gpu_temp_c
+       from machine_metrics where captured_at_ms >= ? order by captured_at_ms`,
+    [since],
+  );
+  const byEnvironment = new Map<string, MachineMetricRow[]>();
+  for (const row of rows) {
+    const environmentId = String(row["environment_id"]);
+    const metrics = byEnvironment.get(environmentId) ?? [];
+    metrics.push({
+      id: String(row["id"]),
+      capturedAtMs: Number(row["captured_at_ms"]),
+      cpuLoadPct: Number(row["cpu_load_pct"]),
+      cpuTempC: row["cpu_temp_c"] === null ? null : Number(row["cpu_temp_c"]),
+      ramUsedPct: Number(row["ram_used_pct"]),
+      ramTempC: row["ram_temp_c"] === null ? null : Number(row["ram_temp_c"]),
+      gpuUtilPct: row["gpu_util_pct"] === null ? null : Number(row["gpu_util_pct"]),
+      gpuTempC: row["gpu_temp_c"] === null ? null : Number(row["gpu_temp_c"]),
+    });
+    byEnvironment.set(environmentId, metrics);
+  }
+  return environments.map((environment) => ({
+    ...environment,
+    metrics: byEnvironment.get(environment.id) ?? [],
   }));
 }

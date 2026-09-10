@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { eventIdentityDescription, normalizeCostSource, quotaAccountKey, quotaMetricLabel } from "../src/keys";
-import { parseEventRow, parseEnvironmentRow, parseQuotaRow } from "../src/supabase";
+import {
+  eventIdentityDescription,
+  normalizeCostSource,
+  quotaAccountKey,
+  quotaMetricLabel,
+  quotaMirrorRowKey,
+} from "../src/keys";
+import { parseEventRow, parseEnvironmentRow, parseMachineMetricRow, parseQuotaRow } from "../src/supabase";
+import { httpLiveApiFor, parseLiveEventsPage, parseLiveMetricsPage } from "../src/live";
 
 describe("keys", () => {
   test("event identity is server-side sha256 of slug|client|dedup_key", () => {
@@ -16,6 +23,15 @@ describe("keys", () => {
   test("quota metric labels are snake_cased", () => {
     expect(quotaMetricLabel("Session (5h)")).toBe("session_(5h)");
     expect(quotaMetricLabel("")).toBe("unknown");
+  });
+
+  test("quota mirror rows are environment-scoped", () => {
+    expect(quotaMirrorRowKey("windows", "codex", "personal", "session_5h")).toBe(
+      "windows|codex|personal|session_5h",
+    );
+    expect(quotaMirrorRowKey(null, "codex", "personal", "weekly")).toBe(
+      "no-env|codex|personal|weekly",
+    );
   });
 
   test("cost source normalization accepts tokscale camelCase and snake_case", () => {
@@ -75,6 +91,29 @@ describe("wire parsing", () => {
     expect(ev.costIsComplete).toBe(false);
   });
 
+  test("live generation round-trips and is sent on the next request", async () => {
+    const generation = "a".repeat(64);
+    expect(
+      parseLiveEventsPage({
+        sinceMs: 0,
+        generatedAt: "2026-09-07T10:00:00.000Z",
+        generation,
+        events: [],
+      }).generation,
+    ).toBe(generation);
+    let requested = "";
+    const fetchImpl = (async (input: string | URL | Request) => {
+      requested = String(input);
+      return new Response(
+        JSON.stringify({ sinceMs: 0, generatedAt: "2026-09-07T10:00:00.000Z", generation, events: [] }),
+        { headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    const api = httpLiveApiFor("http://machine:8787", fetchImpl);
+    await api.events(0, undefined, generation);
+    expect(requested).toContain(`since=0&generation=${generation}`);
+  });
+
   test("quota row maps percents leniently", () => {
     const q = parseQuotaRow({
       provider: "Codex",
@@ -88,5 +127,22 @@ describe("wire parsing", () => {
     expect(q.usedPercent).toBeCloseTo(81.4);
     expect(q.remainingPercent).toBeNull();
     expect(q.status).toBe("ok");
+  });
+
+  test("machine metrics validate live sensor ranges and map cloud timestamps", () => {
+    const live = parseLiveMetricsPage({
+      generatedAt: "2026-09-10T10:00:00.000Z",
+      metrics: [{ capturedAtMs: 123, cpuLoadPct: 10, cpuTempC: null, ramUsedPct: 55,
+        ramTempC: 42, gpuUtilPct: 80, gpuTempC: 70 }],
+    });
+    expect(live.metrics[0]?.ramTempC).toBe(42);
+    expect(() => parseLiveMetricsPage({ generatedAt: "x", metrics: [{
+      capturedAtMs: 1, cpuLoadPct: 101, ramUsedPct: 50,
+    }] })).toThrow("0–100");
+    expect(parseMachineMetricRow({
+      id: "m1", environment_id: "windows", captured_at: "2026-09-10T10:00:00.000Z",
+      cpu_load_pct: "10.2", cpu_temp_c: null, ram_used_pct: "55.5", ram_temp_c: "42.1",
+      gpu_util_pct: "80", gpu_temp_c: "70", revision: 4,
+    })).toMatchObject({ capturedAtMs: Date.parse("2026-09-10T10:00:00.000Z"), ramTempC: 42.1 });
   });
 });

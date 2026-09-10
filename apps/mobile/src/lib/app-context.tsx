@@ -15,7 +15,6 @@ import {
   clearConnection,
   getMode,
   getReportingTimezone,
-  loadConnection,
   saveConnection,
   setReportingTimezone,
   type AppMode,
@@ -27,7 +26,7 @@ import { pullLiveFromMachines, type LivePullStatus } from "./live";
 import { removeEnvironmentLocal } from "../data/repository";
 import { subscribeMirrorChanges } from "./sync-state";
 import { followMachineUpdates } from "./refresh";
-import { createBurnBackend } from "@burn/sync-api";
+import { clearConnectedPhone, loadConnectedPhone } from "./connection";
 
 interface AppState {
   db: SQLiteDatabase | null;
@@ -112,7 +111,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const pullLive = useCallback(
     (signal?: AbortSignal) => {
       if (db === null || mode !== "cloud") return;
-      live.current?.abort();
+      // Let the active probe finish; pullLiveFromMachines coalesces callers,
+      // so aborting here would only hand the new caller the dying promise.
+      if (live.current !== null) return;
       const controller = new AbortController();
       const relay = () => controller.abort();
       signal?.addEventListener("abort", relay, { once: true });
@@ -172,14 +173,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (mode === "direct") {
         const statuses = await pullDirectFromMachines(db);
         if (epoch !== lifecycle.current) return;
-        const failed = statuses.filter((s) => s.state === "error").length;
+        const failed = statuses.filter((s) => s.state !== "live").length;
+        const incomplete = statuses.filter((s) => !s.initialSyncComplete).length;
+        const quotaFailed = statuses.filter((s) => s.quotaError !== null).length;
+        const successful = statuses.filter((s) => s.state === "live").length;
+        const notices = [
+          failed > 0
+            ? `${failed} machine${failed === 1 ? "" : "s"} could not sync — showing cached data.`
+            : null,
+          incomplete > 0
+            ? `Initial history sync is still incomplete on ${incomplete} machine${incomplete === 1 ? "" : "s"}.`
+            : null,
+          quotaFailed > 0
+            ? `Token usage synced, but quota refresh failed on ${quotaFailed} machine${quotaFailed === 1 ? "" : "s"}.`
+            : null,
+        ].filter((notice): notice is string => notice !== null);
         patchStatus({
-          lastSync: new Date(),
+          ...(successful > 0 ? { lastSync: new Date() } : {}),
           syncError: null,
-          syncNotice:
-            failed > 0
-              ? `${failed} machine${failed === 1 ? "" : "s"} failed to answer — showing pushed/cached data.`
-              : null,
+          syncNotice: notices.length === 0 ? null : notices.join(" "),
           liveMachines: statuses,
         });
         return;
@@ -225,6 +237,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
     const prepareReset = async () => {
       stop();
+      clearConnectedPhone();
       await queryClient.cancelQueries();
       queryClient.removeQueries();
       patchStatus({ lastSync: null, syncError: null, syncNotice: null });
@@ -329,9 +342,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
           return;
         }
         if (mode === "cloud") {
-          const connection = await loadConnection();
-          if (!connection) throw new Error("Not connected to a backend");
-          await createBurnBackend(connection).phone(connection.readToken).removeEnvironment(environmentId);
+          const connected = await loadConnectedPhone();
+          if (!connected) throw new Error("Not connected to a backend");
+          await connected.phone.removeEnvironment(environmentId);
         }
         await removeEnvironmentLocal(db, environmentId);
         invalidate();

@@ -85,9 +85,11 @@ export interface QuotaSnapshot {
 }
 
 export interface DeltaPage {
+  /** Cursor contract version. Version 2 is database-global across machines. */
+  cursorVersion: number;
   environments: EnvironmentInfo[];
   events: UsageEvent[];
-  /** Greatest revision present in `events`; the phone's next watermark. */
+  /** Greatest global sync revision present in `events`; the phone's next watermark. */
   maxRevision: number;
   hasMore: boolean;
 }
@@ -96,4 +98,18 @@ export interface SyncRequestInfo {
   generation: number;
   requestedAt: string;
   targetEnvironmentId: string | null;
+}
+
+/** One reporter-collected sample of the physical machine's vitals. */
+export interface MachineMetric {
+  id: string;
+  environmentId: string;
+  capturedAtMs: number;
+  cpuLoadPct: number;
+  cpuTempC: number | null;
+  ramUsedPct: number;
+  ramTempC: number | null;
+  gpuUtilPct: number | null;
+  gpuTempC: number | null;
+  revision: number;
 }

@@ -6,11 +6,9 @@ Your project is the only place your data lives. Setup is three pastes and one
 ## Setup (per deployment)
 
 1. Create a project at [supabase.com](https://supabase.com) (free tier is ample).
-2. Open **SQL Editor** and run, in order:
-   - `migrations/0001_schema.sql` — tables, indexes, RLS lockdown
-   - `migrations/0002_api.sql` — the `burn_*` scoped-token RPCs
-   - `migrations/0003_api_removal.sql` — machine removal from the app (− button)
-   - `migrations/0004_quota_freshness.sql` — failed quota fetches never evict last-good numbers
+2. Open **SQL Editor** and run every numbered file in `migrations/`, in order.
+   Existing installs must also apply new migrations; `0008` introduces the
+   global cursor and `0009` adds physical-machine health samples.
 3. On a machine you control: `npx burn-report init --url <project-url> --key <publishable-key> --slug cachyos --name "CachyOS"`
    It writes `~/.config/burn/config.json` + `~/.config/burn/setup-tokens.sql`.
    Paste that SQL into the editor too (registers the machine and your phone).
@@ -41,6 +39,6 @@ project, never production.**
 ## Operations
 
 - Refresh schemas: edit migrations only additively; the phone re-syncs via the
-  revision watermark after `burn-report` re-pushes.
+  database-global revision watermark after `burn-report` re-pushes.
 - Inspect freshness: `select slug, last_heartbeat_at, latest_revision from burn.environments;`
 - Revoke a phone: `update burn.read_tokens set revoked_at = now() where label = 'phone';`

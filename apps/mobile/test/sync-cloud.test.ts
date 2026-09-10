@@ -10,6 +10,9 @@ import {
   queryGranularityMax,
   invalidateEventCache,
   removeEnvironmentLocal,
+  queryModels,
+  queryWindowOverview,
+  querySystems,
 } from "../src/data/repository";
 import { generateDemoDataset } from "../src/data/demo-generator";
 import { mirrorFixture } from "./mirror-fixture";
@@ -33,8 +36,9 @@ const quota: QuotaSnapshot = {
   sourceOffsetMinutes: 330,
 };
 const phone = (overrides: Partial<MobileSyncApi> = {}): MobileSyncApi => ({
-  fetchDelta: async () => ({ environments: [], events: [], maxRevision: 0, hasMore: false }),
+  fetchDelta: async () => ({ cursorVersion: 2, environments: [], events: [], maxRevision: 0, hasMore: false }),
   fetchQuotaLatest: async () => [quota],
+  fetchMachineMetrics: async () => [],
   requestSync: async () => ({ generation: 1 }),
   removeEnvironment: async () => ({ removedSlug: "windows" }),
   ...overrides,
@@ -70,6 +74,32 @@ test("a failed event download does not prevent the newer Windows quota from rend
   }
 });
 
+test("cloud machine metrics land in the local Systems mirror", async () => {
+  const fixture = mirrorFixture();
+  const capturedAtMs = Date.now();
+  try {
+    await fixture.db.runAsync(
+      `insert into environments (id, slug, display_name, os_kind) values (?, ?, ?, ?)`,
+      ["windows", "windows", "Windows", "windows"],
+    );
+    await fixture.db.runAsync(
+      `insert into environments (id, slug, display_name, os_kind) values (?, ?, ?, ?)`,
+      ["wsl", "wsl", "WSL", "wsl"],
+    );
+    const baseMetric = { capturedAtMs, cpuLoadPct: 10, cpuTempC: null, ramUsedPct: 64,
+      ramTempC: 43, gpuUtilPct: 72, gpuTempC: 68, revision: 1 };
+    await pullCloud(fixture.db, phone({ fetchMachineMetrics: async () => [
+      { ...baseMetric, id: "metric-1", environmentId: "windows" },
+      { ...baseMetric, id: "metric-wsl", environmentId: "wsl" },
+    ] }));
+    const systems = await querySystems(fixture.db);
+    expect(systems).toHaveLength(1);
+    expect(systems[0]?.metrics[0]).toMatchObject({ ramUsedPct: 64, ramTempC: 43 });
+  } finally {
+    fixture.native.close();
+  }
+});
+
 test("quotas commit before a slow event download finishes", async () => {
   const fixture = mirrorFixture();
   let release!: () => void;
@@ -85,7 +115,7 @@ test("quotas commit before a slow event download finishes", async () => {
     phone({
       fetchDelta: async () => {
         await gate;
-        return { environments: [], events: [], maxRevision: 0, hasMore: false };
+        return { cursorVersion: 2, environments: [], events: [], maxRevision: 0, hasMore: false };
       },
     }),
     undefined,
@@ -103,28 +133,64 @@ test("quotas commit before a slow event download finishes", async () => {
   }
 });
 
-test("cloud inserts are batched, decimal strings preserved, retries idempotent", async () => {
+test("cloud inserts use large bound batches, preserve decimals, and stay idempotent", async () => {
   const fixture = mirrorFixture();
-  const events = Array.from({ length: 65 }, (_, i) =>
+  const events = Array.from({ length: 401 }, (_, i) =>
     usage({ eventId: `e${i}`, cost: "0.123456", sessionTitle: "O'Brien ?" }),
   );
   const api = phone({
-    fetchDelta: async () => ({ environments: [], events, maxRevision: 1, hasMore: false }),
+    fetchDelta: async () => ({ cursorVersion: 2, environments: [], events, maxRevision: 1, hasMore: false }),
   });
   try {
     await pullCloud(fixture.db, api);
     const inserts = fixture.writes.filter((w) => w.sql.includes("insert or replace into usage_events"));
-    expect(inserts).toHaveLength(3);
-    expect(Math.max(...inserts.map((w) => w.count))).toBeLessThanOrEqual(999);
+    expect(inserts).toHaveLength(2);
+    expect(Math.max(...inserts.map((w) => w.count))).toBe(11_200);
     expect(fixture.native.query("select cost, session_title from usage_events limit 1").get()).toEqual({
       cost: "0.123456",
       session_title: "O'Brien ?",
     });
     await pullCloud(fixture.db, api);
-    expect(fixture.native.query("select count(*) as n from usage_events").get()).toEqual({ n: 65 });
-    expect(fixture.native.query("select value from kv where key='watermark_revision'").get()).toEqual({
+    expect(fixture.native.query("select count(*) as n from usage_events").get()).toEqual({ n: 401 });
+    expect(fixture.native.query("select value from kv where key='watermark_sync_revision_v2'").get()).toEqual({
       value: "1",
     });
+  } finally {
+    fixture.native.close();
+  }
+});
+
+test("All includes old usage and one model card combines providers and clients", async () => {
+  const fixture = mirrorFixture();
+  const old = Date.UTC(1999, 0, 1);
+  const events = [
+    usage({ eventId: "codex-sol", modelId: "gpt-5.6-sol", providerId: "openai-codex", client: "codex", occurredAtMs: old, inputTokens: 100_000_000, outputTokens: 1 }),
+    usage({ eventId: "pi-sol", environmentId: "wsl", modelId: "gpt-5.6-sol", providerId: "openai", client: "pi", occurredAtMs: old, inputTokens: 200_000_000, outputTokens: 2 }),
+  ];
+  try {
+    await pullCloud(fixture.db, phone({ fetchDelta: async () => ({ cursorVersion: 2, environments: [], events, maxRevision: 2, hasMore: false }) }));
+    expect((await queryWindowOverview(fixture.db, "UTC", 90, "tokens")).totals.inputTokens).toBe(0);
+    expect((await queryWindowOverview(fixture.db, "UTC", null, "tokens", "yearly")).totals.inputTokens).toBe(300_000_000);
+    const models = await queryModels(fixture.db, null, null);
+    expect(models).toHaveLength(1);
+    expect(models[0]?.providers).toEqual(["openai", "openai-codex"]);
+    expect(models[0]?.clients).toEqual(["codex", "pi"]);
+  } finally {
+    fixture.native.close();
+  }
+});
+
+test("legacy cloud cursor is ignored and an old backend cannot poison the v2 cursor", async () => {
+  const fixture = mirrorFixture();
+  await fixture.db.runAsync("insert into kv (key, value) values ('watermark_revision', '999')");
+  const seen: number[] = [];
+  try {
+    await expect(pullCloud(fixture.db, phone({ fetchDelta: async (since) => {
+      seen.push(since);
+      return { cursorVersion: 1, environments: [], events: [], maxRevision: 999, hasMore: false };
+    } }))).rejects.toThrow("migration 0008");
+    expect(seen).toEqual([0]);
+    expect(fixture.native.query("select value from kv where key='watermark_sync_revision_v2'").get()).toBeNull();
   } finally {
     fixture.native.close();
   }
@@ -140,7 +206,7 @@ test("failed page rolls back its events and watermark while quotas survive", asy
     await expect(
       pullCloud(
         fixture.db,
-        phone({ fetchDelta: async () => ({ environments: [], events, maxRevision: 1, hasMore: false }) }),
+        phone({ fetchDelta: async () => ({ cursorVersion: 2, environments: [], events, maxRevision: 1, hasMore: false }) }),
       ),
     ).rejects.toThrow("bad event");
     expect(fixture.native.query("select count(*) as n from usage_events").get()).toEqual({ n: 0 });
@@ -172,7 +238,7 @@ test("cancelled backend responses cannot write into a reset mirror", async () =>
       },
       fetchDelta: async () => {
         await gate;
-        return { environments: [], events: [], maxRevision: 0, hasMore: false };
+        return { cursorVersion: 2, environments: [], events: [], maxRevision: 0, hasMore: false };
       },
     }),
     () => {
@@ -265,7 +331,7 @@ test("machine removal evicts the event cache after its delete commits, not befor
   try {
     await pullCloud(
       fixture.db,
-      phone({ fetchDelta: async () => ({ environments: [], events, maxRevision: 1, hasMore: false }) }),
+      phone({ fetchDelta: async () => ({ cursorVersion: 2, environments: [], events, maxRevision: 1, hasMore: false }) }),
     );
     const first = await queryGranularityMax(fixture.db, "UTC", "daily");
     expect(first).toBeGreaterThan(0);
@@ -308,7 +374,7 @@ test("session limit applies before decoding and identities include the machine",
   try {
     await pullCloud(
       fixture.db,
-      phone({ fetchDelta: async () => ({ environments: [], events, maxRevision: 1, hasMore: false }) }),
+      phone({ fetchDelta: async () => ({ cursorVersion: 2, environments: [], events, maxRevision: 1, hasMore: false }) }),
     );
     const rows = await querySessions(fixture.db, 7, null, 2);
     expect(rows.map((r) => [r.environmentId, r.cost])).toEqual([
@@ -338,7 +404,7 @@ test("historical queries share decoding, yield to input, and reload after mirror
   try {
     await pullCloud(
       fixture.db,
-      phone({ fetchDelta: async () => ({ environments: [], events, maxRevision: 1, hasMore: false }) }),
+      phone({ fetchDelta: async () => ({ cursorVersion: 2, environments: [], events, maxRevision: 1, hasMore: false }) }),
     );
     let inputHandled = false;
     const pending = queryGranularityMax(fixture.db, "UTC", "yearly");

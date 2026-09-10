@@ -12,5 +12,6 @@ chrono = "0.4"
 iana-time-zone = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tokscale-core = { git = "https://github.com/junhoyeo/tokscale", tag = "v4.15.1" }

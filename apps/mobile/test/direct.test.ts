@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { LIVE_OVERLAP_MS, liveEventId, LiveUnreachableError, type IngestEventInput, type LiveApi, type LiveEventsPage, type LivePing } from "@burn/sync-api";
+import { LIVE_OVERLAP_MS, liveEventId, LiveUnreachableError, type IngestEventInput, type LiveApi, type LiveEventsPage, type LiveMetricsPage, type LivePing } from "@burn/sync-api";
 import { mirrorFixture } from "./mirror-fixture";
+import { subscribeMirrorChanges } from "../src/lib/sync-state";
+import { queryEnvironments, querySystems, queryWindowOverview } from "../src/data/repository";
 import {
   addDirectMachine,
   directEnvId,
@@ -65,7 +67,9 @@ interface FakeEntry {
   page?: LiveEventsPage;
   failEvents?: Error;
   quotas?: { generatedAt: string; quotas: Record<string, unknown>[] };
+  metrics?: LiveMetricsPage;
   seenSince: (number | null)[];
+  seenGenerations?: (string | null)[];
   seenPingSignal: AbortSignal | null;
 }
 
@@ -79,9 +83,10 @@ function directApiFor(map: Record<string, FakeEntry>): NonNullable<DirectPullOpt
         if (entry.failPing) throw entry.failPing;
         return entry.ping ?? ping();
       },
-      events: async (sinceMs, signal) => {
+      events: async (sinceMs, signal, knownGeneration) => {
         if (signal?.aborted) throw new LiveUnreachableError("aborted");
         entry.seenSince.push(sinceMs);
+        entry.seenGenerations?.push(knownGeneration ?? null);
         if (entry.failEvents) throw entry.failEvents;
         if (!entry.page) return { sinceMs, generatedAt: "2026-09-07T10:00:00.000Z", events: [] };
         return entry.page;
@@ -90,6 +95,10 @@ function directApiFor(map: Record<string, FakeEntry>): NonNullable<DirectPullOpt
         if (signal?.aborted) throw new LiveUnreachableError("aborted");
         if (!entry.quotas) throw new Error("no quotas configured");
         return entry.quotas as never;
+      },
+      metrics: async (_sinceMs, signal) => {
+        if (signal?.aborted) throw new LiveUnreachableError("aborted");
+        return entry.metrics ?? { generatedAt: "2026-09-07T10:00:00.000Z", metrics: [] };
       },
     } satisfies LiveApi;
   };
@@ -142,6 +151,7 @@ describe("direct mode registry", () => {
     const env = await fx.db.getFirstAsync<Record<string, unknown>>("select * from environments where id = ?", [directEnvId("win")]);
     expect(env!.slug).toBe("win");
     expect(env!.live_endpoint).toBe("http://win:8787");
+    expect((await queryEnvironments(fx.db))[0]?.directInitialSyncComplete).toBe(false);
   });
 
   test("adding reuses an existing cloud environment id with the same slug", async () => {
@@ -161,6 +171,75 @@ describe("direct mode registry", () => {
 });
 
 describe("direct pull", () => {
+  test("combines cost and every token bucket across direct machines", async () => {
+    const fx = mirrorFixture();
+    const apiFor = directApiFor({
+      "http://win:8787": {
+        ping: ping({ slug: "win", displayName: "Windows" }),
+        seenSince: [],
+        seenPingSignal: null,
+        page: {
+          sinceMs: 0,
+          generatedAt: "2026-09-10T10:00:00.000Z",
+          events: [ingestRow()],
+        },
+      },
+      "http://cachyos:8787": {
+        ping: ping({ slug: "cachyos", displayName: "CachyOS", osKind: "linux" }),
+        seenSince: [],
+        seenPingSignal: null,
+        page: {
+          sinceMs: 0,
+          generatedAt: "2026-09-10T10:00:00.000Z",
+          events: [ingestRow({
+            inputTokens: 20,
+            outputTokens: 4,
+            cacheReadTokens: 6,
+            cacheWriteTokens: 8,
+            reasoningTokens: 10,
+            cost: "0.000246",
+          })],
+        },
+      },
+    });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+    await addDirectMachine(fx.db, "http://cachyos:8787", { apiFor });
+
+    await pullDirectFromMachines(fx.db, { apiFor });
+
+    const { totals } = await queryWindowOverview(fx.db, "UTC", null, "tokens", "yearly");
+    expect(totals).toMatchObject({
+      inputTokens: 30,
+      outputTokens: 6,
+      cacheReadTokens: 6,
+      cacheWriteTokens: 8,
+      reasoningTokens: 10,
+      messages: 2,
+    });
+    expect(totals.cost).toBeCloseTo(0.000369, 9);
+    fx.native.close();
+  });
+
+  test("merges live machine vitals for the Systems screen", async () => {
+    const fx = mirrorFixture();
+    const entry: FakeEntry = {
+      seenSince: [],
+      seenPingSignal: null,
+      page: { sinceMs: 0, generatedAt: "2026-09-10T10:00:00.000Z", events: [] },
+      metrics: { generatedAt: "2026-09-10T10:00:00.000Z", metrics: [{
+        capturedAtMs: Date.now(), cpuLoadPct: 10, cpuTempC: null,
+        ramUsedPct: 62, ramTempC: 44, gpuUtilPct: 71, gpuTempC: 68,
+      }] },
+    };
+    const apiFor = directApiFor({ "http://win:8787": entry });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+    await pullDirectFromMachines(fx.db, { apiFor });
+    const systems = await querySystems(fx.db);
+    expect(systems).toHaveLength(1);
+    expect(systems[0]?.metrics[0]).toMatchObject({ ramUsedPct: 62, ramTempC: 44, gpuUtilPct: 71 });
+    fx.native.close();
+  });
+
   test("first pull takes full history, commits revision 0, and sets the cursor", async () => {
     const fx = mirrorFixture();
     const seen: FakeEntry = { seenSince: [], seenPingSignal: null, page: { sinceMs: null, generatedAt: "2026-09-07T10:00:00.000Z", events: [ingestRow()] } };
@@ -170,7 +249,7 @@ describe("direct pull", () => {
       now: () => 10_000,
     });
     expect(statuses[0]).toMatchObject({ state: "live", slug: "win", pulledEvents: 1, error: null });
-    expect(seen.seenSince[0]).toBeNull(); // first pull: full history
+    expect(seen.seenSince[0]).toBe(0); // first pull: full history
     const row = await fx.db.getFirstAsync<Record<string, unknown>>(
       "select * from usage_events where event_id = ?",
       [liveEventId("win", "codex", "v1:codex:s1:1725599000000:1")],
@@ -178,8 +257,51 @@ describe("direct pull", () => {
     expect(row).not.toBeNull();
     expect(row!.revision).toBe(0);
     expect(row!.environment_id).toBe(directEnvId("win"));
-    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_" + directEnvId("win") + "'");
+    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_v2_" + directEnvId("win") + "'");
     expect(cursor!.value).toBe("10000");
+  });
+
+  test("ignores a legacy cursor that was advanced after a tail-only first pull", async () => {
+    const fx = mirrorFixture();
+    const seen: FakeEntry = {
+      seenSince: [],
+      page: {
+        sinceMs: 0,
+        generatedAt: "2026-09-07T10:00:00.000Z",
+        events: [ingestRow()],
+      },
+    };
+    const id = directEnvId("win");
+    const apiFor = directApiFor({ "http://win:8787": seen });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+    await fx.db.runAsync("insert into kv (key, value) values (?, ?)", [`direct_since_${id}`, "10000000"]);
+
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => 11_000_000 });
+
+    expect(seen.seenSince[0]).toBe(0);
+  });
+
+  test("a full backfill crosses the native bridge in large bound batches", async () => {
+    const fx = mirrorFixture();
+    const events = Array.from({ length: 401 }, (_, index) =>
+      ingestRow({
+        sessionId: `s${index}`,
+        dedupKey: `v1:codex:s${index}:1725599000000:1`,
+      }),
+    );
+    const apiFor = directApiFor({
+      "http://win:8787": {
+        seenSince: [],
+        page: { sinceMs: null, generatedAt: "2026-09-07T10:00:00.000Z", events },
+      },
+    });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => 10_000_000 });
+
+    const inserts = fx.writes.filter((write) => write.sql.includes("insert into usage_events"));
+    expect(inserts).toHaveLength(2);
+    expect(Math.max(...inserts.map((write) => write.count))).toBe(11_200);
   });
 
   test("the second pull passes cursor-minus-overlap and merges the fresh tail", async () => {
@@ -206,6 +328,182 @@ describe("direct pull", () => {
     expect(row).not.toBeNull();
     const first = await fx.db.getFirstAsync<{ n: number }>("select count(*) as n from usage_events");
     expect(first!.n).toBe(2);
+  });
+
+  test("concurrent callers share one machine scan", async () => {
+    const fx = mirrorFixture();
+    await addDirectMachine(fx.db, "http://win:8787", {
+      apiFor: directApiFor({ "http://win:8787": { seenSince: [] } }),
+    });
+    let eventCalls = 0;
+    let started!: () => void;
+    const scanStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const apiFor: NonNullable<DirectPullOptions["apiFor"]> = () => ({
+      ping: async () => ping(),
+      events: async (sinceMs) => {
+        eventCalls += 1;
+        started();
+        await gate;
+        return { sinceMs, generatedAt: "2026-09-07T10:00:00.000Z", events: [ingestRow()] };
+      },
+      quotas: async () => {
+        throw new Error("no quotas configured");
+      },
+    });
+
+    const first = pullDirectFromMachines(fx.db, { apiFor, now: () => 10_000 });
+    await scanStarted;
+    const second = pullDirectFromMachines(fx.db, { apiFor, now: () => 10_000 });
+    release();
+
+    expect(second).toBe(first);
+    await expect(first).resolves.toHaveLength(1);
+    expect(eventCalls).toBe(1);
+  });
+
+  test("starts quota collection while the event scan is running", async () => {
+    const fx = mirrorFixture();
+    await addDirectMachine(fx.db, "http://win:8787", {
+      apiFor: directApiFor({ "http://win:8787": { seenSince: [] } }),
+    });
+    let eventStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      eventStarted = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let quotaCalls = 0;
+    const pending = pullDirectFromMachines(fx.db, {
+      apiFor: () => ({
+        ping: async () => ping(),
+        events: async (sinceMs) => {
+          eventStarted();
+          await gate;
+          return { sinceMs, generatedAt: "2026-09-07T10:00:00.000Z", events: [] };
+        },
+        quotas: async () => {
+          quotaCalls += 1;
+          return { generatedAt: "2026-09-07T10:00:00.000Z", quotas: [] };
+        },
+      }),
+    });
+    try {
+      await started;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(quotaCalls).toBe(1);
+    } finally {
+      release();
+      await pending;
+    }
+  });
+
+  test("an identical overlap does not announce mirror changes", async () => {
+    const fx = mirrorFixture();
+    const entry: FakeEntry = {
+      seenSince: [],
+      seenGenerations: [],
+      page: {
+        sinceMs: null,
+        generatedAt: "2026-09-07T10:00:00.000Z",
+        generation: "a".repeat(64),
+        events: [ingestRow()],
+      },
+      quotas: {
+        generatedAt: "2026-09-07T10:00:00.000Z",
+        quotas: [
+          {
+            provider: "codex",
+            accountKey: "shared",
+            accountLabel: "Personal",
+            plan: null,
+            metric: "5h",
+            usedPercent: 40,
+            remainingPercent: 60,
+            remainingLabel: null,
+            resetsAt: null,
+            status: "ok",
+            error: null,
+            sourceOffsetMinutes: 330,
+          },
+        ],
+      },
+    };
+    const apiFor = directApiFor({ "http://win:8787": entry });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+    const changes: string[] = [];
+    const unsubscribe = subscribeMirrorChanges((changedDb, kind) => {
+      if (changedDb === fx.db) changes.push(kind);
+    });
+    try {
+      await pullDirectFromMachines(fx.db, { apiFor, now: () => 10_000_000 });
+      await pullDirectFromMachines(fx.db, { apiFor, now: () => 11_000_000 });
+      expect(changes.filter((kind) => kind === "events")).toHaveLength(1);
+      expect(changes.filter((kind) => kind === "quotas")).toHaveLength(1);
+      expect(entry.seenGenerations).toEqual([null, "a".repeat(64)]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("an event failure does not discard a successful quota refresh", async () => {
+    const fx = mirrorFixture();
+    const quotas = {
+      generatedAt: "2026-09-07T11:00:00.000Z",
+      quotas: [
+        {
+          provider: "codex",
+          accountKey: "shared",
+          accountLabel: "Personal",
+          plan: null,
+          metric: "5h",
+          usedPercent: 40,
+          remainingPercent: 60,
+          remainingLabel: null,
+          resetsAt: null,
+          status: "ok",
+          error: null,
+          sourceOffsetMinutes: 330,
+        },
+      ],
+    };
+    const apiFor = directApiFor({
+      "http://win:8787": { seenSince: [], failEvents: new Error("event scan failed"), quotas },
+    });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+
+    const statuses = await pullDirectFromMachines(fx.db, { apiFor });
+
+    expect(statuses[0]!.state).toBe("error");
+    const row = await fx.db.getFirstAsync<{ used_percent: number }>(
+      "select used_percent from quota_snapshots where environment_id = ?",
+      [directEnvId("win")],
+    );
+    expect(row?.used_percent).toBe(40);
+  });
+
+  test("a quota failure is visible while successful token usage is kept", async () => {
+    const fx = mirrorFixture();
+    const apiFor = directApiFor({
+      "http://win:8787": { seenSince: [], page: { sinceMs: null, generatedAt: "x", events: [ingestRow()] } },
+    });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+    const statuses = await pullDirectFromMachines(fx.db, { apiFor });
+    expect(statuses[0]).toMatchObject({ state: "live", pulledEvents: 1, pulledQuotas: 0, quotaError: "no quotas configured", initialSyncComplete: true });
+    expect((await queryEnvironments(fx.db))[0]?.directInitialSyncComplete).toBe(true);
+  });
+
+  test("unexpected registry/database failures reject instead of masquerading as zero machines", async () => {
+    const fx = mirrorFixture();
+    fx.native.close();
+    await expect(pullDirectFromMachines(fx.db)).rejects.toThrow();
   });
 
   test("quotas upsert per-environment and never clobber other machines", async () => {
@@ -276,7 +574,7 @@ describe("direct pull", () => {
       const r = await fx.db.getFirstAsync<{ n: number }>(`select count(*) as n from ${table}`);
       expect(r!.n).toBe(0);
     }
-    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_" + directEnvId("win") + "'");
+    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_v2_" + directEnvId("win") + "'");
     expect(cursor).toBeNull();
   });
 
@@ -323,7 +621,7 @@ describe("direct pull", () => {
       now: () => 2_000,
     });
     expect(["offline", "error", "skipped"]).toContain(statuses[0]!.state);
-    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_" + directEnvId("win") + "'");
+    const cursor = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'direct_since_v2_" + directEnvId("win") + "'");
     expect(cursor).toBeNull();
   });
 });

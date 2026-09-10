@@ -6,7 +6,7 @@ import { formatRelative } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp, useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
-import { loadConnection } from "../lib/settings";
+import { loadConnectedPhone } from "../lib/connection";
 import { spacing, type } from "../theme";
 import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
 
@@ -50,9 +50,9 @@ export function MachinesScreen() {
         contentContainerStyle={{ paddingBottom: 40 }}
         refreshControl={
           <RefreshControl
-            refreshing={mode === "cloud" ? refreshingMachines : demoRefreshing}
+            refreshing={mode === "cloud" || mode === "direct" ? refreshingMachines : demoRefreshing}
             onRefresh={() => {
-              if (mode === "cloud") {
+              if (mode === "cloud" || mode === "direct") {
                 void requestSync(null);
                 return;
               }
@@ -84,7 +84,7 @@ export function MachinesScreen() {
 
         {showAdd && (mode === "direct" ? <AddDirectMachineSheet onAdded={() => setShowAdd(false)} addMachine={addDirectMachine} /> : <AddMachineSheet />)}
 
-        {mode !== "cloud" && !showAdd && (
+        {mode !== "cloud" && mode !== "direct" && !showAdd && (
           <Card>
             <Text style={[type.body, { color: C.text }]}>
               {mode === "demo" ? "Showing demo data — connect a backend for real machines." : "Not connected yet."}
@@ -125,6 +125,9 @@ export function MachinesScreen() {
                     {`tokscale ${machine.tokscaleVersion ?? "?"} · reporter ${machine.reporterVersion ?? "?"}`}
                   </Text>
                   {live !== undefined && <LiveLine status={live} />}
+                  {mode === "direct" && machine.directInitialSyncComplete === false && live === undefined && (
+                    <Text style={[type.muted, { color: C.muted, marginTop: 4 }]}>initial history sync pending</Text>
+                  )}
                   {machine.lastError !== null && (
                     <Text style={{ color: C.err, marginTop: 6 }} numberOfLines={3}>
                       {machine.lastError}
@@ -162,9 +165,9 @@ function AddMachineSheet() {
 
   useEffect(() => {
     void (async () => {
-      const config = await loadConnection();
-      if (config !== null) {
-        setConnection({ url: config.url, publishableKey: config.publishableKey });
+      const connected = await loadConnectedPhone();
+      if (connected !== null) {
+        setConnection({ url: connected.config.url, publishableKey: connected.config.publishableKey });
       }
       setLoaded(true);
     })();
@@ -208,14 +211,15 @@ function AddMachineSheet() {
  * absence means "not probed yet", not "offline", so the card never implies a
  * machine is down before the user asked.
  */
-function LiveLine({ status }: { status: import("../lib/live").LivePullStatus }) {
+function LiveLine({ status }: { status: import("../lib/live").LivePullStatus | import("../lib/direct").DirectPullStatus }) {
   const { C } = useTheme();
   if (status.state === "live") {
     const tail =
       status.pulledEvents > 0
         ? `live · +${status.pulledEvents} event${status.pulledEvents === 1 ? "" : "s"} not yet pushed`
         : "live · up to date with its push cursor";
-    return <Text style={{ color: C.ok ?? C.muted, marginTop: 4 }}>{tail}</Text>;
+    const quotaTail = "quotaError" in status && status.quotaError !== null ? ` · quota error: ${status.quotaError}` : "";
+    return <Text style={{ color: C.ok ?? C.muted, marginTop: 4 }}>{tail + quotaTail}</Text>;
   }
   if (status.state === "offline") {
     return <Text style={[type.muted, { color: C.muted, marginTop: 4 }]}>live probe: unreachable — showing pushed data</Text>;

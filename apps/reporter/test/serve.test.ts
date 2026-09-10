@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { BurnConfig } from "../src/config.js";
 import { createLiveFetch, type LiveDeps } from "../src/serve.js";
+import { SystemMetricHistory } from "../src/system-metrics.js";
 
 const CONFIG: BurnConfig = {
   supabaseUrl: "https://example.supabase.co",
@@ -12,6 +13,7 @@ const CONFIG: BurnConfig = {
   osKind: "windows",
   reportingTimezone: "Asia/Kolkata",
   intervalMinutes: 10,
+  syncPollSeconds: 10,
   tokscalePin: "4.15.1",
 };
 
@@ -54,6 +56,7 @@ function deps(overrides: Partial<LiveDeps> = {}): LiveDeps {
     now: () => Date.parse("2026-09-07T10:05:00.000Z"),
     cursor: () => CURSOR,
     exporterCheck: async () => "4.15.1",
+    exporterFingerprint: async () => null,
     exporterScan: async () => `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n${JSON.stringify(EXPORTER_ROW_WITHOUT_KEY)}\n`,
     usage: async () => [
       {
@@ -102,19 +105,69 @@ describe("live server", () => {
     expect(second!.costIsComplete).toBe(false);
   });
 
-  test("/live/events refuses to overlap scans (503) until the first settles", async () => {
+  test("/live/events coalesces callers requesting the same scan", async () => {
+    let scans = 0;
     let release!: () => void;
     const gate = new Promise<string>((resolve) => {
       release = () => resolve(`${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n`);
     });
-    const fetcher = createLiveFetch(deps({ exporterScan: () => gate }));
+    const fetcher = createLiveFetch(
+      deps({
+        exporterScan: () => {
+          scans += 1;
+          return gate;
+        },
+      }),
+    );
     const first = fetcher(new Request("http://machine/live/events"));
-    const second = await fetcher(new Request("http://machine/live/events"));
-    expect(second.status).toBe(503);
+    const second = fetcher(new Request("http://machine/live/events"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(scans).toBe(1);
     release();
     expect((await first).status).toBe(200);
-    const after = await fetcher(new Request("http://machine/live/events"));
-    expect(after.status).toBe(200);
+    expect((await second).status).toBe(200);
+  });
+
+  test("/live/events reuses a full snapshot while source fingerprints match", async () => {
+    let scans = 0;
+    let fingerprint = "a".repeat(64);
+    const fetcher = createLiveFetch(
+      deps({
+        exporterFingerprint: async () => fingerprint,
+        exporterScan: async (sinceMs) => {
+          scans += 1;
+          expect(sinceMs).toBe(0);
+          return `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n${JSON.stringify(EXPORTER_ROW_WITHOUT_KEY)}\n`;
+        },
+      }),
+    );
+
+    const first = await fetcher(new Request("http://machine/live/events?since=0"));
+    expect(((await first.json()) as { events: unknown[] }).events).toHaveLength(2);
+    const second = await fetcher(
+      new Request(`http://machine/live/events?since=${EXPORTER_ROW_WITHOUT_KEY.timestamp}`),
+    );
+    expect(((await second.json()) as { events: unknown[] }).events).toHaveLength(1);
+    expect(scans).toBe(1);
+    const unchanged = await fetcher(
+      new Request(`http://machine/live/events?since=0&generation=${"a".repeat(64)}`),
+    );
+    expect(((await unchanged.json()) as { events: unknown[] }).events).toHaveLength(0);
+    expect(scans).toBe(1);
+
+    fingerprint = "b".repeat(64);
+    expect((await fetcher(new Request("http://machine/live/events?since=0"))).status).toBe(200);
+    expect(scans).toBe(2);
+  });
+
+  test("/live/events compresses large responses when the phone accepts gzip", async () => {
+    const res = await createLiveFetch(deps())(
+      new Request("http://machine/live/events", { headers: { "accept-encoding": "gzip" } }),
+    );
+    expect(res.headers.get("content-encoding")).toBe("gzip");
+    const decoded = Bun.gunzipSync(new Uint8Array(await res.arrayBuffer()));
+    const body = JSON.parse(new TextDecoder().decode(decoded)) as { events: unknown[] };
+    expect(body.events).toHaveLength(2);
   });
 
   test("/live/events reports a missing exporter as 503, a pin mismatch as 500", async () => {
@@ -127,6 +180,19 @@ describe("live server", () => {
     );
     expect(mismatched.status).toBe(500);
     expect(((await mismatched.json()) as { error: string }).error).toContain("pin");
+  });
+
+  test("/live/events still enforces the exporter pin for an unchanged generation", async () => {
+    const fingerprint = "a".repeat(64);
+    const res = await createLiveFetch(
+      deps({
+        exporterCheck: async () => "0.0.1",
+        exporterFingerprint: async () => fingerprint,
+      }),
+    )(new Request(`http://machine/live/events?generation=${fingerprint}`));
+
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: string }).error).toContain("pin");
   });
 
   test("/live/events fails loudly on schema drift (D2), never serves unvalidated rows", async () => {
@@ -168,6 +234,43 @@ describe("live server", () => {
       metric: "5h",
       status: "ok",
     });
+  });
+
+  test("/live/quotas reuses a recent vendor response", async () => {
+    let now = Date.parse("2026-09-07T10:05:00.000Z");
+    let calls = 0;
+    const base = deps();
+    const fetcher = createLiveFetch({
+      ...base,
+      now: () => now,
+      usage: async (pin) => {
+        calls += 1;
+        return base.usage!(pin);
+      },
+    });
+
+    expect((await fetcher(new Request("http://machine/live/quotas"))).status).toBe(200);
+    now += 60_000;
+    expect((await fetcher(new Request("http://machine/live/quotas"))).status).toBe(200);
+    expect(calls).toBe(1);
+    now += 5 * 60_000;
+    expect((await fetcher(new Request("http://machine/live/quotas"))).status).toBe(200);
+    expect(calls).toBe(2);
+  });
+
+  test("/live/metrics samples machine vitals and filters its 24h ring", async () => {
+    const metricHistory = new SystemMetricHistory(async () => ({
+      capturedAtMs: Date.parse("2026-09-07T10:04:00.000Z"),
+      cpuLoadPct: 12, cpuTempC: 60, ramUsedPct: 44, ramTempC: 41,
+      gpuUtilPct: 72, gpuTempC: 68,
+    }), () => Date.parse("2026-09-07T10:05:00.000Z"));
+    const res = await createLiveFetch(deps({ metricHistory }))(
+      new Request("http://machine/live/metrics?since=0"),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { metrics: { ramTempC: number }[] };
+    expect(body.metrics).toHaveLength(1);
+    expect(body.metrics[0]?.ramTempC).toBe(41);
   });
 
   test("routing: unknown path 404, non-GET 405", async () => {

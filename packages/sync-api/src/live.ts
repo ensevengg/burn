@@ -1,4 +1,4 @@
-import type { IngestEventInput, IngestQuotaInput } from "./backend";
+import type { IngestEventInput, IngestMachineMetricInput, IngestQuotaInput } from "./backend";
 import type { OsKind } from "./types";
 
 /**
@@ -38,12 +38,19 @@ export interface LivePing {
 export interface LiveEventsPage {
   sinceMs: number | null;
   generatedAt: string;
+  /** Stable source generation; null for older reporters without fingerprinting. */
+  generation?: string | null;
   events: IngestEventInput[];
 }
 
 export interface LiveQuotasPage {
   generatedAt: string;
   quotas: IngestQuotaInput[];
+}
+
+export interface LiveMetricsPage {
+  generatedAt: string;
+  metrics: IngestMachineMetricInput[];
 }
 
 export interface LiveApi {
@@ -54,8 +61,13 @@ export interface LiveApi {
    * per-machine cursor; the cloud-mode live pull passes null and takes the
    * machine's tail.
    */
-  events(sinceMs: number | null, signal?: AbortSignal): Promise<LiveEventsPage>;
+  events(
+    sinceMs: number | null,
+    signal?: AbortSignal,
+    knownGeneration?: string | null,
+  ): Promise<LiveEventsPage>;
   quotas(signal?: AbortSignal): Promise<LiveQuotasPage>;
+  metrics?(sinceMs: number, signal?: AbortSignal): Promise<LiveMetricsPage>;
 }
 
 /** Re-send window shared by push, live pull, and direct mode: a message
@@ -111,9 +123,16 @@ export function httpLiveApiFor(baseUrl: string, fetchImpl: typeof fetch = fetch)
   }
   return {
     ping: (signal) => call<LivePing>("/ping", signal),
-    events: (sinceMs, signal) =>
-      call<LiveEventsPage>(sinceMs === null ? "/live/events" : `/live/events?since=${Math.floor(sinceMs)}`, signal),
+    events: (sinceMs, signal, knownGeneration) => {
+      const params = new URLSearchParams();
+      if (sinceMs !== null) params.set("since", String(Math.floor(sinceMs)));
+      if (knownGeneration) params.set("generation", knownGeneration);
+      const encoded = params.toString();
+      const query = encoded.length === 0 ? "" : `?${encoded}`;
+      return call<LiveEventsPage>(`/live/events${query}`, signal);
+    },
     quotas: (signal) => call<LiveQuotasPage>("/live/quotas", signal),
+    metrics: (sinceMs, signal) => call<LiveMetricsPage>(`/live/metrics?since=${Math.floor(sinceMs)}`, signal),
   };
 }
 
@@ -195,6 +214,7 @@ export function parseLiveEventsPage(raw: unknown): LiveEventsPage {
   return {
     sinceMs: orNullNumber(page.sinceMs),
     generatedAt: expectString(page.generatedAt, "generatedAt"),
+    generation: orNullString(page.generation),
     events,
   };
 }
@@ -227,4 +247,41 @@ export function parseLiveQuotasPage(raw: unknown): LiveQuotasPage {
     };
   });
   return { generatedAt: expectString(page.generatedAt, "generatedAt"), quotas };
+}
+
+function percent(value: unknown, where: string): number {
+  const number = expectNumber(value, where);
+  if (number < 0 || number > 100) throw new LiveError(`${where}: expected 0–100`);
+  return number;
+}
+
+function nullablePercent(value: unknown, where: string): number | null {
+  return value === null || value === undefined ? null : percent(value, where);
+}
+
+function nullableTemperature(value: unknown, where: string): number | null {
+  if (value === null || value === undefined) return null;
+  const number = expectNumber(value, where);
+  if (number < -50 || number > 200) throw new LiveError(`${where}: invalid temperature`);
+  return number;
+}
+
+/** Validate peer-provided vitals before they reach the phone mirror. */
+export function parseLiveMetricsPage(raw: unknown): LiveMetricsPage {
+  const page = expectObject(raw, "metrics page");
+  if (!Array.isArray(page.metrics)) throw new LiveError("metrics: expected an array");
+  const metrics = page.metrics.map((row, index) => {
+    const metric = expectObject(row, `metrics[${index}]`);
+    const where = (field: string): string => `metrics[${index}].${field}`;
+    return {
+      capturedAtMs: expectNumber(metric.capturedAtMs, where("capturedAtMs")),
+      cpuLoadPct: percent(metric.cpuLoadPct, where("cpuLoadPct")),
+      cpuTempC: nullableTemperature(metric.cpuTempC, where("cpuTempC")),
+      ramUsedPct: percent(metric.ramUsedPct, where("ramUsedPct")),
+      ramTempC: nullableTemperature(metric.ramTempC, where("ramTempC")),
+      gpuUtilPct: nullablePercent(metric.gpuUtilPct, where("gpuUtilPct")),
+      gpuTempC: nullableTemperature(metric.gpuTempC, where("gpuTempC")),
+    } satisfies IngestMachineMetricInput;
+  });
+  return { generatedAt: expectString(page.generatedAt, "generatedAt"), metrics };
 }

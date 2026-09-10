@@ -25,10 +25,18 @@ import {
   TokscaleError,
 } from "./tokscale.js";
 import { exportRowsToIngestInputs, parseEventsJsonl, planBatches, pushSinceMs } from "./events.js";
-import { assertExporterMatchesPin, ExporterError, exporterVersion, fetchEventsJsonl } from "./exporter.js";
+import {
+  assertExporterCapabilities,
+  assertExporterMatchesPin,
+  ExporterError,
+  exporterCapabilities,
+  exporterVersion,
+  fetchEventsJsonl,
+} from "./exporter.js";
 import { quotaAccountKey, quotaMetricLabel, TOKSCALE_PIN } from "@burn/sync-api";
 import { writeFileSync } from "node:fs";
 import { platform } from "node:os";
+import { collectSystemMetric } from "./system-metrics.js";
 
 // Shared with the live server (serve.ts) — re-exported for compatibility.
 export { REPORTER_VERSION, tokscaleQuotaInputs, currentUtcOffsetMinutes } from "./tokscale.js";
@@ -45,6 +53,7 @@ export function printConfigured(config: BurnConfig): void {
   console.log(`backend      ${config.supabaseUrl}`);
   console.log(`tokscale pin ${config.tokscalePin}`);
   console.log(`interval     every ${config.intervalMinutes} min`);
+  console.log(`eager poll   every ${config.syncPollSeconds} sec`);
 }
 
 // ── init ─────────────────────────────────────────────────────────────────────
@@ -54,7 +63,8 @@ export function runInit(args: Map<string, string>): void {
   if (missing.length > 0) {
     throw new Error(
       `init requires --url <supabase-url> --key <publishable-key> --slug <env-slug> --name <display-name>\n` +
-        `optional: --os <windows|wsl|linux|macos> --host-group <group> --tz <IANA zone>`,
+        `optional: --os <windows|wsl|linux|macos> --host-group <group> --tz <IANA zone> ` +
+        `--interval <minutes> --poll-seconds <seconds>`,
     );
   }
   const ingestToken = generateToken();
@@ -69,6 +79,7 @@ export function runInit(args: Map<string, string>): void {
     osKind: (args.get("os") ?? detectOsKind()) as BurnConfig["osKind"],
     reportingTimezone: args.get("tz") ?? "Asia/Kolkata",
     intervalMinutes: Number(args.get("interval") ?? 10),
+    syncPollSeconds: Number(args.get("poll-seconds") ?? 30),
     tokscalePin: args.get("tokscale-pin") ?? TOKSCALE_PIN,
   };
   saveConfig(config);
@@ -80,7 +91,7 @@ export function runInit(args: Map<string, string>): void {
   console.log(`\nconfig       ${configPath()}`);
   console.log("\nNext steps (one-time):");
   console.log(
-    `  1. Paste supabase/migrations/0001_schema.sql into your project's SQL editor, then 0002_api.sql.`,
+    `  1. Paste every numbered supabase/migrations/*.sql file into your project's SQL editor, in order.`,
   );
   console.log(`  2. Paste ${setupSqlPath()} into the SQL editor (registers this machine + your phone).`);
   console.log(
@@ -119,15 +130,18 @@ export async function runDoctor(): Promise<number> {
     detail: tokscale ? `reachable at pin ${config.tokscalePin}` : `npx tokscale@${config.tokscalePin} failed`,
   });
 
-  const exporter = await exporterVersion();
+  const [exporter, capabilities] = await Promise.all([exporterVersion(), exporterCapabilities()]);
+  const capabilitiesOk = capabilities !== null && capabilities.tokscaleVersion === config.tokscalePin && capabilities.capabilities.includes("fingerprint-v1");
   checks.push({
     name: "burn-events",
-    ok: exporter !== null && exporter === config.tokscalePin,
+    ok: exporter !== null && exporter === config.tokscalePin && capabilitiesOk,
     detail:
       exporter === null
         ? "exporter not found — cargo install --path crates/burn-events (or set BURN_EVENTS_BIN)"
-        : exporter === config.tokscalePin
-          ? `matches pin ${config.tokscalePin}`
+        : exporter === config.tokscalePin && capabilitiesOk
+          ? `matches pin ${config.tokscalePin}; fingerprint cache supported`
+          : exporter === config.tokscalePin
+            ? `version matches, but fingerprint capability is missing — rebuild: cargo install --path crates/burn-events`
           : `version ${exporter} ≠ pin ${config.tokscalePin} — rebuild: cargo install --path crates/burn-events`,
   });
 
@@ -256,14 +270,14 @@ export async function pushMachineData(
   config: BurnConfig,
   reporter: ReporterSyncApi,
   full = false,
-  sources: { events: typeof pushEvents; quotas: typeof fetchUsage } = {
+  sources: { events: typeof pushEvents; quotas: typeof fetchUsage; metrics?: typeof collectSystemMetric } = {
     events: pushEvents,
     quotas: fetchUsage,
   },
 ): Promise<number> {
   // Scheduled push is the reliability floor for both events and quotas.
   // Neither channel waits for the other, and either can succeed independently.
-  const results = await Promise.allSettled([
+  const jobs: Promise<void>[] = [
     (async () => {
       try {
         const outcome = await sources.events(config, reporter, { full });
@@ -287,7 +301,22 @@ export async function pushMachineData(
         throw err;
       }
     })(),
-  ]);
+  ];
+  // WSL is not a second physical machine. Its Windows host owns the hardware
+  // sensors and reports the one authoritative set of vitals.
+  if (config.osKind !== "wsl") {
+    jobs.push((async () => {
+      try {
+        const metric = await (sources.metrics ?? collectSystemMetric)();
+        const result = await reporter.pushMachineMetrics([metric]);
+        console.log(`push: ${result.samples} system metric sample(s)`);
+      } catch (err) {
+        await reporter.reportError(`metrics: ${(err as Error).message}`).catch(() => {});
+        throw err;
+      }
+    })());
+  }
+  const results = await Promise.allSettled(jobs);
   const failures = results.flatMap((result) => (result.status === "rejected" ? [String(result.reason)] : []));
   if (failures.length > 0) throw new Error(failures.join("; "));
   return 0;
@@ -312,6 +341,7 @@ export async function runDaemon(args: Map<string, string> = new Map()): Promise<
   let live: import("./serve.js").LiveServerHandle | null = null;
   if (!args.has("no-live") && liveUrl === null) {
     try {
+      assertExporterCapabilities(await exporterCapabilities(), config.tokscalePin);
       const { startLiveServer } = await import("./serve.js");
       live = await startLiveServer(config, liveOptions);
       liveUrl = live.url;
@@ -347,7 +377,7 @@ export async function runDaemon(args: Map<string, string> = new Map()): Promise<
   };
 
   console.log(
-    `[daemon] resident mode: polling sync_requests every 30s, scheduled push every ${config.intervalMinutes} min`,
+    `[daemon] resident mode: polling sync_requests every ${config.syncPollSeconds}s, scheduled push every ${config.intervalMinutes} min`,
   );
   await cycle("startup");
   let polling = false;
@@ -366,7 +396,7 @@ export async function runDaemon(args: Map<string, string> = new Map()): Promise<
         polling = false;
       }
     })();
-  }, 30_000);
+  }, config.syncPollSeconds * 1_000);
 
   await new Promise<never>(() => {
     process.on("SIGINT", () => {

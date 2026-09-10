@@ -1,4 +1,4 @@
-import type { DeltaPage, QuotaSnapshot, SyncRequestInfo } from "./types";
+import type { DeltaPage, MachineMetric, QuotaSnapshot, SyncRequestInfo } from "./types";
 
 /**
  * The backend contract (D3). The reporter and the phone depend on these
@@ -76,6 +76,16 @@ export interface IngestQuotaInput {
   sourceOffsetMinutes: number | null;
 }
 
+export interface IngestMachineMetricInput {
+  capturedAtMs: number;
+  cpuLoadPct: number;
+  cpuTempC: number | null;
+  ramUsedPct: number;
+  ramTempC: number | null;
+  gpuUtilPct: number | null;
+  gpuTempC: number | null;
+}
+
 export interface ReporterSyncApi {
   /** Prove the token + config work; refresh versions/heartbeat. */
   heartbeat(meta: ReporterMeta): Promise<{ environmentId: string; slug: string }>;
@@ -83,14 +93,16 @@ export interface ReporterSyncApi {
   reportError(error: string): Promise<void>;
   ingestEvents(events: IngestEventInput[]): Promise<{ revision: number; changed: number }>;
   pushQuotaSnapshots(snapshots: IngestQuotaInput[]): Promise<{ snapshots: number }>;
+  pushMachineMetrics(metrics: IngestMachineMetricInput[]): Promise<{ samples: number }>;
   /** Resident daemon poll (D1): pending phone-requested syncs. */
   pollSyncRequests(): Promise<{ requests: SyncRequestInfo[]; latestRevision: number }>;
 }
 
 export interface MobileSyncApi {
-  /** Revision-keyed delta: corrected old events propagate (D5). */
+  /** Database-global revision delta: corrected old events and every machine propagate (D5). */
   fetchDelta(sinceRevision: number, limit?: number): Promise<DeltaPage>;
   fetchQuotaLatest(): Promise<QuotaSnapshot[]>;
+  fetchMachineMetrics(sinceMs: number): Promise<MachineMetric[]>;
   /** Flip the rendezvous flag (D1); targets one environment or all. */
   requestSync(environmentId?: string): Promise<{ generation: number }>;
   /**

@@ -10,7 +10,7 @@ import {
   planBatches,
   pushSinceMs,
 } from "../src/events.js";
-import { assertExporterMatchesPin } from "../src/exporter.js";
+import { assertExporterCapabilities, assertExporterMatchesPin, parseExporterCapabilities } from "../src/exporter.js";
 import { ExporterError } from "../src/exporter.js";
 
 const fixtureText = readFileSync(join(import.meta.dir, "../fixtures/tokscale-events.jsonl"), "utf8");
@@ -131,6 +131,13 @@ describe("exporter pin guard", () => {
     expect(assertExporterMatchesPin("4.15.1", "4.15.1")).toBeUndefined();
     expect(() => assertExporterMatchesPin("4.14.0", "4.15.1")).toThrow(ExporterError);
     expect(() => assertExporterMatchesPin("4.14.0", "4.15.1")).toThrow(/cargo install/);
+  });
+
+  test("same-version stale binaries cannot silently disable the fast path", () => {
+    const parsed = parseExporterCapabilities('{"protocol":2,"tokscale_version":"4.15.1","capabilities":["fingerprint-v1"]}');
+    expect(parsed?.protocol).toBe(2);
+    expect(assertExporterCapabilities(parsed, "4.15.1")).toBeUndefined();
+    expect(() => assertExporterCapabilities(null, "4.15.1")).toThrow(/fingerprint-v1/);
   });
 
   test("exporter crate stays in lockstep with the tokscale pin (D2)", () => {

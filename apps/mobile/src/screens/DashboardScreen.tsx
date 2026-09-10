@@ -10,20 +10,13 @@ import { useTheme } from "../lib/theme-context";
 import { spacing, type } from "../theme";
 import { Card, Chip, Dot, Empty, MeterBar, SectionTitle, Segmented, Stat } from "../ui/primitives";
 import { AreaChart } from "../ui/charts";
+import { DASHBOARD_RANGES, USAGE_RANGES, type UsageRangeId } from "../lib/usage-range";
 
 type Metric = "cost" | "tokens";
-type WindowDays = 1 | 7 | 30 | 90;
 
 const METRICS = [
   { label: "Cost", value: "cost" },
   { label: "Tokens", value: "tokens" },
-] as const;
-
-const WINDOWS = [
-  { label: "Past 24h", value: "1" },
-  { label: "7 days", value: "7" },
-  { label: "30 days", value: "30" },
-  { label: "90 days", value: "90" },
 ] as const;
 
 export function DashboardScreen() {
@@ -31,16 +24,18 @@ export function DashboardScreen() {
   const { syncError, syncNotice, refreshingMachines, checkingMachines } = useSyncStatus();
   const { C } = useTheme();
   const [metric, setMetric] = useState<Metric>("cost");
-  const [days, setDays] = useState<WindowDays>(30);
+  const [rangeId, setRangeId] = useState<UsageRangeId>("30");
+  const range = USAGE_RANGES[rangeId];
+  const metricLabel = humanize(metric);
   const [demoRefreshing, setDemoRefreshing] = useState(false);
-  const overview = useWindowOverviewQuery(days);
-  const dailyMax = useGranularityMaxQuery("daily", metric);
+  const overview = useWindowOverviewQuery(range.days, metric, range.granularity);
+  const dailyMax = useGranularityMaxQuery(range.granularity, metric);
   const quotas = useQuotasQuery();
   const machines = useMachinesQuery();
   // Cloud pull-to-refresh is covered by the machine-refresh spinner (which
   // settles after the first pull); demo mode has no machines to ask, so the
   // gesture itself drives the spinner — heartbeat refetches must not blip it.
-  const refreshing = mode === "cloud" ? refreshingMachines : demoRefreshing;
+  const refreshing = mode === "demo" ? demoRefreshing : refreshingMachines;
 
   const totals = overview.data?.totals;
   const headlineValue =
@@ -52,7 +47,7 @@ export function DashboardScreen() {
 
   // Pull-to-refresh = request an eager push from every online machine (D1) + pull delta.
   const onRefresh = () => {
-    if (mode === "cloud") {
+    if (mode === "cloud" || mode === "direct") {
       void requestSync(null);
       return;
     }
@@ -68,13 +63,13 @@ export function DashboardScreen() {
       >
         <View style={styles.header}>
           <Text style={[type.title, { color: C.text }]}>Overview</Text>
-          <Chip tone={mode === "demo" ? "yellow" : mode === "cloud" ? "green" : "muted"}>
-            {mode === "demo" ? "demo data" : mode === "cloud" ? "live" : "not connected"}
+          <Chip tone={mode === "demo" ? "yellow" : mode === "cloud" || mode === "direct" ? "green" : "muted"}>
+            {mode === "demo" ? "demo data" : mode === "cloud" ? "cloud" : mode === "direct" ? "direct" : "not connected"}
           </Chip>
         </View>
 
         <Segmented options={METRICS} value={metric} onChange={setMetric} />
-        <Segmented options={WINDOWS} value={String(days)} onChange={(value) => setDays(Number(value) as WindowDays)} />
+        <Segmented options={DASHBOARD_RANGES} value={rangeId} onChange={setRangeId} />
 
         {overview.data !== undefined && overview.data.byClient.length > 0 ? (
           <View style={styles.providerRows}>
@@ -89,7 +84,7 @@ export function DashboardScreen() {
                     {`${client.sessions} sessions`}
                   </Text>
                   <Text style={[type.muted, { color: C.muted }]}>
-                    {`${formatPercent(share)} of ${metric} · ${formatTokens(client.tokens)}`}
+                    {`${formatPercent(share)} of ${metricLabel} · ${formatTokens(client.tokens)}`}
                   </Text>
                 </View>
               );
@@ -116,9 +111,9 @@ export function DashboardScreen() {
           </Card>
         )}
 
-        <SectionTitle trailing={`${metric} / day`}>Daily</SectionTitle>
+        <SectionTitle trailing={`${metricLabel} / ${range.granularity === "daily" ? "day" : range.granularity === "monthly" ? "month" : "year"}`}>Usage</SectionTitle>
         {overview.data === undefined || overview.data.series.length === 0 ? (
-          <Empty message={`No usage in the last ${days}d.`} />
+          <Empty message={`No usage in ${range.label.toLowerCase()}.`} />
         ) : (
           <Card>
             <AreaChart
@@ -177,13 +172,18 @@ export function DashboardScreen() {
                       {humanize(metricQuota.metric)}
                     </Text>
                     <Text style={[type.muted, { color: C.muted }]}>
-                      {metricQuota.usedPercent === null
+                      {metricQuota.remainingPercent === null
                         ? "—"
-                        : `${metricQuota.usedPercent.toFixed(0)}% used`}
+                        : `${metricQuota.remainingPercent.toFixed(0)}% remaining`}
                       {metricQuota.remainingLabel !== null ? ` · ${metricQuota.remainingLabel}` : ""}
                     </Text>
                   </View>
-                  {metricQuota.usedPercent !== null && <MeterBar usedPercent={metricQuota.usedPercent} />}
+                  {metricQuota.remainingPercent !== null && (
+                    <MeterBar
+                      percent={metricQuota.remainingPercent}
+                      tone={metricQuota.remainingPercent <= 15 ? C.err : C.text}
+                    />
+                  )}
                 </View>
               ))}
             </Card>

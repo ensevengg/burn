@@ -2,7 +2,7 @@
 
 > Token burn rate for AI devs — see every token you burn across every machine, from your phone.
 
-**burn** tracks AI coding-agent token usage — input, output, cache, cache hit rate, and dollar cost — across Windows, WSL, and Linux, with daily/monthly/yearly views, per-model and per-workspace drill-downs, and live subscription limits (Codex, Z.ai, …). It wraps [tokscale](https://github.com/junhoyeo/tokscale) for parsing (50+ clients), syncs through **your own** Supabase project, and ships as an Android app (Expo). No accounts, no hosted service, no telemetry.
+**burn** tracks AI coding-agent token usage and physical-machine RAM/GPU health across Windows and Linux, with daily/monthly/yearly views, per-model and per-workspace drill-downs, and live subscription limits (Codex, Z.ai, …). It wraps [tokscale](https://github.com/junhoyeo/tokscale) for parsing (50+ clients), syncs through **your own** Supabase project, and ships as an Android app (Expo). No accounts, no hosted service, no telemetry.
 
 ```
 machines (cron/daemon: tokscale → burn-report) ──push──▶ your Supabase ◀──read── phone (Expo)
@@ -16,9 +16,9 @@ machines (cron/daemon: tokscale → burn-report) ──push──▶ your Supaba
 |---|---|
 | `supabase/` | Schema + scoped-token RPCs (`burn_*`), demo seed. SQL contract verified end-to-end (RLS lockdown, idempotent ingest, revision propagation, quota dedup, rendezvous). |
 | `packages/sync-api` | Shared contract: types, `SyncApi` interfaces, upsert-key definitions, Supabase impl (the only supabase-js import in the repo). |
-| `apps/reporter` | `burn-report` CLI: `init` / `doctor` / `usage` / `push` / `daemon` all work against real tokscale — `push` reads versioned JSONL from the `crates/burn-events` exporter (D2 seam), schema-validates it, and batch-upserts per-message usage rows. |
+| `apps/reporter` | `burn-report` CLI: `init` / `doctor` / `usage` / `push` / `daemon` all work against real tokscale — it pushes usage, quotas, and best-effort RAM/GPU sensor samples. |
 | `crates/burn-events` | D2 export seam: a small pinned Rust binary calling `tokscale-core`'s unified-message pipeline, emitting priced `UnifiedMessage` records as JSONL. |
-| `apps/mobile` | All v1 screens: dashboard + limits, daily/monthly/yearly charts with model/agent stacking, cache breakdown + hit rate, cost view, machines, sessions/workspaces/models, settings. Runs on bundled demo data instantly; connects to a real backend via read token. |
+| `apps/mobile` | All v1 screens, including a Systems tab with 24-hour RAM/GPU vitals per physical machine. Runs on bundled demo data instantly; connects to a real backend via read token. |
 
 ## Demo quickstart
 

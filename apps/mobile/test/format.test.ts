@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { bucketKey, bucketLabel, formatCost, formatPercent, formatTokens } from "../src/lib/format";
+import { humanize } from "../src/lib/labels";
 
 // 2026-09-05 12:30 IST == 07:00 UTC. IST day buckets must not depend on the
 // device's timezone (D8) — that's the whole point of the explicit zone arg.
@@ -27,6 +28,10 @@ describe("bucketKey", () => {
 });
 
 describe("formatting", () => {
+  test("known OpenAI and current model ids preserve product casing", () => {
+    expect(humanize("openai-codex")).toBe("OpenAI Codex");
+    expect(humanize("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
+  });
   test("tokens compact", () => {
     expect(formatTokens(999)).toBe("999");
     expect(formatTokens(12_345)).toBe("12k");

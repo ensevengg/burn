@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { liveEventId, LiveUnreachableError } from "@burn/sync-api";
 import { mirrorFixture } from "./mirror-fixture";
 import { pullLiveFromMachines, type LivePullOptions } from "../src/lib/live";
-import { queryDailyTotals } from "../src/data/repository";
+import { queryWindowOverview } from "../src/data/repository";
+import { subscribeMirrorChanges } from "../src/lib/sync-state";
 import type { IngestEventInput, LiveApi, LiveEventsPage, LivePing } from "@burn/sync-api";
 
 function ingestRow(over: Partial<IngestEventInput> = {}): IngestEventInput {
@@ -232,12 +233,31 @@ describe("live pull merge", () => {
       dedupKey: "v1:codex:recent:1:1",
     });
     const api = apiForByEndpoint({ "http://127.0.0.1:8787": { page: page([recent]) } });
-    const before = await queryDailyTotals(fx.db, "Asia/Kolkata", 30);
-    expect(Object.keys(before.byKey)).toHaveLength(0);
+    const before = await queryWindowOverview(fx.db, "Asia/Kolkata", 30, "tokens");
+    expect(before.totals.messages).toBe(0);
     await pullLiveFromMachines(fx.db, { apiFor: api });
-    const after = await queryDailyTotals(fx.db, "Asia/Kolkata", 30);
-    expect(Object.keys(after.byKey).length).toBeGreaterThan(0);
-    expect(after.max).toBeGreaterThan(0);
+    const after = await queryWindowOverview(fx.db, "Asia/Kolkata", 30, "tokens");
+    expect(after.totals.messages).toBeGreaterThan(0);
+    expect(after.series.some((bucket) => bucket.tokens > 0)).toBe(true);
+  });
+
+  test("an identical live overlap does not announce another event change", async () => {
+    const fx = mirrorFixture();
+    await seedEnvironment(fx, { slug: "win" });
+    const api = apiForByEndpoint({
+      "http://127.0.0.1:8787": { page: page([ingestRow()]) },
+    });
+    const changes: string[] = [];
+    const unsubscribe = subscribeMirrorChanges((changedDb, kind) => {
+      if (changedDb === fx.db) changes.push(kind);
+    });
+    try {
+      await pullLiveFromMachines(fx.db, { apiFor: api });
+      await pullLiveFromMachines(fx.db, { apiFor: api });
+      expect(changes.filter((kind) => kind === "events")).toHaveLength(1);
+    } finally {
+      unsubscribe();
+    }
   });
 
   test("an aborted pull never commits", async () => {
@@ -252,35 +272,34 @@ describe("live pull merge", () => {
     expect(count!.n).toBe(0);
   });
 
-  test("a superseded probe is abandoned and the fresh probe proceeds", async () => {
+  test("concurrent live callers share one machine scan", async () => {
     const fx = mirrorFixture();
     await seedEnvironment(fx, { slug: "win" });
     let calls = 0;
+    let started!: () => void;
+    const scanStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const apiFor: LivePullOptions["apiFor"] = () => ({
-      ping: async (signal) => {
-        if (signal?.aborted) throw new LiveUnreachableError("aborted");
-        return ping();
-      },
-      events: async (_sinceMs: number | null, signal?: AbortSignal) => {
-        if (signal?.aborted) throw new LiveUnreachableError("aborted");
+      ping: async () => ping(),
+      events: async () => {
         calls += 1;
-        if (calls === 1) {
-          // The slow first probe is aborted by the superseding call; a real
-          // fetch would reject here. Resolve late with the slow page to prove
-          // the fresh probe doesn't wait on (or join) it.
-          await new Promise((r) => setTimeout(r, 50));
-          return page([ingestRow({ dedupKey: "v1:codex:slow:1:1", sessionId: "slow" })]);
-        }
-        return page([ingestRow({ dedupKey: "v1:codex:fast:1:1", sessionId: "fast" })]);
+        started();
+        await gate;
+        return page([ingestRow()]);
       },
     });
     const first = pullLiveFromMachines(fx.db, { apiFor });
-    await new Promise((r) => setTimeout(r, 10));
-    const second = await pullLiveFromMachines(fx.db, { apiFor });
-    expect(second[0]!.state).toBe("live");
-    const fastId = liveEventId("win", "codex", "v1:codex:fast:1:1");
-    const fast = await eventRow(fx, fastId);
-    expect(fast).not.toBeNull();
-    await first;
+    await scanStarted;
+    const second = pullLiveFromMachines(fx.db, { apiFor });
+    release();
+
+    expect(second).toBe(first);
+    await expect(first).resolves.toHaveLength(1);
+    expect(calls).toBe(1);
   });
 });

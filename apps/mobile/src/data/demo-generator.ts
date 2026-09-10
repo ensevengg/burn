@@ -69,6 +69,18 @@ export interface DemoDataset {
   quotas: DemoQuota[];
   /** USD per million tokens, per unique model — powers cache savings. */
   prices: Record<string, { input: number; output: number; cacheRead: number }>;
+  metrics: DemoMachineMetric[];
+}
+
+export interface DemoMachineMetric {
+  environmentSlug: string;
+  capturedAtMs: number;
+  cpuLoadPct: number;
+  cpuTempC: number | null;
+  ramUsedPct: number;
+  ramTempC: number | null;
+  gpuUtilPct: number | null;
+  gpuTempC: number | null;
 }
 
 const DAY = 86_400_000;
@@ -253,5 +265,28 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
     };
   }
 
-  return { now, environments: ENVIRONMENTS, events, quotas, prices };
+  const metrics: DemoMachineMetric[] = [];
+  for (const env of ENVIRONMENTS.filter((environment) => environment.osKind !== "wsl")) {
+    for (let sample = 47; sample >= 0; sample--) {
+      const capturedAtMs = now - sample * 30 * 60_000;
+      const phase = (47 - sample) / 5;
+      const desktop = env.osKind === "windows";
+      const ram = (desktop ? 58 : 50) + Math.sin(phase) * 7 + (rand() - 0.5) * 3;
+      const ramTemp = (desktop ? 43 : 45) + Math.sin(phase * 0.8) * 6 + (rand() - 0.5) * 2;
+      const gpu = (desktop ? 22 : 28) + Math.max(0, Math.sin(phase * 1.4)) * 50 + (rand() - 0.5) * 5;
+      const gpuTemp = (desktop ? 47 : 51) + Math.max(0, Math.sin(phase * 1.1)) * 20 + (rand() - 0.5) * 2;
+      metrics.push({
+        environmentSlug: env.slug,
+        capturedAtMs,
+        cpuLoadPct: Number((10 + rand() * 35).toFixed(1)),
+        cpuTempC: null,
+        ramUsedPct: Number(Math.min(100, Math.max(0, ram)).toFixed(1)),
+        ramTempC: Number(ramTemp.toFixed(1)),
+        gpuUtilPct: Number(Math.min(100, Math.max(0, gpu)).toFixed(1)),
+        gpuTempC: Number(gpuTemp.toFixed(1)),
+      });
+    }
+  }
+
+  return { now, environments: ENVIRONMENTS, events, quotas, prices, metrics };
 }
