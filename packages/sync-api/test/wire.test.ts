@@ -6,8 +6,8 @@ import {
   quotaMetricLabel,
   quotaMirrorRowKey,
 } from "../src/keys";
-import { parseEventRow, parseEnvironmentRow, parseQuotaRow } from "../src/supabase";
-import { httpLiveApiFor, parseLiveEventsPage } from "../src/live";
+import { parseEventRow, parseEnvironmentRow, parseMachineMetricRow, parseQuotaRow } from "../src/supabase";
+import { httpLiveApiFor, parseLiveEventsPage, parseLiveMetricsPage } from "../src/live";
 
 describe("keys", () => {
   test("event identity is server-side sha256 of slug|client|dedup_key", () => {
@@ -127,5 +127,22 @@ describe("wire parsing", () => {
     expect(q.usedPercent).toBeCloseTo(81.4);
     expect(q.remainingPercent).toBeNull();
     expect(q.status).toBe("ok");
+  });
+
+  test("machine metrics validate live sensor ranges and map cloud timestamps", () => {
+    const live = parseLiveMetricsPage({
+      generatedAt: "2026-09-10T10:00:00.000Z",
+      metrics: [{ capturedAtMs: 123, cpuLoadPct: 10, cpuTempC: null, ramUsedPct: 55,
+        ramTempC: 42, gpuUtilPct: 80, gpuTempC: 70 }],
+    });
+    expect(live.metrics[0]?.ramTempC).toBe(42);
+    expect(() => parseLiveMetricsPage({ generatedAt: "x", metrics: [{
+      capturedAtMs: 1, cpuLoadPct: 101, ramUsedPct: 50,
+    }] })).toThrow("0–100");
+    expect(parseMachineMetricRow({
+      id: "m1", environment_id: "windows", captured_at: "2026-09-10T10:00:00.000Z",
+      cpu_load_pct: "10.2", cpu_temp_c: null, ram_used_pct: "55.5", ram_temp_c: "42.1",
+      gpu_util_pct: "80", gpu_temp_c: "70", revision: 4,
+    })).toMatchObject({ capturedAtMs: Date.parse("2026-09-10T10:00:00.000Z"), ramTempC: 42.1 });
   });
 });

@@ -160,6 +160,11 @@ export function liveEventId(environmentSlug: string, client: string, dedupKey: s
   return sha256HexUtf8(`${environmentSlug}|${normalizedClient}|${dedupKey}`);
 }
 
+/** Same identity recipe used by burn_push_machine_metrics in migration 0009. */
+export function machineMetricId(environmentId: string, capturedAtMs: number): string {
+  return sha256HexUtf8(`${environmentId}|${Math.floor(capturedAtMs)}`);
+}
+
 /** Quota account key: stable per provider account. Falls back safely. */
 export function quotaAccountKey(providerAccountId: string | null | undefined): string {
   const trimmed = providerAccountId?.trim();

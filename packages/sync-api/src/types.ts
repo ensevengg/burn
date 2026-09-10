@@ -99,3 +99,17 @@ export interface SyncRequestInfo {
   requestedAt: string;
   targetEnvironmentId: string | null;
 }
+
+/** One reporter-collected sample of the physical machine's vitals. */
+export interface MachineMetric {
+  id: string;
+  environmentId: string;
+  capturedAtMs: number;
+  cpuLoadPct: number;
+  cpuTempC: number | null;
+  ramUsedPct: number;
+  ramTempC: number | null;
+  gpuUtilPct: number | null;
+  gpuTempC: number | null;
+  revision: number;
+}

@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type {
   IngestEventInput,
+  IngestMachineMetricInput,
   IngestQuotaInput,
   MobileSyncApi,
   BurnBackendConfig,
@@ -10,6 +11,7 @@ import type {
 import type {
   DeltaPage,
   EnvironmentInfo,
+  MachineMetric,
   OsKind,
   QuotaSnapshot,
   SyncRequestInfo,
@@ -130,6 +132,21 @@ export function parseQuotaRow(raw: any): QuotaSnapshot {
   };
 }
 
+export function parseMachineMetricRow(raw: any): MachineMetric {
+  return {
+    id: String(raw.id),
+    environmentId: String(raw.environment_id),
+    capturedAtMs: isoToMs(raw.captured_at),
+    cpuLoadPct: Number(raw.cpu_load_pct),
+    cpuTempC: orNull(raw.cpu_temp_c) === null ? null : Number(raw.cpu_temp_c),
+    ramUsedPct: Number(raw.ram_used_pct),
+    ramTempC: orNull(raw.ram_temp_c) === null ? null : Number(raw.ram_temp_c),
+    gpuUtilPct: orNull(raw.gpu_util_pct) === null ? null : Number(raw.gpu_util_pct),
+    gpuTempC: orNull(raw.gpu_temp_c) === null ? null : Number(raw.gpu_temp_c),
+    revision: Number(raw.revision ?? 0),
+  };
+}
+
 function eventToWire(e: IngestEventInput): Record<string, unknown> {
   return {
     client: e.client,
@@ -178,6 +195,18 @@ function quotaToWire(q: IngestQuotaInput): Record<string, unknown> {
     error: q.error,
     source_offset_minutes: q.sourceOffsetMinutes,
     export_schema: 1,
+  };
+}
+
+function metricToWire(metric: IngestMachineMetricInput): Record<string, unknown> {
+  return {
+    captured_at_ms: metric.capturedAtMs,
+    cpu_load_pct: metric.cpuLoadPct,
+    cpu_temp_c: metric.cpuTempC,
+    ram_used_pct: metric.ramUsedPct,
+    ram_temp_c: metric.ramTempC,
+    gpu_util_pct: metric.gpuUtilPct,
+    gpu_temp_c: metric.gpuTempC,
   };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -242,6 +271,15 @@ export function createBurnBackend(config: BurnBackendConfig): BurnBackend {
           return { snapshots: Number(out.snapshots) };
         },
 
+        async pushMachineMetrics(metrics: IngestMachineMetricInput[]) {
+          if (metrics.length === 0) return { samples: 0 };
+          const out = await rpc<{ samples: number }>("burn_push_machine_metrics", {
+            p_ingest_token: token,
+            p_metrics: metrics.map(metricToWire),
+          });
+          return { samples: Number(out.samples) };
+        },
+
         async pollSyncRequests() {
           const out = await rpc<{ requests: unknown[]; latest_revision: number }>(
             "burn_poll_sync_requests",
@@ -284,6 +322,14 @@ export function createBurnBackend(config: BurnBackendConfig): BurnBackend {
         async fetchQuotaLatest(): Promise<QuotaSnapshot[]> {
           const out = await rpc<unknown[]>("burn_fetch_quota_latest", { p_read_token: token });
           return (out ?? []).map(parseQuotaRow);
+        },
+
+        async fetchMachineMetrics(sinceMs: number): Promise<MachineMetric[]> {
+          const out = await rpc<unknown[]>("burn_fetch_machine_metrics", {
+            p_read_token: token,
+            p_since: new Date(sinceMs).toISOString(),
+          });
+          return (out ?? []).map(parseMachineMetricRow);
         },
 
         async requestSync(environmentId?: string) {

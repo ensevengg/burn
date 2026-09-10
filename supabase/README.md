@@ -8,7 +8,7 @@ Your project is the only place your data lives. Setup is three pastes and one
 1. Create a project at [supabase.com](https://supabase.com) (free tier is ample).
 2. Open **SQL Editor** and run every numbered file in `migrations/`, in order.
    Existing installs must also apply new migrations; `0008` introduces the
-   database-global cursor required for complete multi-machine cloud sync.
+   global cursor and `0009` adds physical-machine health samples.
 3. On a machine you control: `npx burn-report init --url <project-url> --key <publishable-key> --slug cachyos --name "CachyOS"`
    It writes `~/.config/burn/config.json` + `~/.config/burn/setup-tokens.sql`.
    Paste that SQL into the editor too (registers the machine and your phone).
