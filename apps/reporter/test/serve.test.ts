@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { BurnConfig } from "../src/config.js";
 import { createLiveFetch, type LiveDeps } from "../src/serve.js";
+import { SystemMetricHistory } from "../src/system-metrics.js";
 
 const CONFIG: BurnConfig = {
   supabaseUrl: "https://example.supabase.co",
@@ -255,6 +256,21 @@ describe("live server", () => {
     now += 5 * 60_000;
     expect((await fetcher(new Request("http://machine/live/quotas"))).status).toBe(200);
     expect(calls).toBe(2);
+  });
+
+  test("/live/metrics samples machine vitals and filters its 24h ring", async () => {
+    const metricHistory = new SystemMetricHistory(async () => ({
+      capturedAtMs: Date.parse("2026-09-07T10:04:00.000Z"),
+      cpuLoadPct: 12, cpuTempC: 60, ramUsedPct: 44, ramTempC: 41,
+      gpuUtilPct: 72, gpuTempC: 68,
+    }), () => Date.parse("2026-09-07T10:05:00.000Z"));
+    const res = await createLiveFetch(deps({ metricHistory }))(
+      new Request("http://machine/live/metrics?since=0"),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { metrics: { ramTempC: number }[] };
+    expect(body.metrics).toHaveLength(1);
+    expect(body.metrics[0]?.ramTempC).toBe(41);
   });
 
   test("routing: unknown path 404, non-GET 405", async () => {

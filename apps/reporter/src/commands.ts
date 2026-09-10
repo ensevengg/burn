@@ -36,6 +36,7 @@ import {
 import { quotaAccountKey, quotaMetricLabel, TOKSCALE_PIN } from "@burn/sync-api";
 import { writeFileSync } from "node:fs";
 import { platform } from "node:os";
+import { collectSystemMetric } from "./system-metrics.js";
 
 // Shared with the live server (serve.ts) — re-exported for compatibility.
 export { REPORTER_VERSION, tokscaleQuotaInputs, currentUtcOffsetMinutes } from "./tokscale.js";
@@ -269,14 +270,14 @@ export async function pushMachineData(
   config: BurnConfig,
   reporter: ReporterSyncApi,
   full = false,
-  sources: { events: typeof pushEvents; quotas: typeof fetchUsage } = {
+  sources: { events: typeof pushEvents; quotas: typeof fetchUsage; metrics?: typeof collectSystemMetric } = {
     events: pushEvents,
     quotas: fetchUsage,
   },
 ): Promise<number> {
   // Scheduled push is the reliability floor for both events and quotas.
   // Neither channel waits for the other, and either can succeed independently.
-  const results = await Promise.allSettled([
+  const jobs: Promise<void>[] = [
     (async () => {
       try {
         const outcome = await sources.events(config, reporter, { full });
@@ -300,7 +301,22 @@ export async function pushMachineData(
         throw err;
       }
     })(),
-  ]);
+  ];
+  // WSL is not a second physical machine. Its Windows host owns the hardware
+  // sensors and reports the one authoritative set of vitals.
+  if (config.osKind !== "wsl") {
+    jobs.push((async () => {
+      try {
+        const metric = await (sources.metrics ?? collectSystemMetric)();
+        const result = await reporter.pushMachineMetrics([metric]);
+        console.log(`push: ${result.samples} system metric sample(s)`);
+      } catch (err) {
+        await reporter.reportError(`metrics: ${(err as Error).message}`).catch(() => {});
+        throw err;
+      }
+    })());
+  }
+  const results = await Promise.allSettled(jobs);
   const failures = results.flatMap((result) => (result.status === "rejected" ? [String(result.reason)] : []));
   if (failures.length > 0) throw new Error(failures.join("; "));
   return 0;

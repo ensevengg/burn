@@ -33,6 +33,7 @@ import {
   fetchEventsJsonl,
 } from "./exporter.js";
 import { fetchUsage, spawnRunner, TokscaleError, tokscaleQuotaInputs, REPORTER_VERSION } from "./tokscale.js";
+import { SystemMetricHistory } from "./system-metrics.js";
 
 export interface LiveDeps {
   config: BurnConfig;
@@ -42,6 +43,7 @@ export interface LiveDeps {
   exporterCheck?: () => Promise<string | null>;
   exporterFingerprint?: () => Promise<string | null>;
   usage?: (pin: string) => Promise<unknown>;
+  metricHistory?: SystemMetricHistory;
 }
 
 export interface LiveServerHandle {
@@ -106,6 +108,7 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
   let fingerprintInFlight: Promise<string | null> | null = null;
   let quotaCache: { expiresAt: number; page: { generatedAt: string; quotas: IngestQuotaInput[] } } | null = null;
   let quotaInFlight: Promise<{ generatedAt: string; quotas: IngestQuotaInput[] }> | null = null;
+  const metricHistory = deps.metricHistory ?? new SystemMetricHistory();
 
   const pingPayload = () => {
     const cursor = (deps.cursor ?? loadCursor)();
@@ -277,6 +280,18 @@ export function createLiveFetch(deps: LiveDeps): (req: Request) => Promise<Respo
       case "/live/quotas": {
         try {
           return jsonResponse(await loadQuotas());
+        } catch (err) {
+          return jsonResponse({ error: errorText(err) }, 500);
+        }
+      }
+      case "/live/metrics": {
+        try {
+          const requested = Number(new URL(req.url).searchParams.get("since") ?? 0);
+          const sinceMs = Number.isFinite(requested) && requested >= 0 ? Math.floor(requested) : 0;
+          return jsonResponse({
+            generatedAt: new Date(now()).toISOString(),
+            metrics: deps.config.osKind === "wsl" ? [] : await metricHistory.since(sinceMs),
+          });
         } catch (err) {
           return jsonResponse({ error: errorText(err) }, 500);
         }

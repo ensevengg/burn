@@ -22,6 +22,7 @@ test("machine push uploads quotas while the event exporter is slow or failing", 
       uploaded();
       return { snapshots: rows.length };
     },
+    pushMachineMetrics: async (rows) => ({ samples: rows.length }),
     pollSyncRequests: async () => ({ requests: [], latestRevision: 0 }),
   };
   const config = configSchema.parse({
@@ -45,6 +46,15 @@ test("machine push uploads quotas while the event exporter is slow or failing", 
           metrics: [{ label: "Weekly", used_percent: 50, remaining_percent: 50 }],
         },
       ]),
+    metrics: async () => ({
+      capturedAtMs: 1,
+      cpuLoadPct: 10,
+      cpuTempC: null,
+      ramUsedPct: 50,
+      ramTempC: null,
+      gpuUtilPct: null,
+      gpuTempC: null,
+    }),
   });
   const rejection = pending.then(
     () => null,
@@ -56,4 +66,33 @@ test("machine push uploads quotas while the event exporter is slow or failing", 
     release();
   }
   expect((await rejection)?.message).toContain("exporter unavailable");
+});
+
+test("machine push uploads one system-health sample", async () => {
+  let samples = 0;
+  const reporter: ReporterSyncApi = {
+    heartbeat: async () => ({ environmentId: "windows", slug: "windows" }),
+    reportError: async () => {},
+    ingestEvents: async () => ({ revision: 0, changed: 0 }),
+    pushQuotaSnapshots: async () => ({ snapshots: 0 }),
+    pushMachineMetrics: async (rows) => { samples += rows.length; return { samples: rows.length }; },
+    pollSyncRequests: async () => ({ requests: [], latestRevision: 0 }),
+  };
+  const config = configSchema.parse({
+    supabaseUrl: "https://example.invalid", publishableKey: "test-public-key", ingestToken: "x".repeat(32),
+    environmentSlug: "windows", environmentName: "Windows", osKind: "windows", tokscalePin: TOKSCALE_PIN,
+  });
+  await pushMachineData(config, reporter, false, {
+    events: async () => ({ rows: 0, changed: 0, revision: 0, batches: 0 }),
+    quotas: async () => [],
+    metrics: async () => ({ capturedAtMs: 1, cpuLoadPct: 1, cpuTempC: null,
+      ramUsedPct: 50, ramTempC: 40, gpuUtilPct: 10, gpuTempC: 50 }),
+  });
+  expect(samples).toBe(1);
+  await pushMachineData({ ...config, osKind: "wsl" }, reporter, false, {
+    events: async () => ({ rows: 0, changed: 0, revision: 0, batches: 0 }),
+    quotas: async () => [],
+    metrics: async () => { throw new Error("WSL must not sample hardware"); },
+  });
+  expect(samples).toBe(1);
 });
