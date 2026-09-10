@@ -42,7 +42,7 @@ idempotent merges. The Supabase path remains fully functional and untouched
   startup; `--live-url` for a `tailscale serve` HTTPS URL). Adding validates
   with `/ping` and refuses a slug already present. QR onboarding is a
   deferral.
-- Removal deletes the local rows (env + events + quotas + cursor) — nothing
+- Removal deletes the local rows (env + events + quotas + machine metrics + cursor) — nothing
   server-side exists to cascade.
 
 ### Pull driver
@@ -63,6 +63,9 @@ idempotent merges. The Supabase path remains fully functional and untouched
   row keys, idempotent upserts (no wholesale table replace, which is a
   cloud-path-only hazard). ADR 0001's live-quota deferral was about the
   cloud pull's delete-all semantics; direct mode doesn't have that problem.
+- **Physical-machine metrics follow the same path** — `/live/metrics` carries
+  RAM/GPU usage and temperatures into the local mirror. WSL does not sample or
+  render a duplicate machine because the Windows reporter owns those sensors.
 - **Unchanged sources are cheap** — `burn-events --fingerprint` hashes the
   exact tokscale scanner result's path/size/mtime evidence (including SQLite
   WALs), pricing/settings metadata, parser pin, and machine timezone. The
