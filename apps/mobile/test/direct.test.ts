@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { LIVE_OVERLAP_MS, liveEventId, LiveUnreachableError, type IngestEventInput, type LiveApi, type LiveEventsPage, type LiveMetricsPage, type LivePing } from "@burn/sync-api";
 import { mirrorFixture } from "./mirror-fixture";
 import { subscribeMirrorChanges } from "../src/lib/sync-state";
-import { queryEnvironments, querySystems } from "../src/data/repository";
+import { queryEnvironments, querySystems, queryWindowOverview } from "../src/data/repository";
 import {
   addDirectMachine,
   directEnvId,
@@ -171,6 +171,55 @@ describe("direct mode registry", () => {
 });
 
 describe("direct pull", () => {
+  test("combines cost and every token bucket across direct machines", async () => {
+    const fx = mirrorFixture();
+    const apiFor = directApiFor({
+      "http://win:8787": {
+        ping: ping({ slug: "win", displayName: "Windows" }),
+        seenSince: [],
+        seenPingSignal: null,
+        page: {
+          sinceMs: 0,
+          generatedAt: "2026-09-10T10:00:00.000Z",
+          events: [ingestRow()],
+        },
+      },
+      "http://cachyos:8787": {
+        ping: ping({ slug: "cachyos", displayName: "CachyOS", osKind: "linux" }),
+        seenSince: [],
+        seenPingSignal: null,
+        page: {
+          sinceMs: 0,
+          generatedAt: "2026-09-10T10:00:00.000Z",
+          events: [ingestRow({
+            inputTokens: 20,
+            outputTokens: 4,
+            cacheReadTokens: 6,
+            cacheWriteTokens: 8,
+            reasoningTokens: 10,
+            cost: "0.000246",
+          })],
+        },
+      },
+    });
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor });
+    await addDirectMachine(fx.db, "http://cachyos:8787", { apiFor });
+
+    await pullDirectFromMachines(fx.db, { apiFor });
+
+    const { totals } = await queryWindowOverview(fx.db, "UTC", null, "tokens", "yearly");
+    expect(totals).toMatchObject({
+      inputTokens: 30,
+      outputTokens: 6,
+      cacheReadTokens: 6,
+      cacheWriteTokens: 8,
+      reasoningTokens: 10,
+      messages: 2,
+    });
+    expect(totals.cost).toBeCloseTo(0.000369, 9);
+    fx.native.close();
+  });
+
   test("merges live machine vitals for the Systems screen", async () => {
     const fx = mirrorFixture();
     const entry: FakeEntry = {
