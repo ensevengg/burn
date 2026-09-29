@@ -1,4 +1,9 @@
-import type { DeltaPage, QuotaSnapshot, SyncRequestInfo } from "./types";
+import type {
+  DeltaCursors,
+  DeltaPage,
+  QuotaSnapshot,
+  SyncRequestInfo,
+} from "./types";
 
 /**
  * The backend contract (D3). The reporter and the phone depend on these
@@ -12,6 +17,8 @@ export interface BurnBackendConfig {
   url: string;
   /** Publishable (anon) key — public by design; scoping comes from tokens. */
   publishableKey: string;
+  requestTimeoutMs?: number;
+  fetchImpl?: typeof fetch;
 }
 
 export interface ReporterMeta {
@@ -60,6 +67,8 @@ export interface IngestEventInput {
 }
 
 export interface IngestQuotaInput {
+  /** Source collection time makes cached snapshots and retries idempotent. */
+  fetchedAt?: string;
   provider: string;
   accountKey: string;
   accountLabel: string | null;
@@ -78,19 +87,36 @@ export interface IngestQuotaInput {
 
 export interface ReporterSyncApi {
   /** Prove the token + config work; refresh versions/heartbeat. */
-  heartbeat(meta: ReporterMeta): Promise<{ environmentId: string; slug: string }>;
-  /** Record a failure for the machine card. Never throws. */
-  reportError(error: string): Promise<void>;
-  ingestEvents(events: IngestEventInput[]): Promise<{ revision: number; changed: number }>;
-  pushQuotaSnapshots(snapshots: IngestQuotaInput[]): Promise<{ snapshots: number }>;
+  heartbeat(
+    meta: ReporterMeta,
+  ): Promise<{ environmentId: string; slug: string }>;
+  /** Record a channel failure for the machine card. Callers handle reporting outages. */
+  reportError(
+    error: string,
+    channel?: "events" | "quotas" | "heartbeat",
+  ): Promise<void>;
+  ingestEvents(
+    events: IngestEventInput[],
+  ): Promise<{ revision: number; changed: number }>;
+  pushQuotaSnapshots(
+    snapshots: IngestQuotaInput[],
+  ): Promise<{ snapshots: number }>;
+  completeSyncRequests?(generations: number[], success: boolean): Promise<void>;
   /** Resident daemon poll (D1): pending phone-requested syncs. */
-  pollSyncRequests(): Promise<{ requests: SyncRequestInfo[]; latestRevision: number }>;
+  pollSyncRequests(): Promise<{
+    requests: SyncRequestInfo[];
+    latestRevision: number;
+  }>;
 }
 
 export interface MobileSyncApi {
   /** Revision-keyed delta: corrected old events propagate (D5). */
-  fetchDelta(sinceRevision: number, limit?: number): Promise<DeltaPage>;
-  fetchQuotaLatest(): Promise<QuotaSnapshot[]>;
+  fetchDelta(
+    sinceRevision: number | DeltaCursors,
+    limit?: number,
+    signal?: AbortSignal,
+  ): Promise<DeltaPage>;
+  fetchQuotaLatest(signal?: AbortSignal): Promise<QuotaSnapshot[]>;
   /** Flip the rendezvous flag (D1); targets one environment or all. */
   requestSync(environmentId?: string): Promise<{ generation: number }>;
   /**

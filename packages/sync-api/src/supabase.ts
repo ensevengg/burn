@@ -1,3 +1,16 @@
+import {
+  object,
+  identity,
+  nullableString,
+  integer,
+  timestamp,
+  nullableTimestamp,
+  decimal,
+  boolean,
+  choice,
+  nullableObject,
+  nullableNumber,
+} from "./validation";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type {
   IngestEventInput,
@@ -8,6 +21,7 @@ import type {
   ReporterSyncApi,
 } from "./backend";
 import type {
+  DeltaCursors,
   DeltaPage,
   EnvironmentInfo,
   OsKind,
@@ -38,95 +52,129 @@ function fail(scope: string, error: { message: string } | null): never {
 }
 
 function isoToMs(value: unknown): number {
-  if (typeof value !== "string") return 0;
-  const ms = Date.parse(value);
-  return Number.isNaN(ms) ? 0 : ms;
+  return Date.parse(timestamp(value, "occurred_at"));
 }
 
 function numToCostString(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (typeof value === "number" && Number.isFinite(value)) return value.toFixed(6);
-  return "0.000000";
+  if (typeof value === "string") return decimal(value, "cost");
+  if (typeof value === "number" && Number.isFinite(value))
+    return value.toFixed(6);
+  if (value === undefined) return "0.000000";
+  throw new BurnBackendError("Invalid cost");
 }
 
 function orNull<T>(value: T | null | undefined): T | null {
   return value === null || value === undefined ? null : value;
 }
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-export function parseEnvironmentRow(raw: any): EnvironmentInfo {
+export function parseEnvironmentRow(value: unknown): EnvironmentInfo {
+  const raw = object(value, "parseEnvironmentRow");
   return {
-    id: String(raw.id),
-    slug: String(raw.slug),
-    displayName: String(raw.display_name),
-    hostGroup: orNull(raw.host_group),
-    osKind: (raw.os_kind ?? "linux") as OsKind,
-    reporterVersion: orNull(raw.reporter_version),
-    tokscaleVersion: orNull(raw.tokscale_version),
-    exportSchema: orNull(raw.export_schema),
-    reportingTimezone: orNull(raw.reporting_timezone),
-    lastHeartbeatAt: orNull(raw.last_heartbeat_at),
-    lastSuccessAt: orNull(raw.last_success_at),
-    lastError: orNull(raw.last_error),
-    latestRevision: Number(raw.latest_revision ?? 0),
-    liveEndpoint: orNull(raw.live_endpoint),
+    id: identity(raw.id, "id"),
+    slug: identity(raw.slug, "slug"),
+    displayName: identity(raw.display_name, "display_name"),
+    hostGroup: nullableString(raw.host_group, "host_group"),
+    osKind: choice(
+      raw.os_kind ?? "linux",
+      ["windows", "wsl", "linux", "macos"],
+      "os_kind",
+    ),
+    reporterVersion: nullableString(raw.reporter_version, "reporter_version"),
+    tokscaleVersion: nullableString(raw.tokscale_version, "tokscale_version"),
+    exportSchema: nullableNumber(raw.export_schema, "export_schema"),
+    reportingTimezone: nullableString(
+      raw.reporting_timezone,
+      "reporting_timezone",
+    ),
+    lastHeartbeatAt: nullableTimestamp(
+      raw.last_heartbeat_at,
+      "last_heartbeat_at",
+    ),
+    lastSuccessAt: nullableTimestamp(raw.last_success_at, "last_success_at"),
+    lastError: nullableString(raw.last_error, "last_error"),
+    latestRevision: integer(raw.latest_revision ?? 0, "latest_revision"),
+    liveEndpoint: nullableString(raw.live_endpoint, "live_endpoint"),
   };
 }
 
-export function parseEventRow(raw: any): UsageEvent {
+export function parseEventRow(value: unknown): UsageEvent {
+  const raw = object(value, "parseEventRow");
   return {
-    eventId: String(raw.event_id),
-    environmentId: String(raw.environment_id),
-    client: String(raw.client),
-    providerId: String(raw.provider_id),
-    modelId: String(raw.model_id),
-    sessionId: String(raw.session_id),
-    sessionTitle: orNull(raw.session_title),
-    workspaceKey: orNull(raw.workspace_key),
-    workspaceLabel: orNull(raw.workspace_label),
-    agent: orNull(raw.agent),
+    eventId: identity(raw.event_id, "event_id"),
+    environmentId: identity(raw.environment_id, "environment_id"),
+    client: identity(raw.client, "client"),
+    providerId: identity(raw.provider_id, "provider_id"),
+    modelId: identity(raw.model_id, "model_id"),
+    sessionId: identity(raw.session_id, "session_id"),
+    sessionTitle: nullableString(raw.session_title, "session_title"),
+    workspaceKey: nullableString(raw.workspace_key, "workspace_key"),
+    workspaceLabel: nullableString(raw.workspace_label, "workspace_label"),
+    agent: nullableString(raw.agent, "agent"),
     occurredAtMs: isoToMs(raw.occurred_at),
-    sourceOffsetMinutes: orNull(raw.source_offset_minutes),
-    sourceTimezone: orNull(raw.source_timezone),
-    sourceLocalDate: orNull(raw.source_local_date),
-    inputTokens: Number(raw.input_tokens ?? 0),
-    outputTokens: Number(raw.output_tokens ?? 0),
-    cacheReadTokens: Number(raw.cache_read_tokens ?? 0),
-    cacheWriteTokens: Number(raw.cache_write_tokens ?? 0),
-    reasoningTokens: Number(raw.reasoning_tokens ?? 0),
-    messageCount: Number(raw.message_count ?? 1),
-    isTurnStart: Boolean(raw.is_turn_start),
-    durationMs: orNull(raw.duration_ms) === null ? null : Number(raw.duration_ms),
+    sourceOffsetMinutes: nullableNumber(
+      raw.source_offset_minutes,
+      "source_offset_minutes",
+    ),
+    sourceTimezone: nullableString(raw.source_timezone, "source_timezone"),
+    sourceLocalDate: nullableString(raw.source_local_date, "source_local_date"),
+    inputTokens: integer(raw.input_tokens ?? 0, "input_tokens"),
+    outputTokens: integer(raw.output_tokens ?? 0, "output_tokens"),
+    cacheReadTokens: integer(raw.cache_read_tokens ?? 0, "cache_read_tokens"),
+    cacheWriteTokens: integer(
+      raw.cache_write_tokens ?? 0,
+      "cache_write_tokens",
+    ),
+    reasoningTokens: integer(raw.reasoning_tokens ?? 0, "reasoning_tokens"),
+    messageCount: integer(raw.message_count ?? 1, "message_count"),
+    isTurnStart: boolean(raw.is_turn_start, "is_turn_start"),
+    durationMs:
+      orNull(raw.duration_ms) === null
+        ? null
+        : integer(raw.duration_ms, "duration_ms"),
     cost: numToCostString(raw.cost),
-    costSource: (raw.cost_source ?? "unknown") as UsageEvent["costSource"],
-    costIsComplete: Boolean(raw.cost_is_complete),
-    modelAttributionConflicted: Boolean(raw.model_attribution_conflicted),
-    parserVersion: String(raw.parser_version ?? "unknown"),
-    revision: Number(raw.revision ?? 0),
+    costSource: choice(
+      raw.cost_source ?? "unknown",
+      ["unknown", "provider_reported", "estimated"],
+      "cost_source",
+    ),
+    costIsComplete: boolean(raw.cost_is_complete, "cost_is_complete"),
+    modelAttributionConflicted: boolean(
+      raw.model_attribution_conflicted,
+      "model_attribution_conflicted",
+    ),
+    parserVersion: identity(raw.parser_version ?? "unknown", "parser_version"),
+    revision: integer(raw.revision ?? 0, "revision"),
   };
 }
 
-export function parseQuotaRow(raw: any): QuotaSnapshot {
+export function parseQuotaRow(value: unknown): QuotaSnapshot {
+  const raw = object(value, "parseQuotaRow");
   return {
-    environmentId: orNull(raw.environment_id),
-    provider: String(raw.provider),
-    accountKey: String(raw.account_key ?? "no-account"),
-    accountLabel: orNull(raw.account_label),
-    plan: orNull(raw.plan),
-    metric: String(raw.metric),
-    usedPercent: raw.used_percent === null || raw.used_percent === undefined ? null : Number(raw.used_percent),
+    environmentId: nullableString(raw.environment_id, "environment_id"),
+    provider: identity(raw.provider, "provider"),
+    accountKey: identity(raw.account_key ?? "no-account", "account_key"),
+    accountLabel: nullableString(raw.account_label, "account_label"),
+    plan: nullableString(raw.plan, "plan"),
+    metric: identity(raw.metric, "metric"),
+    usedPercent:
+      raw.used_percent === null || raw.used_percent === undefined
+        ? null
+        : nullableNumber(Number(raw.used_percent), "used_percent"),
     remainingPercent:
       raw.remaining_percent === null || raw.remaining_percent === undefined
         ? null
-        : Number(raw.remaining_percent),
-    remainingLabel: orNull(raw.remaining_label),
-    resetsAt: orNull(raw.resets_at),
-    creditStatus: orNull(raw.credit_status),
-    spendControl: orNull(raw.spend_control),
-    status: raw.status === "error" ? "error" : "ok",
-    error: orNull(raw.error),
-    fetchedAt: String(raw.fetched_at),
-    sourceOffsetMinutes: orNull(raw.source_offset_minutes),
+        : nullableNumber(Number(raw.remaining_percent), "remaining_percent"),
+    remainingLabel: nullableString(raw.remaining_label, "remaining_label"),
+    resetsAt: nullableTimestamp(raw.resets_at, "resets_at"),
+    creditStatus: nullableObject(raw.credit_status, "credit_status"),
+    spendControl: nullableObject(raw.spend_control, "spend_control"),
+    status: choice(raw.status ?? "ok", ["ok", "error"], "status"),
+    error: nullableString(raw.error, "error"),
+    fetchedAt: timestamp(raw.fetched_at, "fetched_at"),
+    sourceOffsetMinutes: nullableNumber(
+      raw.source_offset_minutes,
+      "source_offset_minutes",
+    ),
   };
 }
 
@@ -178,9 +226,9 @@ function quotaToWire(q: IngestQuotaInput): Record<string, unknown> {
     error: q.error,
     source_offset_minutes: q.sourceOffsetMinutes,
     export_schema: 1,
+    fetched_at: q.fetchedAt ?? new Date().toISOString(),
   };
 }
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 export interface BurnBackend {
   reporter(ingestToken: string): ReporterSyncApi;
@@ -188,15 +236,57 @@ export interface BurnBackend {
 }
 
 export function createBurnBackend(config: BurnBackendConfig): BurnBackend {
-  const client: SupabaseClient = createClient(config.url, config.publishableKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { "x-burn-schema": "1" } },
-  });
+  const client: SupabaseClient = createClient(
+    config.url,
+    config.publishableKey,
+    {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: {
+        headers: { "x-burn-schema": "1" },
+        ...(config.fetchImpl ? { fetch: config.fetchImpl } : {}),
+      },
+    },
+  );
 
-  async function rpc<T>(fn: string, params: Record<string, unknown>): Promise<T> {
-    const { data, error } = await client.rpc(fn, params);
-    if (error !== null) fail(fn, error);
-    return data as T;
+  async function rpc<T>(
+    fn: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
+    const timer = setTimeout(cancel, config.requestTimeoutMs ?? 30_000);
+    try {
+      const retryable =
+        fn.startsWith("burn_fetch_") ||
+        [
+          "burn_heartbeat",
+          "burn_ingest_events",
+          "burn_complete_sync_requests",
+          "burn_push_quota_snapshot",
+        ].includes(fn);
+      for (let attempt = 0; ; attempt++) {
+        const { data, error, status } = await client
+          .rpc(fn, params)
+          .abortSignal(controller.signal);
+        if (error === null) return data as T;
+        if (
+          !retryable ||
+          attempt >= 2 ||
+          controller.signal.aborted ||
+          !(status === 0 || status === 429 || status >= 500)
+        )
+          fail(fn, error);
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, 100 * 2 ** attempt + Math.random() * 50),
+        );
+      }
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
+    }
   }
 
   return {
@@ -212,47 +302,85 @@ export function createBurnBackend(config: BurnBackendConfig): BurnBackend {
           };
           // Undefined = "not my concern" — the server coalesce keeps whatever
           // the live-serving process last advertised.
-          if (meta.liveEndpoint !== undefined) meta_wire.live_endpoint = meta.liveEndpoint;
-          const out = await rpc<{ environment_id: string; slug: string }>("burn_heartbeat", {
-            p_ingest_token: token,
-            p_meta: meta_wire,
-          });
+          if (meta.liveEndpoint !== undefined)
+            meta_wire.live_endpoint = meta.liveEndpoint;
+          const out = await rpc<{ environment_id: string; slug: string }>(
+            "burn_heartbeat",
+            {
+              p_ingest_token: token,
+              p_meta: meta_wire,
+            },
+          );
           return { environmentId: out.environment_id, slug: out.slug };
         },
 
-        async reportError(error: string) {
-          await rpc("burn_report_error", { p_ingest_token: token, p_error: error });
+        async reportError(
+          error: string,
+          channel?: "events" | "quotas" | "heartbeat",
+        ) {
+          await rpc(
+            channel ? "burn_report_channel_error" : "burn_report_error",
+            {
+              p_ingest_token: token,
+              p_error: error,
+              ...(channel ? { p_channel: channel } : {}),
+            },
+          );
         },
 
         async ingestEvents(events: IngestEventInput[]) {
-          if (events.length === 0) return { revision: 0, changed: 0 };
-          const out = await rpc<{ revision: number; changed: number }>("burn_ingest_events", {
-            p_ingest_token: token,
-            p_events: events.map(eventToWire),
-          });
-          return { revision: Number(out.revision), changed: Number(out.changed) };
+          const out = await rpc<{ revision: number; changed: number }>(
+            "burn_ingest_events",
+            {
+              p_ingest_token: token,
+              p_events: events.map(eventToWire),
+            },
+          );
+          return {
+            revision: integer(out.revision, "revision"),
+            changed: integer(out.changed, "changed"),
+          };
         },
 
         async pushQuotaSnapshots(snapshots: IngestQuotaInput[]) {
           if (snapshots.length === 0) return { snapshots: 0 };
-          const out = await rpc<{ snapshots: number }>("burn_push_quota_snapshot", {
+          const out = await rpc<{ snapshots: number }>(
+            "burn_push_quota_snapshot",
+            {
+              p_ingest_token: token,
+              p_snapshots: snapshots.map(quotaToWire),
+            },
+          );
+          return { snapshots: integer(out.snapshots, "snapshots") };
+        },
+
+        async completeSyncRequests(generations: number[], success: boolean) {
+          await rpc("burn_complete_sync_requests", {
             p_ingest_token: token,
-            p_snapshots: snapshots.map(quotaToWire),
+            p_generations: generations,
+            p_success: success,
           });
-          return { snapshots: Number(out.snapshots) };
         },
 
         async pollSyncRequests() {
-          const out = await rpc<{ requests: unknown[]; latest_revision: number }>(
-            "burn_poll_sync_requests",
-            { p_ingest_token: token },
+          const out = await rpc<{
+            requests: unknown[];
+            latest_revision: number;
+          }>("burn_poll_sync_requests", { p_ingest_token: token });
+          const requests: SyncRequestInfo[] = (out.requests ?? []).map(
+            (value) => {
+              const r = object(value, "sync request");
+              return {
+                generation: integer(r.generation, "generation"),
+                requestedAt: timestamp(r.requested_at, "requested_at"),
+                targetEnvironmentId: nullableString(r.target_environment),
+              };
+            },
           );
-          const requests: SyncRequestInfo[] = (out.requests ?? []).map((r: any) => ({
-            generation: Number(r.generation),
-            requestedAt: String(r.requested_at),
-            targetEnvironmentId: orNull(r.target_environment),
-          }));
-          return { requests, latestRevision: Number(out.latest_revision ?? 0) };
+          return {
+            requests,
+            latestRevision: integer(out.latest_revision, "latest_revision"),
+          };
         },
       };
     },
@@ -260,27 +388,60 @@ export function createBurnBackend(config: BurnBackendConfig): BurnBackend {
     phone(readToken: string): MobileSyncApi {
       const token = readToken;
       return {
-        async fetchDelta(sinceRevision: number, limit?: number): Promise<DeltaPage> {
+        async fetchDelta(
+          sinceRevision: number | DeltaCursors,
+          limit?: number,
+          signal?: AbortSignal,
+        ): Promise<DeltaPage> {
+          const modern = typeof sinceRevision !== "number";
           const out = await rpc<{
+            protocol?: number;
             environments: unknown[];
             events: unknown[];
-            max_revision: number;
+            cursors?: DeltaCursors;
+            max_revision?: number;
             has_more: boolean;
-          }>("burn_fetch_delta", {
-            p_read_token: token,
-            p_since_revision: sinceRevision,
-            p_limit: limit ?? 5000,
-          });
+          }>(
+            modern ? "burn_fetch_delta_v2" : "burn_fetch_delta",
+            {
+              p_read_token: token,
+              ...(modern
+                ? { p_cursors: sinceRevision }
+                : { p_since_revision: sinceRevision }),
+              p_limit: limit ?? 1000,
+            },
+            signal,
+          );
+          if (modern && (out.protocol !== 2 || out.cursors === undefined)) {
+            throw new BurnBackendError(
+              "Invalid delta protocol; apply Supabase migrations through 0008",
+            );
+          }
+          const cursors = modern ? parseDeltaCursors(out.cursors) : undefined;
+          if (
+            !Array.isArray(out.environments) ||
+            !Array.isArray(out.events) ||
+            typeof out.has_more !== "boolean"
+          ) {
+            throw new BurnBackendError("Invalid delta envelope");
+          }
           return {
-            environments: (out.environments ?? []).map(parseEnvironmentRow),
-            events: (out.events ?? []).map(parseEventRow),
-            maxRevision: Number(out.max_revision ?? 0),
-            hasMore: Boolean(out.has_more),
+            environments: out.environments.map(parseEnvironmentRow),
+            events: out.events.map(parseEventRow),
+            ...(cursors ? { cursors } : {}),
+            maxRevision: modern
+              ? Math.max(0, ...Object.values(cursors!).map((c) => c.revision))
+              : Number(out.max_revision ?? 0),
+            hasMore: out.has_more,
           };
         },
 
-        async fetchQuotaLatest(): Promise<QuotaSnapshot[]> {
-          const out = await rpc<unknown[]>("burn_fetch_quota_latest", { p_read_token: token });
+        async fetchQuotaLatest(signal?: AbortSignal): Promise<QuotaSnapshot[]> {
+          const out = await rpc<unknown[]>(
+            "burn_fetch_quota_latest",
+            { p_read_token: token },
+            signal,
+          );
           return (out ?? []).map(parseQuotaRow);
         },
 
@@ -289,17 +450,46 @@ export function createBurnBackend(config: BurnBackendConfig): BurnBackend {
             p_read_token: token,
             p_environment: environmentId ?? null,
           });
-          return { generation: Number(out.generation) };
+          return { generation: integer(out.generation, "generation") };
         },
 
         async removeEnvironment(environmentId: string) {
-          const out = await rpc<{ removed: string }>("burn_remove_environment", {
-            p_read_token: token,
-            p_environment: environmentId,
-          });
+          const out = await rpc<{ removed: string }>(
+            "burn_remove_environment",
+            {
+              p_read_token: token,
+              p_environment: environmentId,
+            },
+          );
           return { removedSlug: String(out.removed) };
         },
       };
     },
   };
+}
+
+export function parseDeltaCursors(value: unknown): DeltaCursors {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new BurnBackendError("Invalid cursors");
+  const cursors: DeltaCursors = {};
+  for (const [envId, cursor] of Object.entries(value)) {
+    if (
+      typeof cursor !== "object" ||
+      cursor === null ||
+      !("revision" in cursor) ||
+      !("eventId" in cursor) ||
+      !Number.isSafeInteger(cursor.revision) ||
+      Number(cursor.revision) < 0 ||
+      typeof cursor.eventId !== "string"
+    ) {
+      throw new BurnBackendError("Invalid environment cursor");
+    }
+    Object.defineProperty(cursors, envId, {
+      value: { revision: Number(cursor.revision), eventId: cursor.eventId },
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return cursors;
 }

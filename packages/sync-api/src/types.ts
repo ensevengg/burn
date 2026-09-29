@@ -84,7 +84,15 @@ export interface QuotaSnapshot {
   sourceOffsetMinutes: number | null;
 }
 
+export interface EventCursor {
+  revision: number;
+  eventId: string;
+}
+export type DeltaCursors = Record<string, EventCursor>;
+
 export interface DeltaPage {
+  /** Present for protocol 2; revision/event-id continuation per environment. */
+  cursors?: DeltaCursors;
   environments: EnvironmentInfo[];
   events: UsageEvent[];
   /** Greatest revision present in `events`; the phone's next watermark. */

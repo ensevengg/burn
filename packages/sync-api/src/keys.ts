@@ -180,3 +180,15 @@ export function normalizeCostSource(raw: string | null | undefined): CostSource 
       return "unknown";
   }
 }
+
+/** Mirror snapshots retain last-success and last-error independently. Identity
+ * is environment/provider/account/metric/channel; collection time gates updates. */
+export function quotaMirrorKey(
+  environmentId: string | null,
+  provider: string,
+  account: string,
+  metric: string,
+  status: "ok" | "error",
+): string {
+  return JSON.stringify([environmentId, provider, account, metric, status]);
+}

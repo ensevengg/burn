@@ -1,3 +1,18 @@
+import {
+  object as expectObject,
+  string as expectString,
+  nullableString as orNullString,
+  number as expectNumber,
+  nullableNumber as orNullNumber,
+  decimal as expectDecimalString,
+  integer,
+  timestamp,
+  nullableTimestamp,
+  nullableObject,
+  boolean,
+  choice,
+  identity,
+} from "./validation";
 import type { IngestEventInput, IngestQuotaInput } from "./backend";
 import type { OsKind } from "./types";
 
@@ -19,6 +34,10 @@ import type { OsKind } from "./types";
  */
 
 export interface LivePing {
+  capabilities?: string[];
+  ready?: boolean;
+  scanAgeMs?: number | null;
+  eventCount?: number;
   /** Contract version — bump on breaking shape changes. */
   protocol: 1;
   slug: string;
@@ -36,6 +55,13 @@ export interface LivePing {
 }
 
 export interface LiveEventsPage {
+  slug?: string;
+  scanStartedAtMs?: number;
+  scanMs?: number;
+  snapshotId?: string;
+  contentHash?: string;
+  nextCursor?: string | null;
+  notModified?: boolean;
   sinceMs: number | null;
   generatedAt: string;
   events: IngestEventInput[];
@@ -46,6 +72,13 @@ export interface LiveQuotasPage {
   quotas: IngestQuotaInput[];
 }
 
+export interface LivePageRequest {
+  limit?: number;
+  cursor?: string;
+  knownHash?: string;
+  force?: boolean;
+}
+
 export interface LiveApi {
   ping(signal?: AbortSignal): Promise<LivePing>;
   /**
@@ -54,7 +87,11 @@ export interface LiveApi {
    * per-machine cursor; the cloud-mode live pull passes null and takes the
    * machine's tail.
    */
-  events(sinceMs: number | null, signal?: AbortSignal): Promise<LiveEventsPage>;
+  events(
+    sinceMs: number | null,
+    signal?: AbortSignal,
+    page?: LivePageRequest,
+  ): Promise<LiveEventsPage>;
   quotas(signal?: AbortSignal): Promise<LiveQuotasPage>;
 }
 
@@ -63,7 +100,10 @@ export interface LiveApi {
 export const LIVE_OVERLAP_MS = 60 * 60_000;
 
 export class LiveError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
     super(message);
     this.name = "LiveError";
   }
@@ -82,73 +122,83 @@ export class LiveUnreachableError extends LiveError {
  * `live_endpoint` — usually `http://<tailnet-ip>:8787` or a
  * `tailscale serve` HTTPS URL.
  */
-export function httpLiveApiFor(baseUrl: string, fetchImpl: typeof fetch = fetch): LiveApi {
+export function httpLiveApiFor(
+  baseUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): LiveApi {
   const base = baseUrl.replace(/\/+$/, "");
-  async function call<T>(path: string, signal?: AbortSignal): Promise<T> {
+  async function call(
+    path: string,
+    signal?: AbortSignal,
+    knownHash?: string,
+  ): Promise<unknown> {
     let response: Response;
     try {
-      const init: RequestInit = { headers: { accept: "application/json" } };
-      if (signal !== undefined) init.signal = signal;
-      response = await fetchImpl(`${base}${path}`, init);
+      const headers: Record<string, string> = {
+        accept: "application/json",
+        "accept-encoding": "gzip",
+      };
+      if (knownHash) headers["if-none-match"] = `"${knownHash}"`;
+      response = await fetchImpl(`${base}${path}`, {
+        headers,
+        ...(signal ? { signal } : {}),
+      });
     } catch (err) {
-      throw new LiveUnreachableError(`${base}${path}: ${(err as Error).message}`);
+      throw new LiveUnreachableError(
+        `${base}${path}: ${(err as Error).message}`,
+      );
     }
-    if (!response.ok) {
-      let detail = `HTTP ${response.status}`;
-      try {
-        const body = (await response.json()) as { error?: string };
-        if (body.error) detail = body.error;
-      } catch {
-        /* the status code is the message */
-      }
-      throw new LiveError(`${base}${path}: ${detail}`);
+    if (response.status === 304) {
+      return {
+        events: [],
+        sinceMs: null,
+        generatedAt: response.headers.get("x-generated-at"),
+        scanStartedAtMs: Number(response.headers.get("x-scan-started-at-ms")),
+        slug: response.headers.get("x-burn-slug"),
+        contentHash: response.headers.get("etag")?.replace(/^W\//, "").replaceAll('"', ""),
+        notModified: true,
+      };
     }
+    const length = Number(response.headers.get("content-length"));
+    if (length > 16_000_000)
+      throw new LiveError("Live response exceeds the size limit");
+    const text = await response.text();
+    if (text.length > 16_000_000)
+      throw new LiveError("Decoded live response exceeds the size limit");
+    let body: unknown;
     try {
-      return (await response.json()) as T;
+      body = JSON.parse(text);
     } catch {
       throw new LiveError(`${base}${path}: response was not valid JSON`);
     }
+    if (!response.ok) {
+      const error = expectObject(body, "error");
+      throw new LiveError(
+        `${base}${path}: ${typeof error.error === "string" ? error.error : `HTTP ${response.status}`}`,
+        response.status,
+      );
+    }
+    return body;
   }
   return {
-    ping: (signal) => call<LivePing>("/ping", signal),
-    events: (sinceMs, signal) =>
-      call<LiveEventsPage>(sinceMs === null ? "/live/events" : `/live/events?since=${Math.floor(sinceMs)}`, signal),
-    quotas: (signal) => call<LiveQuotasPage>("/live/quotas", signal),
+    ping: async (signal) => parseLivePing(await call("/ping", signal)),
+    events: async (sinceMs, signal, page = {}) => {
+      const params = new URLSearchParams();
+      if (sinceMs !== null) params.set("since", String(Math.floor(sinceMs)));
+      if (page.limit !== undefined) params.set("limit", String(page.limit));
+      if (page.cursor) params.set("cursor", page.cursor);
+      if (page.force) params.set("force", "1");
+      return parseLiveEventsPage(
+        await call(
+          `/live/events${params.size ? `?${params}` : ""}`,
+          signal,
+          page.knownHash,
+        ),
+      );
+    },
+    quotas: async (signal) =>
+      parseLiveQuotasPage(await call("/live/quotas", signal)),
   };
-}
-
-function expectObject(value: unknown, where: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new LiveError(`${where}: expected an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function expectString(value: unknown, where: string): string {
-  if (typeof value !== "string") throw new LiveError(`${where}: expected a string`);
-  return value;
-}
-
-function orNullString(value: unknown): string | null {
-  return typeof value === "string" ? value : null;
-}
-
-function expectNumber(value: unknown, where: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new LiveError(`${where}: expected a finite number`);
-  }
-  return value;
-}
-
-function orNullNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-/** D8 guard: a decimal string, never a float in disguise. */
-function expectDecimalString(value: unknown, where: string): string {
-  const s = expectString(value, where);
-  if (!/^[+-]?\d+(\.\d+)?$/.test(s)) throw new LiveError(`${where}: not a decimal string`);
-  return s;
 }
 
 /**
@@ -159,72 +209,137 @@ function expectDecimalString(value: unknown, where: string): string {
  */
 export function parseLiveEventsPage(raw: unknown): LiveEventsPage {
   const page = expectObject(raw, "events page");
-  if (!Array.isArray(page.events)) throw new LiveError("events: expected an array");
+  if (!Array.isArray(page.events))
+    throw new LiveError("events: expected an array");
   const events = page.events.map((row, index) => {
     const where = (field: string): string => `events[${index}].${field}`;
     const e = expectObject(row, `events[${index}]`);
     return {
-      client: expectString(e.client, where("client")),
-      providerId: expectString(e.providerId, where("providerId")),
-      modelId: expectString(e.modelId, where("modelId")),
-      sessionId: expectString(e.sessionId, where("sessionId")),
+      client: identity(e.client, where("client")),
+      providerId: identity(e.providerId, where("providerId")),
+      modelId: identity(e.modelId, where("modelId")),
+      sessionId: identity(e.sessionId, where("sessionId")),
       sessionTitle: orNullString(e.sessionTitle),
       workspaceKey: orNullString(e.workspaceKey),
       workspaceLabel: orNullString(e.workspaceLabel),
       agent: orNullString(e.agent),
-      occurredAtMs: expectNumber(e.occurredAtMs, where("occurredAtMs")),
+      occurredAtMs: integer(e.occurredAtMs, where("occurredAtMs")),
       sourceOffsetMinutes: orNullNumber(e.sourceOffsetMinutes),
       sourceTimezone: orNullString(e.sourceTimezone),
       sourceLocalDate: orNullString(e.sourceLocalDate),
-      inputTokens: expectNumber(e.inputTokens, where("inputTokens")),
-      outputTokens: expectNumber(e.outputTokens, where("outputTokens")),
-      cacheReadTokens: expectNumber(e.cacheReadTokens, where("cacheReadTokens")),
-      cacheWriteTokens: expectNumber(e.cacheWriteTokens, where("cacheWriteTokens")),
-      reasoningTokens: expectNumber(e.reasoningTokens, where("reasoningTokens")),
-      messageCount: orNullNumber(e.messageCount) ?? 1,
-      isTurnStart: e.isTurnStart === true,
+      inputTokens: integer(e.inputTokens, where("inputTokens")),
+      outputTokens: integer(e.outputTokens, where("outputTokens")),
+      cacheReadTokens: integer(e.cacheReadTokens, where("cacheReadTokens")),
+      cacheWriteTokens: integer(e.cacheWriteTokens, where("cacheWriteTokens")),
+      reasoningTokens: integer(e.reasoningTokens, where("reasoningTokens")),
+      messageCount: integer(e.messageCount ?? 1, where("messageCount")),
+      isTurnStart: boolean(e.isTurnStart, where("isTurnStart")),
       durationMs: orNullNumber(e.durationMs),
       cost: expectDecimalString(e.cost, where("cost")),
-      costSource: (e.costSource ?? "unknown") as IngestEventInput["costSource"],
-      costIsComplete: e.costIsComplete === true,
-      modelAttributionConflicted: e.modelAttributionConflicted === true,
-      parserVersion: expectString(e.parserVersion, where("parserVersion")),
-      dedupKey: expectString(e.dedupKey, where("dedupKey")),
+      costSource: choice(
+        e.costSource ?? "unknown",
+        ["unknown", "provider_reported", "estimated"],
+        where("costSource"),
+      ),
+      costIsComplete: boolean(e.costIsComplete, where("costIsComplete")),
+      modelAttributionConflicted: boolean(
+        e.modelAttributionConflicted,
+        where("modelAttributionConflicted"),
+      ),
+      parserVersion: identity(e.parserVersion, where("parserVersion")),
+      dedupKey: identity(e.dedupKey, where("dedupKey")),
     } satisfies IngestEventInput;
   });
   return {
+    ...(page.slug === undefined ? {} : { slug: identity(page.slug, "slug") }),
+    ...(page.scanStartedAtMs === undefined
+      ? {}
+      : { scanStartedAtMs: integer(page.scanStartedAtMs, "scanStartedAtMs") }),
+    ...(page.scanMs === undefined
+      ? {}
+      : { scanMs: expectNumber(page.scanMs, "scanMs") }),
+    ...(page.snapshotId === undefined
+      ? {}
+      : { snapshotId: identity(page.snapshotId, "snapshotId") }),
+    ...(page.contentHash === undefined
+      ? {}
+      : { contentHash: identity(page.contentHash, "contentHash") }),
+    ...(page.nextCursor === undefined
+      ? {}
+      : { nextCursor: orNullString(page.nextCursor) }),
+    ...(page.notModified === undefined
+      ? {}
+      : { notModified: boolean(page.notModified, "notModified") }),
     sinceMs: orNullNumber(page.sinceMs),
-    generatedAt: expectString(page.generatedAt, "generatedAt"),
+    generatedAt: timestamp(page.generatedAt, "generatedAt"),
     events,
   };
 }
 
 /**
- * Structural validation for a /live/quotas payload. Merging live quotas is a
- * documented deferral (ADR 0001) — the phone does not call this yet.
+ * Structural validation for a /live/quotas payload. Direct mode merges these
+ * collection-time snapshots independently of event pages.
  */
 export function parseLiveQuotasPage(raw: unknown): LiveQuotasPage {
   const page = expectObject(raw, "quotas page");
-  if (!Array.isArray(page.quotas)) throw new LiveError("quotas: expected an array");
+  if (!Array.isArray(page.quotas))
+    throw new LiveError("quotas: expected an array");
   const quotas: IngestQuotaInput[] = page.quotas.map((row, index) => {
     const where = (field: string): string => `quotas[${index}].${field}`;
     const q = expectObject(row, `quotas[${index}]`);
     return {
       provider: expectString(q.provider, where("provider")),
-      accountKey: expectString(q.accountKey ?? "no-account", where("accountKey")),
+      accountKey: expectString(
+        q.accountKey ?? "no-account",
+        where("accountKey"),
+      ),
       accountLabel: orNullString(q.accountLabel),
       plan: orNullString(q.plan),
       metric: expectString(q.metric, where("metric")),
       usedPercent: orNullNumber(q.usedPercent),
       remainingPercent: orNullNumber(q.remainingPercent),
       remainingLabel: orNullString(q.remainingLabel),
-      resetsAt: orNullString(q.resetsAt),
-      creditStatus: null,
-      spendControl: null,
-      status: q.status === "error" ? "error" : "ok",
+      resetsAt: nullableTimestamp(q.resetsAt, where("resetsAt")),
+      creditStatus: nullableObject(q.creditStatus, where("creditStatus")),
+      spendControl: nullableObject(q.spendControl, where("spendControl")),
+      status: choice(q.status ?? "ok", ["ok", "error"], where("status")),
       error: orNullString(q.error),
       sourceOffsetMinutes: orNullNumber(q.sourceOffsetMinutes),
     };
   });
-  return { generatedAt: expectString(page.generatedAt, "generatedAt"), quotas };
+  return { generatedAt: timestamp(page.generatedAt, "generatedAt"), quotas };
+}
+
+export function parseLivePing(raw: unknown): LivePing {
+  const p = expectObject(raw, "ping");
+  if (p.protocol !== 1) throw new LiveError("Unsupported live protocol");
+  return {
+    ...(p.capabilities === undefined
+      ? {}
+      : {
+          capabilities: Array.isArray(p.capabilities)
+            ? p.capabilities.map((v) => expectString(v, "capability"))
+            : (() => {
+                throw new LiveError("Invalid capabilities");
+              })(),
+        }),
+    ...(p.ready === undefined ? {} : { ready: boolean(p.ready, "ready") }),
+    ...(p.scanAgeMs === undefined
+      ? {}
+      : { scanAgeMs: orNullNumber(p.scanAgeMs) }),
+    ...(p.eventCount === undefined
+      ? {}
+      : { eventCount: integer(p.eventCount, "eventCount") }),
+    protocol: 1,
+    slug: identity(p.slug, "slug"),
+    displayName: identity(p.displayName, "displayName"),
+    hostGroup: orNullString(p.hostGroup),
+    osKind: choice(p.osKind, ["windows", "wsl", "linux", "macos"], "osKind"),
+    reporterVersion: identity(p.reporterVersion, "reporterVersion"),
+    tokscaleVersion: orNullString(p.tokscaleVersion),
+    exportSchema: orNullNumber(p.exportSchema),
+    reportingTimezone: orNullString(p.reportingTimezone),
+    sinceMs: orNullNumber(p.sinceMs),
+    serverNowMs: integer(p.serverNowMs, "serverNowMs"),
+  };
 }
