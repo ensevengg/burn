@@ -77,7 +77,8 @@ appropriately: duplicate cleanup and unique-index creation require database work
 
 ## Validation
 
-- Full workspace tests and strict type checking, including actual mirror SQL
+- Committed-branch verification: **133 tests pass, 0 fail**, and strict type
+  checking passes. Tests include actual mirror SQL
   against SQLite and every migration applied in numeric order to PGlite
   PostgreSQL with anonymous/authenticated roles.
 - Real HTTP paging of 2,501 synthetic rows, concurrent consumers sharing one
