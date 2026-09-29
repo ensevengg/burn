@@ -29,7 +29,20 @@ bun run mobile        # then scan the QR with Expo Go on your Android phone
 # Setup screen → "Explore with demo data"
 ```
 
-**Full loop (with your Supabase project):** follow [supabase/README.md](./supabase/README.md) — three SQL pastes, `npx burn-report init`, then connect the phone with the printed read token. Install the exporter once per machine (`cargo install --path crates/burn-events`); `bun run reporter -- push` then streams per-message usage rows (tokens, cache, cost) and refreshes vendor quotas independently; `bun run reporter -- usage` is the quota-only command. The Machines tab can request eager syncs from machines running `burn-report daemon`.
+**Full loop (with your Supabase project):** follow [supabase/README.md](./supabase/README.md) — apply all migrations in numeric order, `npx burn-report init`, then connect the phone with the printed read token. Install the exporter once per machine (`cargo install --path crates/burn-events`); `bun run reporter -- push` then streams per-message usage rows (tokens, cache, cost) and refreshes vendor quotas independently; `bun run reporter -- usage` is the quota-only command. The Machines tab can request eager syncs from machines running `burn-report daemon`.
+
+**Direct mode (no cloud project):**
+
+```bash
+bun run reporter -- init --direct --slug my-machine --name "My Machine"
+bun run reporter -- serve
+```
+
+Install the exporter once as below. With Tailscale running on both devices,
+choose direct setup on the phone and add the URL printed by the reporter.
+Direct pulls use cached, compressed pages; interrupted history backfills resume
+while the app is foregrounded. Cloud backup remains optional. See
+[connection changes and upgrade notes](docs/connection-transfer-fixes.md).
 
 **Reporter (on each machine):**
 ```bash

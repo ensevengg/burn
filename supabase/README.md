@@ -11,6 +11,13 @@ Your project is the only place your data lives. Setup is three pastes and one
    - `migrations/0002_api.sql` — the `burn_*` scoped-token RPCs
    - `migrations/0003_api_removal.sql` — machine removal from the app (− button)
    - `migrations/0004_quota_freshness.sql` — failed quota fetches never evict last-good numbers
+   - `migrations/0005_delta_revision_index.sql` — delta query index
+   - `migrations/0006_live_endpoint.sql` — optional machine endpoint advertisement
+   - `migrations/0007_quota_authorization.sql` — read-token enforcement for quotas
+   - `migrations/0008_environment_cursors.sql` — per-machine revision and event-id pagination
+   - `migrations/0009_sync_delivery.sql` — per-machine refresh delivery and completion leases
+   - `migrations/0010_channel_health.sql` — independent event, quota and connection health
+   - `migrations/0011_quota_idempotency.sql` — retry-safe quota snapshots using collection time
 3. On a machine you control: `npx burn-report init --url <project-url> --key <publishable-key> --slug cachyos --name "CachyOS"`
    It writes `~/.config/burn/config.json` + `~/.config/burn/setup-tokens.sql`.
    Paste that SQL into the editor too (registers the machine and your phone).

@@ -50,9 +50,9 @@ idempotent merges. The Supabase path remains fully functional and untouched
 - New `pullDirect(db, machines, …)` beside `pullCloud` — same write-lock,
   same cache-eviction-in-writer, same generation-based cancellation, same
   32-row chunking.
-- **Per-machine time cursors** (`kv: direct_since_<envId>` = lastPullAt minus
-  the overlap window), not one global revision watermark. The v1 protocol is
-  time-cursor-based, identical to the push path's semantics.
+- **Per-machine time cursors** (`kv: direct_since_v3_<envId>` = completed machine scan start,
+  with an overlap subtracted when requesting the next window), not one global revision watermark. The cloud delta uses environment revision/event-id cursors;
+  direct cursors describe the machine scan, never the phone merge time.
 - **Merges commit at the machine's served data directly** — there is no
   later server to supersede it, so the revision-0-provisional dance from
   ADR 0001 is unnecessary here. Event ids still come from `liveEventId()`
@@ -60,9 +60,9 @@ idempotent merges. The Supabase path remains fully functional and untouched
   message is the same row, and if a user ALSO runs cloud mode for the same
   machine, both paths still collide safely on one id.
 - **Quotas merge on day one in direct mode** — per-environment, env-scoped
-  row keys, `insert or replace` (no wholesale table replace, which is a
-  cloud-path-only hazard). ADR 0001's live-quota deferral was about the
-  cloud pull's delete-all semantics; direct mode doesn't have that problem.
+  row keys split successes from diagnostics, with collection-time comparisons.
+  Both cloud and direct merges preserve a newer successful sample.
+  ADR 0001's original delete-all hazard is resolved by the shared merge.
 
 ### Modes and UI
 
@@ -115,3 +115,33 @@ idempotent merges. The Supabase path remains fully functional and untouched
 3. Quota upserts + Machines live-status reuse.
 4. Dogfood as the owner's daily mode; Supabase untouched underneath the whole
    time — the escape hatch is the point.
+
+## Connection reliability implementation — 2026-09-30
+
+Direct mode treats machine data as authoritative: changed direct rows can
+replace an earlier cloud revision. Opportunistic live pulls in cloud mode
+retain the revision-0 guard. Cloud revision cursors are unchanged by either
+peer path. Choosing direct mode preserves existing cloud history; entering it
+from the bundled demo clears demo history and reference prices.
+
+First pulls request `since=0`. V3 cursor keys force one corrective replay for
+older installs that used a recent-tail first pull or the phone's clock. Pages
+commit with their durable snapshot continuation, publish immediately and
+resume automatically while foregrounded. A completed window checkpoints its
+machine scan start; expired continuations restart idempotently. Foreground
+and gestures trigger fresh probes; minute timers trigger cloud reads only.
+Periodic full reconciliation on a foreground/gesture pull after 24 hours,
+and the Machines full-history action, capture corrections outside the overlap.
+
+Live server snapshots share one in-flight exporter scan, a 30-second result
+cache and a five-minute pin check. Quotas share a 45-second collection cache.
+After identity validation, event and quota fetches run independently. Pages
+are at most 1,000 rows and approximately 4MB decoded; gzip and conditional
+GETs reduce repeated transfer. Old clients omitting page limits retain their
+original response shape.
+
+Cloud mode requires migrations through 0011, including environment-scoped
+revision/event-id cursors, durable refresh deliveries and channel health.
+Direct-only reporter initialization needs no cloud URL, key or tokens.
+See [connection-transfer-fixes.md](../connection-transfer-fixes.md) for checks,
+upgrade instructions and remaining work.
