@@ -3,7 +3,12 @@ import { liveEventId, LiveUnreachableError } from "@burn/sync-api";
 import { mirrorFixture } from "./mirror-fixture";
 import { pullLiveFromMachines, type LivePullOptions } from "../src/lib/live";
 import { queryDailyTotals } from "../src/data/repository";
-import type { IngestEventInput, LiveApi, LiveEventsPage, LivePing } from "@burn/sync-api";
+import type {
+  IngestEventInput,
+  LiveApi,
+  LiveEventsPage,
+  LivePing,
+} from "@burn/sync-api";
 
 function ingestRow(over: Partial<IngestEventInput> = {}): IngestEventInput {
   return {
@@ -58,7 +63,17 @@ function ping(over: Partial<LivePing> = {}): LivePing {
   };
 }
 
-function apiForByEndpoint(map: Record<string, { page?: LiveEventsPage; ping?: LivePing; failPing?: Error; failEvents?: Error }>): LivePullOptions["apiFor"] {
+function apiForByEndpoint(
+  map: Record<
+    string,
+    {
+      page?: LiveEventsPage;
+      ping?: LivePing;
+      failPing?: Error;
+      failEvents?: Error;
+    }
+  >,
+): LivePullOptions["apiFor"] {
   return (endpoint: string) =>
     ({
       ping: async (signal) => {
@@ -77,9 +92,17 @@ function apiForByEndpoint(map: Record<string, { page?: LiveEventsPage; ping?: Li
     }) satisfies LiveApi;
 }
 
-async function seedEnvironment(fx: { db: import("expo-sqlite").SQLiteDatabase }, over: Partial<{ slug: string; endpoint: string | null; latestRevision: number }> = {}) {
+async function seedEnvironment(
+  fx: { db: import("expo-sqlite").SQLiteDatabase },
+  over: Partial<{
+    slug: string;
+    endpoint: string | null;
+    latestRevision: number;
+  }> = {},
+) {
   const slug = over.slug ?? "win";
-  const endpoint = over.endpoint === undefined ? "http://127.0.0.1:8787" : over.endpoint;
+  const endpoint =
+    over.endpoint === undefined ? "http://127.0.0.1:8787" : over.endpoint;
   await fx.db.runAsync(
     `insert into environments (id, slug, display_name, os_kind, reporting_timezone, latest_revision, live_endpoint)
      values (?, ?, ?, 'windows', 'Asia/Kolkata', ?, ?)`,
@@ -88,7 +111,13 @@ async function seedEnvironment(fx: { db: import("expo-sqlite").SQLiteDatabase },
   return `env-${slug}`;
 }
 
-async function seedServerEvent(fx: { db: import("expo-sqlite").SQLiteDatabase }, envId: string, slug: string, row: IngestEventInput, revision: number) {
+async function seedServerEvent(
+  fx: { db: import("expo-sqlite").SQLiteDatabase },
+  envId: string,
+  slug: string,
+  row: IngestEventInput,
+  revision: number,
+) {
   const eventId = liveEventId(slug, row.client, row.dedupKey);
   await fx.db.runAsync(
     `insert or replace into usage_events
@@ -98,38 +127,100 @@ async function seedServerEvent(fx: { db: import("expo-sqlite").SQLiteDatabase },
       reasoning_tokens, message_count, is_turn_start, duration_ms, cost, cost_source,
       cost_is_complete, model_attribution_conflicted, parser_version, revision)
      values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [eventId, envId, row.client, row.providerId, row.modelId, row.sessionId, row.sessionTitle, row.workspaceKey, row.workspaceLabel, row.agent, row.occurredAtMs, row.sourceOffsetMinutes, row.sourceTimezone, row.sourceLocalDate, row.inputTokens, row.outputTokens, row.cacheReadTokens, row.cacheWriteTokens, row.reasoningTokens, row.messageCount, row.isTurnStart ? 1 : 0, row.durationMs, row.cost, row.costSource, row.costIsComplete ? 1 : 0, row.modelAttributionConflicted ? 1 : 0, row.parserVersion, revision],
+    [
+      eventId,
+      envId,
+      row.client,
+      row.providerId,
+      row.modelId,
+      row.sessionId,
+      row.sessionTitle,
+      row.workspaceKey,
+      row.workspaceLabel,
+      row.agent,
+      row.occurredAtMs,
+      row.sourceOffsetMinutes,
+      row.sourceTimezone,
+      row.sourceLocalDate,
+      row.inputTokens,
+      row.outputTokens,
+      row.cacheReadTokens,
+      row.cacheWriteTokens,
+      row.reasoningTokens,
+      row.messageCount,
+      row.isTurnStart ? 1 : 0,
+      row.durationMs,
+      row.cost,
+      row.costSource,
+      row.costIsComplete ? 1 : 0,
+      row.modelAttributionConflicted ? 1 : 0,
+      row.parserVersion,
+      revision,
+    ],
   );
   return eventId;
 }
 
-async function eventRow(fx: { db: import("expo-sqlite").SQLiteDatabase }, eventId: string) {
-  return fx.db.getFirstAsync<Record<string, unknown>>("select * from usage_events where event_id = ?", [eventId]);
+async function eventRow(
+  fx: { db: import("expo-sqlite").SQLiteDatabase },
+  eventId: string,
+) {
+  return fx.db.getFirstAsync<Record<string, unknown>>(
+    "select * from usage_events where event_id = ?",
+    [eventId],
+  );
 }
 
 describe("live pull merge", () => {
   test("live rows land with revision 0 under the right identity; watermark untouched", async () => {
     const fx = mirrorFixture();
     const envId = await seedEnvironment(fx, { slug: "win" });
-    await fx.db.runAsync("insert or replace into kv (key, value) values ('watermark_revision', '7')");
+    await fx.db.runAsync(
+      "insert or replace into kv (key, value) values ('watermark_revision', '7')",
+    );
     const api = apiForByEndpoint({
-      "http://127.0.0.1:8787": { page: page([ingestRow(), ingestRow({ dedupKey: "v1:codex:s1:1725599000001:2", sessionId: "s1" })]) },
+      "http://127.0.0.1:8787": {
+        page: page([
+          ingestRow(),
+          ingestRow({
+            dedupKey: "v1:codex:s1:1725599000001:2",
+            sessionId: "s1",
+          }),
+        ]),
+      },
     });
     const statuses = await pullLiveFromMachines(fx.db, { apiFor: api });
     expect(statuses).toHaveLength(1);
-    expect(statuses[0]).toMatchObject({ state: "live", slug: "win", pulledEvents: 2, error: null });
+    expect(statuses[0]).toMatchObject({
+      state: "live",
+      slug: "win",
+      pulledEvents: 2,
+      error: null,
+    });
 
-    const expectedId = liveEventId("win", "codex", "v1:codex:s1:1725599000000:1");
+    const expectedId = liveEventId(
+      "win",
+      "codex",
+      "v1:codex:s1:1725599000000:1",
+    );
     const row = await eventRow(fx, expectedId);
     expect(row).not.toBeNull();
     expect(row!.revision).toBe(0);
     expect(row!.environment_id).toBe(envId);
     expect(row!.cost).toBe("0.000123");
-    const second = await eventRow(fx, liveEventId("win", "codex", "v1:codex:s1:1725599000001:2"));
+    const second = await eventRow(
+      fx,
+      liveEventId("win", "codex", "v1:codex:s1:1725599000001:2"),
+    );
     expect(second).not.toBeNull();
-    const watermark = await fx.db.getFirstAsync<{ value: string }>("select value from kv where key = 'watermark_revision'");
+    const watermark = await fx.db.getFirstAsync<{ value: string }>(
+      "select value from kv where key = 'watermark_revision'",
+    );
     expect(watermark!.value).toBe("7");
-    const env = await fx.db.getFirstAsync<{ latest_revision: number }>("select latest_revision from environments where id = ?", [envId]);
+    const env = await fx.db.getFirstAsync<{ latest_revision: number }>(
+      "select latest_revision from environments where id = ?",
+      [envId],
+    );
     expect(env!.latest_revision).toBe(42);
   });
 
@@ -139,11 +230,13 @@ describe("live pull merge", () => {
     const serverRow = ingestRow({ inputTokens: 999, cost: "5.000000" });
     const eventId = await seedServerEvent(fx, envId, "win", serverRow, 5);
     const api = apiForByEndpoint({
-      "http://127.0.0.1:8787": { page: page([ingestRow({ inputTokens: 12345, cost: "0.000123" })]) },
+      "http://127.0.0.1:8787": {
+        page: page([ingestRow({ inputTokens: 12345, cost: "0.000123" })]),
+      },
     });
     const statuses = await pullLiveFromMachines(fx.db, { apiFor: api });
     expect(statuses[0]!.state).toBe("live");
-    expect(statuses[0]!.pulledEvents).toBe(1);
+    expect(statuses[0]!.pulledEvents).toBe(0);
     const row = await eventRow(fx, eventId);
     expect(row!.revision).toBe(5);
     expect(row!.input_tokens).toBe(999);
@@ -154,12 +247,17 @@ describe("live pull merge", () => {
     const fx = mirrorFixture();
     const envId = await seedEnvironment(fx, { slug: "win" });
     const row0 = ingestRow();
-    const api = apiForByEndpoint({ "http://127.0.0.1:8787": { page: page([row0]) } });
+    const api = apiForByEndpoint({
+      "http://127.0.0.1:8787": { page: page([row0]) },
+    });
     await pullLiveFromMachines(fx.db, { apiFor: api });
     // The machine pushes; the server revises the row; the phone delta-applies
     // the same upsert SQL the cloud pull uses.
     const eventId = liveEventId("win", row0.client, row0.dedupKey);
-    const corrected = ingestRow({ cost: "9.000000", parserVersion: "tokscale-4.16.0" });
+    const corrected = ingestRow({
+      cost: "9.000000",
+      parserVersion: "tokscale-4.16.0",
+    });
     await seedServerEvent(fx, envId, "win", corrected, 8);
     const row = await eventRow(fx, eventId);
     expect(row!.revision).toBe(8);
@@ -169,11 +267,27 @@ describe("live pull merge", () => {
   test("live can refresh its own earlier (revision 0) rows", async () => {
     const fx = mirrorFixture();
     await seedEnvironment(fx, { slug: "win" });
-    const first = apiForByEndpoint({ "http://127.0.0.1:8787": { page: page([ingestRow({ inputTokens: 100 })]) } });
+    const first = apiForByEndpoint({
+      "http://127.0.0.1:8787": {
+        page: page([ingestRow({ inputTokens: 100 })]),
+      },
+    });
     await pullLiveFromMachines(fx.db, { apiFor: first });
-    const second = apiForByEndpoint({ "http://127.0.0.1:8787": { page: page([ingestRow({ inputTokens: 250, dedupKey: "v1:codex:s1:1725599000000:1" })]) } });
+    const second = apiForByEndpoint({
+      "http://127.0.0.1:8787": {
+        page: page([
+          ingestRow({
+            inputTokens: 250,
+            dedupKey: "v1:codex:s1:1725599000000:1",
+          }),
+        ]),
+      },
+    });
     await pullLiveFromMachines(fx.db, { apiFor: second });
-    const row = await eventRow(fx, liveEventId("win", "codex", "v1:codex:s1:1725599000000:1"));
+    const row = await eventRow(
+      fx,
+      liveEventId("win", "codex", "v1:codex:s1:1725599000000:1"),
+    );
     expect(row!.input_tokens).toBe(250);
     expect(row!.revision).toBe(0);
   });
@@ -181,44 +295,76 @@ describe("live pull merge", () => {
   test("slug mismatch is skipped and writes nothing", async () => {
     const fx = mirrorFixture();
     await seedEnvironment(fx, { slug: "win" });
-    const api = apiForByEndpoint({ "http://127.0.0.1:8787": { ping: ping({ slug: "someone-else" }), page: page([ingestRow()]) } });
+    const api = apiForByEndpoint({
+      "http://127.0.0.1:8787": {
+        ping: ping({ slug: "someone-else" }),
+        page: page([ingestRow()]),
+      },
+    });
     const statuses = await pullLiveFromMachines(fx.db, { apiFor: api });
     expect(statuses[0]!.state).toBe("skipped");
-    const count = await fx.db.getFirstAsync<{ n: number }>("select count(*) as n from usage_events");
+    const count = await fx.db.getFirstAsync<{ n: number }>(
+      "select count(*) as n from usage_events",
+    );
     expect(count!.n).toBe(0);
   });
 
   test("unreachable machine reports offline; malformed page reports error; neither writes", async () => {
     const fx = mirrorFixture();
     await seedEnvironment(fx, { slug: "win", endpoint: "http://win:8787" });
-    await seedEnvironment(fx, { slug: "cachyos", endpoint: "http://cachyos:8787" });
-    const api = apiForByEndpoint({
-      "http://win:8787": { failPing: new LiveUnreachableError("http://win:8787/ping: timeout") },
-      "http://cachyos:8787": { ping: ping({ slug: "cachyos" }), failEvents: new Error("boom") },
+    await seedEnvironment(fx, {
+      slug: "cachyos",
+      endpoint: "http://cachyos:8787",
     });
-    const statuses = await pullLiveFromMachines(fx.db, { apiFor: api, pingTimeoutMs: 50, eventsTimeoutMs: 50 });
+    const api = apiForByEndpoint({
+      "http://win:8787": {
+        failPing: new LiveUnreachableError("http://win:8787/ping: timeout"),
+      },
+      "http://cachyos:8787": {
+        ping: ping({ slug: "cachyos" }),
+        failEvents: new Error("boom"),
+      },
+    });
+    const statuses = await pullLiveFromMachines(fx.db, {
+      apiFor: api,
+      pingTimeoutMs: 50,
+      eventsTimeoutMs: 50,
+    });
     const byslug = Object.fromEntries(statuses.map((s) => [s.slug, s]));
     expect(byslug["win"]!.state).toBe("offline");
     expect(byslug["cachyos"]!.state).toBe("error");
-    const count = await fx.db.getFirstAsync<{ n: number }>("select count(*) as n from usage_events");
+    const count = await fx.db.getFirstAsync<{ n: number }>(
+      "select count(*) as n from usage_events",
+    );
     expect(count!.n).toBe(0);
   });
 
   test("malformed rows reject the whole page before any write", async () => {
     const fx = mirrorFixture();
     await seedEnvironment(fx, { slug: "win" });
-    const bad = page([ingestRow(), { ...ingestRow(), cost: 0.5, dedupKey: "v1:codex:s1:2:2" } as unknown as IngestEventInput]);
+    const bad = page([
+      ingestRow(),
+      {
+        ...ingestRow(),
+        cost: 0.5,
+        dedupKey: "v1:codex:s1:2:2",
+      } as unknown as IngestEventInput,
+    ]);
     const api = apiForByEndpoint({ "http://127.0.0.1:8787": { page: bad } });
     const statuses = await pullLiveFromMachines(fx.db, { apiFor: api });
     expect(statuses[0]!.state).toBe("error");
-    const count = await fx.db.getFirstAsync<{ n: number }>("select count(*) as n from usage_events");
+    const count = await fx.db.getFirstAsync<{ n: number }>(
+      "select count(*) as n from usage_events",
+    );
     expect(count!.n).toBe(0);
   });
 
   test("environments without an advertisement are simply not probed", async () => {
     const fx = mirrorFixture();
     await seedEnvironment(fx, { slug: "win", endpoint: null });
-    const statuses = await pullLiveFromMachines(fx.db, { apiFor: apiForByEndpoint({}) });
+    const statuses = await pullLiveFromMachines(fx.db, {
+      apiFor: apiForByEndpoint({}),
+    });
     expect(statuses).toHaveLength(0);
   });
 
@@ -231,7 +377,9 @@ describe("live pull merge", () => {
       sessionId: "recent",
       dedupKey: "v1:codex:recent:1:1",
     });
-    const api = apiForByEndpoint({ "http://127.0.0.1:8787": { page: page([recent]) } });
+    const api = apiForByEndpoint({
+      "http://127.0.0.1:8787": { page: page([recent]) },
+    });
     const before = await queryDailyTotals(fx.db, "Asia/Kolkata", 30);
     expect(Object.keys(before.byKey)).toHaveLength(0);
     await pullLiveFromMachines(fx.db, { apiFor: api });
@@ -245,14 +393,19 @@ describe("live pull merge", () => {
     await seedEnvironment(fx, { slug: "win" });
     const controller = new AbortController();
     controller.abort();
-    const api = apiForByEndpoint({ "http://127.0.0.1:8787": { page: page([ingestRow()]) } });
-    const statuses = await pullLiveFromMachines(fx.db, { apiFor: api, signal: controller.signal });
-    expect(["offline", "error", "skipped"]).toContain(statuses[0]!.state);
-    const count = await fx.db.getFirstAsync<{ n: number }>("select count(*) as n from usage_events");
+    const api = apiForByEndpoint({
+      "http://127.0.0.1:8787": { page: page([ingestRow()]) },
+    });
+    await expect(
+      pullLiveFromMachines(fx.db, { apiFor: api, signal: controller.signal }),
+    ).rejects.toThrow("cancelled");
+    const count = await fx.db.getFirstAsync<{ n: number }>(
+      "select count(*) as n from usage_events",
+    );
     expect(count!.n).toBe(0);
   });
 
-  test("a superseded probe is abandoned and the fresh probe proceeds", async () => {
+  test("overlapping probes share one request and merge once", async () => {
     const fx = mirrorFixture();
     await seedEnvironment(fx, { slug: "win" });
     let calls = 0;
@@ -269,18 +422,23 @@ describe("live pull merge", () => {
           // fetch would reject here. Resolve late with the slow page to prove
           // the fresh probe doesn't wait on (or join) it.
           await new Promise((r) => setTimeout(r, 50));
-          return page([ingestRow({ dedupKey: "v1:codex:slow:1:1", sessionId: "slow" })]);
+          return page([
+            ingestRow({ dedupKey: "v1:codex:slow:1:1", sessionId: "slow" }),
+          ]);
         }
-        return page([ingestRow({ dedupKey: "v1:codex:fast:1:1", sessionId: "fast" })]);
+        return page([
+          ingestRow({ dedupKey: "v1:codex:fast:1:1", sessionId: "fast" }),
+        ]);
       },
     });
     const first = pullLiveFromMachines(fx.db, { apiFor });
     await new Promise((r) => setTimeout(r, 10));
-    const second = await pullLiveFromMachines(fx.db, { apiFor });
-    expect(second[0]!.state).toBe("live");
-    const fastId = liveEventId("win", "codex", "v1:codex:fast:1:1");
-    const fast = await eventRow(fx, fastId);
-    expect(fast).not.toBeNull();
-    await first;
+    const second = pullLiveFromMachines(fx.db, { apiFor });
+    expect(second).toBe(first);
+    expect((await second)[0]!.state).toBe("live");
+    expect(calls).toBe(1);
+    expect(
+      await eventRow(fx, liveEventId("win", "codex", "v1:codex:slow:1:1")),
+    ).not.toBeNull();
   });
 });

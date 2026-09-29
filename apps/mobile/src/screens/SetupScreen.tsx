@@ -74,7 +74,7 @@ export function SetupScreen() {
         <Card>
           <Text style={[type.h2, { color: C.text }]}>Connect your Supabase</Text>
           <Text style={[type.muted, { color: C.muted, marginVertical: spacing.s }]}>
-            Paste supabase/migrations/0001 + 0002 and the setup-tokens.sql from
+            Apply all supabase/migrations/*.sql files in numeric order, then setup-tokens.sql from
             <Text style={{ color: C.text }}> npx burn-report init </Text>
             into your project's SQL editor first.
           </Text>

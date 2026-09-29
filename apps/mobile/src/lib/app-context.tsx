@@ -21,8 +21,19 @@ import {
   type AppMode,
   type ConnectionConfig,
 } from "./settings";
-import { seedDemoData, syncFromCloud, requestMachineSync, cancelCloudSync } from "./sync";
-import { pullDirectFromMachines, addDirectMachine, removeDirectMachine, type DirectPullStatus } from "./direct";
+import {
+  seedDemoData,
+  syncFromCloud,
+  requestMachineSync,
+  cancelCloudSync,
+} from "./sync";
+import {
+  pullDirectFromMachines,
+  cancelDirectPull,
+  addDirectMachine,
+  removeDirectMachine,
+  type DirectPullStatus,
+} from "./direct";
 import { pullLiveFromMachines, type LivePullStatus } from "./live";
 import { removeEnvironmentLocal } from "../data/repository";
 import { subscribeMirrorChanges } from "./sync-state";
@@ -36,13 +47,16 @@ interface AppState {
   enterDemo: () => Promise<void>;
   connect: (config: ConnectionConfig) => Promise<void>;
   connectDirect: () => Promise<void>;
-  addDirectMachine: (url: string) => Promise<{ slug: string; displayName: string }>;
+  addDirectMachine: (
+    url: string,
+  ) => Promise<{ slug: string; displayName: string }>;
   disconnect: () => Promise<void>;
   sync: () => Promise<void>;
   requestSync: (environmentId: string | null) => Promise<void>;
   removeMachine: (environmentId: string) => Promise<void>;
   setReportingTimezone: (tz: string) => Promise<void>;
   clearData: () => Promise<void>;
+  fullSync: (environmentId: string) => Promise<void>;
 }
 
 /**
@@ -86,6 +100,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   } | null>(null);
   const live = useRef<AbortController | null>(null);
   const lifecycle = useRef(0);
+  const backfillTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const continueSync = useRef<() => Promise<void>>(async () => {});
 
   const patchStatus = useCallback((patch: Partial<SyncStatus>) => {
     setStatus((current) => ({ ...current, ...patch }));
@@ -93,12 +109,21 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const stop = useCallback(() => {
     lifecycle.current++;
+    if (backfillTimer.current) clearTimeout(backfillTimer.current);
+    backfillTimer.current = null;
     followup.current?.controller.abort();
     followup.current = null;
     live.current?.abort();
     live.current = null;
-    patchStatus({ refreshingMachines: false, checkingMachines: false, liveMachines: [] });
-    if (db) cancelCloudSync(db);
+    patchStatus({
+      refreshingMachines: false,
+      checkingMachines: false,
+      liveMachines: [],
+    });
+    if (db) {
+      cancelDirectPull(db);
+      cancelCloudSync(db);
+    }
   }, [db, patchStatus]);
 
   /**
@@ -112,14 +137,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const pullLive = useCallback(
     (signal?: AbortSignal) => {
       if (db === null || mode !== "cloud") return;
-      live.current?.abort();
+      if (live.current && !live.current.signal.aborted) return;
       const controller = new AbortController();
       const relay = () => controller.abort();
       signal?.addEventListener("abort", relay, { once: true });
       live.current = controller;
       void pullLiveFromMachines(db, { signal: controller.signal })
         .then((statuses) => {
-          if (!controller.signal.aborted) patchStatus({ liveMachines: statuses });
+          if (!controller.signal.aborted)
+            patchStatus({ liveMachines: statuses });
         })
         .catch(() => {
           /* cancelled — a reset owns the surface now */
@@ -158,43 +184,73 @@ export function AppProvider({ children }: { children: ReactNode }) {
         void queryClient.invalidateQueries({
           predicate: (query) =>
             kind === "events"
-              ? query.queryKey[0] !== "quotas" && query.queryKey[0] !== "machines"
+              ? query.queryKey[0] !== "quotas" &&
+                query.queryKey[0] !== "machines"
               : query.queryKey[0] === kind,
         });
       }),
     [db, queryClient],
   );
 
-  const sync = useCallback(async () => {
-    if (db === null || (mode !== "cloud" && mode !== "direct")) return;
-    const epoch = lifecycle.current;
-    try {
-      if (mode === "direct") {
-        const statuses = await pullDirectFromMachines(db);
+  const sync = useCallback(
+    async (environmentId?: string) => {
+      if (db === null || (mode !== "cloud" && mode !== "direct")) return;
+      const epoch = lifecycle.current;
+      try {
+        if (mode === "direct") {
+          const statuses = await pullDirectFromMachines(db, {
+            authoritative: true,
+            ...(environmentId ? { environmentId } : {}),
+          });
+          if (epoch !== lifecycle.current) return;
+          const failed = statuses.filter(
+            (s) => s.state !== "live" || s.quotaError,
+          ).length;
+          const hasMore = statuses.some((s) => s.hasMore);
+          if (hasMore && NativeAppState.currentState === "active") {
+            if (backfillTimer.current) clearTimeout(backfillTimer.current);
+            backfillTimer.current = setTimeout(() => {
+              backfillTimer.current = null;
+              void continueSync.current();
+            }, 1000);
+          }
+          patchStatus({
+            lastSync: new Date(),
+            syncError: null,
+            syncNotice:
+              failed > 0
+                ? `${failed} machine${failed === 1 ? "" : "s"} could not refresh fully. Showing cached data.`
+                : hasMore
+                  ? "Loading machine history in the background."
+                  : null,
+            liveMachines: statuses,
+          });
+          return;
+        }
+        const result = await syncFromCloud(db);
         if (epoch !== lifecycle.current) return;
-        const failed = statuses.filter((s) => s.state === "error").length;
+        if (result.hasMore && NativeAppState.currentState === "active") {
+          if (backfillTimer.current) clearTimeout(backfillTimer.current);
+          backfillTimer.current = setTimeout(() => {
+            backfillTimer.current = null;
+            void continueSync.current();
+          }, 1000);
+        }
         patchStatus({
           lastSync: new Date(),
           syncError: null,
-          syncNotice:
-            failed > 0
-              ? `${failed} machine${failed === 1 ? "" : "s"} failed to answer — showing pushed/cached data.`
-              : null,
-          liveMachines: statuses,
+          syncNotice: result.hasMore
+            ? "Loading history in the background."
+            : null,
         });
-        return;
+      } catch (err) {
+        if (epoch === lifecycle.current)
+          patchStatus({ syncError: (err as Error).message, syncNotice: null });
       }
-      const result = await syncFromCloud(db);
-      if (epoch !== lifecycle.current) return;
-      patchStatus({
-        lastSync: new Date(),
-        syncError: null,
-        syncNotice: result.hasMore ? "History backfill continues on the next sync." : null,
-      });
-    } catch (err) {
-      if (epoch === lifecycle.current) patchStatus({ syncError: (err as Error).message, syncNotice: null });
-    }
-  }, [db, mode, patchStatus]);
+    },
+    [db, mode, patchStatus],
+  );
+  continueSync.current = sync;
 
   useEffect(() => {
     if (mode !== "cloud" && mode !== "direct") return;
@@ -208,9 +264,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const timer = setInterval(() => {
       // Cloud: deliberately no live probe on the timer (per-minute exporter
       // scans on the machine are not worth it; the mirror is fresh to the
-      // last push). Direct: the timed sync IS the probe — its since-cursor
-      // keeps each scan to a small window.
-      if (NativeAppState.currentState === "active") void sync();
+      // last push). Direct probes run on foreground, gestures and bounded backfill.
+      if (mode === "cloud" && NativeAppState.currentState === "active")
+        void sync();
     }, 60_000);
     return () => {
       subscription.remove();
@@ -258,6 +314,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setMode("unconfigured");
         // Keep any previously registered machines and their history: the
         // registry is the backend here, and wiping it would orphan the mirror.
+        // Bundled demo rows and demo prices must never become real history.
+        if (mode === "demo") await resetDb(db);
         await kvSet(db, "mode", "direct");
         setMode("direct");
         invalidate();
@@ -283,14 +341,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (mode === "direct") {
           patchStatus({ refreshingMachines: true });
           try {
-            await sync();
+            await sync(environmentId ?? undefined);
           } finally {
             patchStatus({ refreshingMachines: false });
           }
           return;
         }
         const existing = followup.current;
-        if (existing && (existing.target === null || existing.target === environmentId))
+        if (
+          existing &&
+          (existing.target === null || existing.target === environmentId)
+        )
           return existing.promise;
         existing?.controller.abort();
         const controller = new AbortController();
@@ -300,7 +361,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
           pullLive(controller.signal);
           try {
             await requestMachineSync(db, environmentId);
-            if (controller.signal.aborted || epoch !== lifecycle.current) return;
+            if (controller.signal.aborted || epoch !== lifecycle.current)
+              return;
             // The spinner covers the first pull; the follow-up keeps checking
             // in the background via checkingMachines.
             await followMachineUpdates(controller.signal, sync, {
@@ -308,15 +370,25 @@ export function AppProvider({ children }: { children: ReactNode }) {
             });
           } catch (err) {
             if (!controller.signal.aborted && epoch === lifecycle.current)
-              patchStatus({ syncError: (err as Error).message, syncNotice: null });
+              patchStatus({
+                syncError: (err as Error).message,
+                syncNotice: null,
+              });
           } finally {
             if (followup.current?.controller === controller) {
               followup.current = null;
-              patchStatus({ refreshingMachines: false, checkingMachines: false });
+              patchStatus({
+                refreshingMachines: false,
+                checkingMachines: false,
+              });
             }
           }
         })();
-        followup.current = { controller, target: environmentId, promise: pending };
+        followup.current = {
+          controller,
+          target: environmentId,
+          promise: pending,
+        };
         return pending;
       },
       async removeMachine(environmentId) {
@@ -331,7 +403,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (mode === "cloud") {
           const connection = await loadConnection();
           if (!connection) throw new Error("Not connected to a backend");
-          await createBurnBackend(connection).phone(connection.readToken).removeEnvironment(environmentId);
+          await createBurnBackend(connection)
+            .phone(connection.readToken)
+            .removeEnvironment(environmentId);
         }
         await removeEnvironmentLocal(db, environmentId);
         invalidate();
@@ -342,6 +416,42 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setTzState(tz);
         invalidate();
       },
+      async fullSync(environmentId) {
+        if (!db || mode !== "direct") return;
+        if (backfillTimer.current) clearTimeout(backfillTimer.current);
+        backfillTimer.current = null;
+        cancelDirectPull(db);
+        const epoch = lifecycle.current;
+        patchStatus({ refreshingMachines: true });
+        try {
+          const statuses = await pullDirectFromMachines(db, {
+            full: true,
+            authoritative: true,
+            environmentId,
+          });
+          if (epoch === lifecycle.current) {
+            patchStatus({
+              liveMachines: statuses,
+              lastSync: new Date(),
+              syncError: null,
+              syncNotice: statuses.some((s) => s.hasMore)
+                ? "Loading machine history in the background."
+                : null,
+            });
+            if (statuses.some((s) => s.hasMore))
+              backfillTimer.current = setTimeout(() => {
+                backfillTimer.current = null;
+                void continueSync.current();
+              }, 1000);
+          }
+        } catch (err) {
+          if (epoch === lifecycle.current)
+            patchStatus({ syncError: (err as Error).message });
+        } finally {
+          if (epoch === lifecycle.current)
+            patchStatus({ refreshingMachines: false });
+        }
+      },
       async clearData() {
         if (!db) return;
         await prepareReset();
@@ -351,11 +461,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
         invalidate();
       },
     };
-  }, [db, mode, reportingTimezone, sync, stop, pullLive, queryClient, patchStatus]);
+  }, [
+    db,
+    mode,
+    reportingTimezone,
+    sync,
+    stop,
+    pullLive,
+    queryClient,
+    patchStatus,
+  ]);
 
   return (
     <AppContext.Provider value={value}>
-      <SyncStatusContext.Provider value={status}>{children}</SyncStatusContext.Provider>
+      <SyncStatusContext.Provider value={status}>
+        {children}
+      </SyncStatusContext.Provider>
     </AppContext.Provider>
   );
 }

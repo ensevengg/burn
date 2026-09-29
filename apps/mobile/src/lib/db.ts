@@ -152,6 +152,8 @@ export async function wipeForReseed(db: SQLite.SQLiteDatabase): Promise<void> {
     await db.runAsync("delete from usage_events");
     await db.runAsync("delete from environments");
     await db.runAsync("delete from quota_snapshots");
+    await db.runAsync("delete from direct_machines");
+    await db.runAsync("delete from model_prices");
     await db.runAsync(
       "delete from kv where key not in ('reporting_timezone', 'theme_mode')",
     );

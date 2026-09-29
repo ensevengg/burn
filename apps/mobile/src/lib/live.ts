@@ -1,3 +1,4 @@
+import { mergePeerEvents } from "./mirror-writes";
 /**
  * Tailscale live-pull (D1 v2, docs/adr/0001-tailscale-direct-pull).
  *
@@ -23,8 +24,8 @@
  */
 import {
   httpLiveApiFor,
-  liveEventId,
   parseLiveEventsPage,
+  parseLivePing,
   LiveError,
   type LiveApi,
 } from "@burn/sync-api";
@@ -43,6 +44,7 @@ export interface LivePullStatus {
   clockSkewMs: number | null;
   error: string | null;
   elapsedMs: number;
+  hasMore?: boolean;
 }
 
 export interface LivePullOptions {
@@ -64,32 +66,53 @@ const inFlightController = new WeakMap<SQLiteDatabase, AbortController>();
 async function liveTargets(
   db: SQLiteDatabase,
 ): Promise<{ environmentId: string; slug: string; liveEndpoint: string }[]> {
-  const rows = await db.getAllAsync<{ id: string; slug: string; live_endpoint: string }>(
+  const rows = await db.getAllAsync<{
+    id: string;
+    slug: string;
+    live_endpoint: string;
+  }>(
     "select id, slug, live_endpoint from environments where live_endpoint is not null",
   );
-  return rows.map((r) => ({ environmentId: r.id, slug: r.slug, liveEndpoint: r.live_endpoint }));
+  return rows.map((r) => ({
+    environmentId: r.id,
+    slug: r.slug,
+    liveEndpoint: r.live_endpoint,
+  }));
 }
 
 /** Abort when any linked signal fires; cancel() detaches the listeners. */
-export function linkedSignals(...signals: (AbortSignal | undefined)[]): { signal: AbortSignal; cancel: () => void } {
+export function linkedSignals(...signals: (AbortSignal | undefined)[]): {
+  signal: AbortSignal;
+  cancel: () => void;
+} {
   const controller = new AbortController();
   const detach: (() => void)[] = [];
   for (const signal of signals) {
     if (!signal) continue;
-    const onAbort = () => controller.abort(new Error(signal.reason?.message ?? "cancelled"));
+    const onAbort = () =>
+      controller.abort(new Error(signal.reason?.message ?? "cancelled"));
     if (signal.aborted) onAbort();
     else {
       signal.addEventListener("abort", onAbort, { once: true });
       detach.push(() => signal.removeEventListener("abort", onAbort));
     }
   }
-  return { signal: controller.signal, cancel: () => detach.forEach((fn) => fn()) };
+  return {
+    signal: controller.signal,
+    cancel: () => detach.forEach((fn) => fn()),
+  };
 }
 
 /** Abort when the deadline fires; cancel() clears the timer. */
-export function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; cancel: () => void } {
+export function withTimeout(
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+  const timer = setTimeout(
+    () => controller.abort(new Error(`timed out after ${timeoutMs}ms`)),
+    timeoutMs,
+  );
   const linked = linkedSignals(signal);
   const onLinkedAbort = () => controller.abort(new Error("cancelled"));
   linked.signal.addEventListener("abort", onLinkedAbort, { once: true });
@@ -106,7 +129,10 @@ export function withTimeout(signal: AbortSignal | undefined, timeoutMs: number):
   };
 }
 
-export function describeFailure(err: unknown): { state: "offline" | "error"; error: string } {
+export function describeFailure(err: unknown): {
+  state: "offline" | "error";
+  error: string;
+} {
   if (err instanceof LiveError && err.name === "LiveUnreachableError") {
     return { state: "offline", error: (err as Error).message };
   }
@@ -115,16 +141,16 @@ export function describeFailure(err: unknown): { state: "offline" | "error"; err
 
 /**
  * Probe every advertising machine and merge its event tail. Concurrent calls
- * are safe: a new call aborts the previous probe's network work and starts
- * fresh (the dying probe never commits, and its discarded "offline" statuses
- * are not shown). Cancelling — reset/disconnect — aborts before any commit.
+ * share the same pending probe. Cancelling — reset/disconnect — aborts before any commit.
  */
 export function pullLiveFromMachines(
   db: SQLiteDatabase,
   options: LivePullOptions = {},
 ): Promise<LivePullStatus[]> {
-  inFlightController.get(db)?.abort();
-  inFlight.delete(db);
+  if (options.signal?.aborted)
+    return Promise.reject(new LiveError("live pull cancelled"));
+  const existing = inFlight.get(db);
+  if (existing) return existing;
   const generation = cloudGeneration(db);
   const internal = new AbortController();
   inFlightController.set(db, internal);
@@ -136,7 +162,8 @@ export function pullLiveFromMachines(
     else callerSignal.addEventListener("abort", relayCaller, { once: true });
   }
   const assertActive = (): void => {
-    if (cloudGeneration(db) !== generation) throw new LiveError("live pull cancelled");
+    if (cloudGeneration(db) !== generation || internal.signal.aborted)
+      throw new LiveError("live pull cancelled");
   };
   const pending = pullLiveUnlocked(db, options, internal.signal, assertActive)
     .finally(() => {
@@ -149,7 +176,8 @@ export function pullLiveFromMachines(
     .catch((err: unknown) => {
       // A failed live pull must never break the refresh that started it —
       // the statuses carry the failure to the Machines card instead.
-      if (err instanceof LiveError && err.message === "live pull cancelled") throw err;
+      if (err instanceof LiveError && err.message === "live pull cancelled")
+        throw err;
       return [] as LivePullStatus[];
     });
   inFlight.set(db, pending);
@@ -162,7 +190,6 @@ async function pullLiveUnlocked(
   probeSignal: AbortSignal,
   assertActive: () => void,
 ): Promise<LivePullStatus[]> {
-  const started = Date.now();
   assertActive();
   const targets = await liveTargets(db);
   assertActive();
@@ -187,10 +214,13 @@ async function pullLiveUnlocked(
       try {
         // 1. Reachability + identity. A slow-to-answer machine counts as
         // offline: the mirror is already correct, live is opportunistic.
-        const pingTimeout = withTimeout(probeSignal, options.pingTimeoutMs ?? 2_500);
+        const pingTimeout = withTimeout(
+          probeSignal,
+          options.pingTimeoutMs ?? 2_500,
+        );
         let ping;
         try {
-          ping = await api.ping(pingTimeout.signal);
+          ping = parseLivePing(await api.ping(pingTimeout.signal));
         } finally {
           pingTimeout.cancel();
         }
@@ -207,94 +237,63 @@ async function pullLiveUnlocked(
         }
         const clockSkewMs = Math.abs(ping.serverNowMs - Date.now());
 
-        // 2. Fetch + validate the tail. Machine-side scans take seconds on
-        // real histories — generous timeout, still abortable.
-        const eventsTimeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 60_000);
-        let page;
-        try {
-          page = parseLiveEventsPage(await api.events(null, eventsTimeout.signal));
-        } finally {
-          eventsTimeout.cancel();
-        }
-        assertActive();
-
-        // 3. Merge. Ids follow the server's recipe; revision stays 0; the
-        // WHERE clause makes server rows (revision >= 1) untouchable.
-        await withWriteLock(async () => {
+        let cursor: string | undefined;
+        let snapshotId: string | undefined;
+        let pulledEvents = 0;
+        const seen = new Set<string>();
+        for (let i = 0; i < 8; i++) {
+          const timeout = withTimeout(
+            probeSignal,
+            options.eventsTimeoutMs ?? 120_000,
+          );
+          let page;
+          try {
+            page = parseLiveEventsPage(
+              await api.events(null, timeout.signal, {
+                limit: 1000,
+                ...(cursor ? { cursor } : {}),
+              }),
+            );
+          } finally {
+            timeout.cancel();
+          }
           assertActive();
-          await db.withTransactionAsync(async () => {
-            for (let i = 0; i < page.events.length; i += 32) {
-              const chunk = page.events.slice(i, i + 32);
-              await db.runAsync(
-                `insert into usage_events
-               (event_id, environment_id, client, provider_id, model_id, session_id, session_title,
-                workspace_key, workspace_label, agent, occurred_at_ms, source_offset_minutes, source_timezone,
-                source_local_date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                reasoning_tokens, message_count, is_turn_start, duration_ms, cost, cost_source,
-                cost_is_complete, model_attribution_conflicted, parser_version, revision)
-             values ${chunk.map(() => "(" + Array(28).fill("?").join(",") + ")").join(",")}
-             on conflict (event_id) do update set
-               client = excluded.client, provider_id = excluded.provider_id,
-               model_id = excluded.model_id, session_id = excluded.session_id,
-               session_title = excluded.session_title, workspace_key = excluded.workspace_key,
-               workspace_label = excluded.workspace_label, agent = excluded.agent,
-               occurred_at_ms = excluded.occurred_at_ms,
-               source_offset_minutes = excluded.source_offset_minutes,
-               source_timezone = excluded.source_timezone,
-               source_local_date = excluded.source_local_date,
-               input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens,
-               cache_read_tokens = excluded.cache_read_tokens,
-               cache_write_tokens = excluded.cache_write_tokens,
-               reasoning_tokens = excluded.reasoning_tokens,
-               message_count = excluded.message_count, is_turn_start = excluded.is_turn_start,
-               duration_ms = excluded.duration_ms, cost = excluded.cost,
-               cost_source = excluded.cost_source, cost_is_complete = excluded.cost_is_complete,
-               model_attribution_conflicted = excluded.model_attribution_conflicted,
-               parser_version = excluded.parser_version, revision = excluded.revision
-             where usage_events.revision = 0`,
-                chunk.flatMap((e) => [
-                  liveEventId(target.slug, e.client, e.dedupKey),
-                  target.environmentId,
-                  e.client,
-                  e.providerId,
-                  e.modelId,
-                  e.sessionId,
-                  e.sessionTitle,
-                  e.workspaceKey,
-                  e.workspaceLabel,
-                  e.agent,
-                  e.occurredAtMs,
-                  e.sourceOffsetMinutes,
-                  e.sourceTimezone,
-                  e.sourceLocalDate,
-                  e.inputTokens,
-                  e.outputTokens,
-                  e.cacheReadTokens,
-                  e.cacheWriteTokens,
-                  e.reasoningTokens,
-                  e.messageCount,
-                  e.isTurnStart ? 1 : 0,
-                  e.durationMs,
-                  e.cost,
-                  e.costSource,
-                  e.costIsComplete ? 1 : 0,
-                  e.modelAttributionConflicted ? 1 : 0,
-                  e.parserVersion,
-                  0, // revision: live rows are provisional until the server confirms
-                ]),
+          if (page.slug !== undefined && page.slug !== target.slug)
+            throw new LiveError("Event page identity mismatch");
+          if (snapshotId && page.snapshotId !== snapshotId)
+            throw new LiveError("Event snapshot changed during pull");
+          snapshotId = page.snapshotId;
+          if (page.nextCursor && seen.has(page.nextCursor))
+            throw new LiveError("Repeated event page cursor");
+          await withWriteLock(async () => {
+            assertActive();
+            await db.withTransactionAsync(async () => {
+              pulledEvents += await mergePeerEvents(
+                db,
+                target.environmentId,
+                target.slug,
+                page.events,
+                assertActive,
               );
-            }
+            });
+            if (page.events.length) invalidateEventCache(db);
           });
-          // Post-commit eviction, inside the writer — same contract as
-          // resetDb and the cloud pull.
-          invalidateEventCache(db);
-        });
-        publishMirrorChange(db, "events");
-
+          if (page.events.length) publishMirrorChange(db, "events");
+          if (!page.nextCursor)
+            return {
+              ...base,
+              pulledEvents,
+              clockSkewMs,
+              elapsedMs: Date.now() - targetStart,
+            };
+          seen.add(page.nextCursor);
+          cursor = page.nextCursor;
+        }
         return {
           ...base,
-          pulledEvents: page.events.length,
+          pulledEvents,
           clockSkewMs,
+          hasMore: true,
           elapsedMs: Date.now() - targetStart,
         };
       } catch (err) {

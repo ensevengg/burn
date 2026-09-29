@@ -1,3 +1,4 @@
+import { mergePeerEvents, mergeQuota } from "./mirror-writes";
 /**
  * Direct mode (ADR 0002): the machines themselves are the backend. The phone
  * keeps a registry of tailnet endpoints, and `pullDirectFromMachines` probes
@@ -5,17 +6,16 @@
  *
  * Relationship to the cloud path: same write lock, same generation-based
  * cancellation, same event identity (`liveEventId`), same revision-0 +
- * `WHERE usage_events.revision = 0` guard — so a machine serving BOTH modes
- * (Supabase push + live server) converges instead of forking: cloud rows
- * (revision >= 1) are authoritative; direct rows are the same rows, pulled
- * earlier. Per-machine time cursors live in kv (`direct_since_<envId>`),
+ * revision-0 identity. Primary direct callers allow machine corrections to
+ * replace old cloud rows; opportunistic cloud-live callers retain the positive
+ * revision guard. Both paths converge on the same event ids. Per-machine time cursors live in kv (`direct_since_v3_<envId>`),
  * never in the cloud watermark.
  */
 import {
   LIVE_OVERLAP_MS,
   httpLiveApiFor,
-  liveEventId,
   parseLiveEventsPage,
+  parseLivePing,
   parseLiveQuotasPage,
   LiveError,
   type LiveApi,
@@ -24,7 +24,7 @@ import type { SQLiteDatabase } from "expo-sqlite";
 import { invalidateEventCache } from "../data/repository";
 import { withWriteLock } from "./writelock";
 import { cloudGeneration, publishMirrorChange } from "./sync-state";
-import { describeFailure, linkedSignals, withTimeout } from "./live";
+import { describeFailure, withTimeout } from "./live";
 
 export interface DirectMachine {
   id: string;
@@ -46,11 +46,19 @@ export interface DirectPullStatus {
   clockSkewMs: number | null;
   error: string | null;
   elapsedMs: number;
+  quotaError?: string | null;
+  scanMs?: number | null;
+  hasMore?: boolean;
 }
 
 export interface DirectPullOptions {
   pingTimeoutMs?: number;
+  quotaTimeoutMs?: number;
+  full?: boolean;
+  authoritative?: boolean;
+  environmentId?: string;
   eventsTimeoutMs?: number;
+  maxPages?: number;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   /** Test seam. */
@@ -66,24 +74,45 @@ export function directEnvId(slug: string): string {
 }
 
 function cursorKey(envId: string): string {
+  // Old cursors used phone time and could advance beyond the machine scan.
+  // Replay once using the server scan boundary, including the original tail-only bug.
+  return `direct_since_v3_${envId}`;
+}
+
+function legacyCursorKey(envId: string): string {
   return `direct_since_${envId}`;
 }
 
-async function kvGetNumber(db: SQLiteDatabase, key: string): Promise<number | null> {
-  const row = await db.getFirstAsync<{ value: string }>("select value from kv where key = ?", [key]);
+async function kvGetNumber(
+  db: SQLiteDatabase,
+  key: string,
+): Promise<number | null> {
+  const row = await db.getFirstAsync<{ value: string }>(
+    "select value from kv where key = ?",
+    [key],
+  );
   const parsed = row === null ? NaN : Number(row.value);
-  return Number.isFinite(parsed) ? parsed : null;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
-async function kvSetString(db: SQLiteDatabase, key: string, value: string): Promise<void> {
-  await db.runAsync("insert or replace into kv (key, value) values (?, ?)", [key, value]);
+async function kvSetString(
+  db: SQLiteDatabase,
+  key: string,
+  value: string,
+): Promise<void> {
+  await db.runAsync("insert or replace into kv (key, value) values (?, ?)", [
+    key,
+    value,
+  ]);
 }
 
 async function kvDelete(db: SQLiteDatabase, key: string): Promise<void> {
   await db.runAsync("delete from kv where key = ?", [key]);
 }
 
-export async function listDirectMachines(db: SQLiteDatabase): Promise<DirectMachine[]> {
+export async function listDirectMachines(
+  db: SQLiteDatabase,
+): Promise<DirectMachine[]> {
   const rows = await db.getAllAsync<{
     id: string;
     slug: string;
@@ -113,22 +142,30 @@ export async function listDirectMachines(db: SQLiteDatabase): Promise<DirectMach
 export async function addDirectMachine(
   db: SQLiteDatabase,
   rawUrl: string,
-  options: { pingTimeoutMs?: number; apiFor?: (endpoint: string) => LiveApi; now?: () => number } = {},
+  options: {
+    pingTimeoutMs?: number;
+    apiFor?: (endpoint: string) => LiveApi;
+    now?: () => number;
+  } = {},
 ): Promise<{ id: string; slug: string; displayName: string }> {
   const base = rawUrl.trim().replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(base)) throw new LiveError("machine URL must start with http:// or https://");
+  if (!/^https?:\/\//.test(base))
+    throw new LiveError("machine URL must start with http:// or https://");
   const now = options.now ?? Date.now;
   const pingTimeout = withTimeout(undefined, options.pingTimeoutMs ?? 3_000);
-  const api = options.apiFor ? options.apiFor(base) : httpLiveApiFor(base, fetch);
+  const api = options.apiFor
+    ? options.apiFor(base)
+    : httpLiveApiFor(base, fetch);
   let ping;
   try {
-    ping = await api.ping(pingTimeout.signal);
+    ping = parseLivePing(await api.ping(pingTimeout.signal));
   } catch (err) {
     throw new LiveError(`no answer from ${base}: ${(err as Error).message}`);
   } finally {
     pingTimeout.cancel();
   }
-  if (ping.slug.trim().length === 0) throw new LiveError("machine reported an empty slug");
+  if (ping.slug.trim().length === 0)
+    throw new LiveError("machine reported an empty slug");
 
   const existing = await db.getFirstAsync<{ id: string }>(
     "select id from environments where slug = ? limit 1",
@@ -151,7 +188,14 @@ export async function addDirectMachine(
          on conflict (id) do update set
            base_url = excluded.base_url, display_name = excluded.display_name,
            last_ping_at = excluded.last_ping_at, last_error = null`,
-        [id, ping.slug, base, ping.displayName, new Date(now()).toISOString(), new Date(now()).toISOString()],
+        [
+          id,
+          ping.slug,
+          base,
+          ping.displayName,
+          new Date(now()).toISOString(),
+          new Date(now()).toISOString(),
+        ],
       );
       // The card exists immediately, even before the first pull.
       await db.runAsync(
@@ -185,14 +229,38 @@ export async function addDirectMachine(
 }
 
 /** Registry removal + local data cascade (nothing server-side exists here). */
-export async function removeDirectMachine(db: SQLiteDatabase, environmentId: string): Promise<void> {
+export async function removeDirectMachine(
+  db: SQLiteDatabase,
+  environmentId: string,
+): Promise<void> {
   await withWriteLock(async () => {
     await db.withTransactionAsync(async () => {
-      await db.runAsync("delete from direct_machines where id = ?", [environmentId]);
-      await db.runAsync("delete from usage_events where environment_id = ?", [environmentId]);
-      await db.runAsync("delete from quota_snapshots where environment_id = ?", [environmentId]);
-      await db.runAsync("delete from environments where id = ?", [environmentId]);
-      await db.runAsync("delete from kv where key = ?", [cursorKey(environmentId)]);
+      await db.runAsync("delete from direct_machines where id = ?", [
+        environmentId,
+      ]);
+      await db.runAsync("delete from usage_events where environment_id = ?", [
+        environmentId,
+      ]);
+      await db.runAsync(
+        "delete from quota_snapshots where environment_id = ?",
+        [environmentId],
+      );
+      await db.runAsync("delete from environments where id = ?", [
+        environmentId,
+      ]);
+      await db.runAsync("delete from kv where key = ?", [
+        cursorKey(environmentId),
+      ]);
+      await db.runAsync("delete from kv where key = ?", [
+        legacyCursorKey(environmentId),
+      ]);
+      for (const key of [
+        `direct_since_v2_${environmentId}`,
+        `direct_hash_${environmentId}`,
+        `direct_backfill_${environmentId}`,
+        `direct_full_at_${environmentId}`,
+      ])
+        await kvDelete(db, key);
     });
     invalidateEventCache(db);
   });
@@ -201,15 +269,17 @@ export async function removeDirectMachine(db: SQLiteDatabase, environmentId: str
 
 /**
  * Probe every registered machine and merge its tail. Same concurrency and
- * cancellation contract as the cloud-path live pull: a superseding call
- * abandons the dying one, and reset/disconnect aborts before any commit.
+ * cancellation contract as the cloud-path live pull: concurrent calls
+ * share the pending result, and reset/disconnect aborts before any commit.
  */
 export function pullDirectFromMachines(
   db: SQLiteDatabase,
   options: DirectPullOptions = {},
 ): Promise<DirectPullStatus[]> {
-  inFlightController.get(db)?.abort();
-  inFlight.delete(db);
+  if (options.signal?.aborted)
+    return Promise.reject(new LiveError("direct pull cancelled"));
+  const existing = inFlight.get(db);
+  if (existing) return existing;
   const generation = cloudGeneration(db);
   const internal = new AbortController();
   inFlightController.set(db, internal);
@@ -220,7 +290,8 @@ export function pullDirectFromMachines(
     else callerSignal.addEventListener("abort", relayCaller, { once: true });
   }
   const assertActive = (): void => {
-    if (cloudGeneration(db) !== generation) throw new LiveError("direct pull cancelled");
+    if (cloudGeneration(db) !== generation || internal.signal.aborted)
+      throw new LiveError("direct pull cancelled");
   };
   const pending = pullDirectUnlocked(db, options, internal.signal, assertActive)
     .finally(() => {
@@ -231,8 +302,9 @@ export function pullDirectFromMachines(
       }
     })
     .catch((err: unknown) => {
-      if (err instanceof LiveError && err.message === "direct pull cancelled") throw err;
-      return [] as DirectPullStatus[];
+      if (err instanceof LiveError && err.message === "direct pull cancelled")
+        throw err;
+      throw err;
     });
   inFlight.set(db, pending);
   return pending;
@@ -246,7 +318,9 @@ async function pullDirectUnlocked(
 ): Promise<DirectPullStatus[]> {
   const now = options.now ?? Date.now;
   assertActive();
-  const machines = await listDirectMachines(db);
+  const machines = (await listDirectMachines(db)).filter(
+    (machine) => !options.environmentId || machine.id === options.environmentId,
+  );
   assertActive();
   if (machines.length === 0) return [];
 
@@ -268,15 +342,24 @@ async function pullDirectUnlocked(
         ? options.apiFor(machine.baseUrl)
         : httpLiveApiFor(machine.baseUrl, options.fetchImpl ?? fetch);
       try {
-        const pingTimeout = withTimeout(probeSignal, options.pingTimeoutMs ?? 2_500);
+        const pingTimeout = withTimeout(
+          probeSignal,
+          options.pingTimeoutMs ?? 2_500,
+        );
         let ping;
         try {
-          ping = await api.ping(pingTimeout.signal);
+          ping = parseLivePing(await api.ping(pingTimeout.signal));
         } finally {
           pingTimeout.cancel();
         }
         assertActive();
         if (ping.slug !== machine.slug) {
+          await persistDirectError(
+            db,
+            machine.id,
+            `Endpoint identity changed to ${ping.slug}`,
+            assertActive,
+          );
           return {
             ...base,
             state: "skipped",
@@ -286,30 +369,15 @@ async function pullDirectUnlocked(
         }
         const clockSkewMs = Math.abs(ping.serverNowMs - now());
 
-        // Per-machine time cursor; the machine applies its own overlap. The
-        // very first pull passes null and takes the machine's full history.
-        const storedCursor = await kvGetNumber(db, cursorKey(machine.id));
-        const since = storedCursor === null ? null : Math.max(0, storedCursor - LIVE_OVERLAP_MS);
-
-        const eventsTimeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 60_000);
-        let eventsPage;
-        try {
-          eventsPage = parseLiveEventsPage(await api.events(since, eventsTimeout.signal));
-        } finally {
-          eventsTimeout.cancel();
-        }
-        assertActive();
-
         await withWriteLock(async () => {
           assertActive();
           await db.withTransactionAsync(async () => {
-            // The machine card reflects the live ping even between pulls.
             await db.runAsync(
-              `update environments set
-                 reporter_version = ?, tokscale_version = ?, export_schema = ?,
-                 reporting_timezone = ?, host_group = coalesce(?, host_group),
-                 last_heartbeat_at = ?
-               where id = ?`,
+              "update direct_machines set last_ping_at=?,last_error=null where id=?",
+              [new Date(now()).toISOString(), machine.id],
+            );
+            await db.runAsync(
+              `update environments set reporter_version=?,tokscale_version=?,export_schema=?,reporting_timezone=?,host_group=coalesce(?,host_group),last_heartbeat_at=? where id=?`,
               [
                 ping.reporterVersion,
                 ping.tokscaleVersion,
@@ -320,140 +388,283 @@ async function pullDirectUnlocked(
                 machine.id,
               ],
             );
-            for (let i = 0; i < eventsPage.events.length; i += 32) {
-              const chunk = eventsPage.events.slice(i, i + 32);
-              await db.runAsync(
-                `insert into usage_events
-               (event_id, environment_id, client, provider_id, model_id, session_id, session_title,
-                workspace_key, workspace_label, agent, occurred_at_ms, source_offset_minutes, source_timezone,
-                source_local_date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                reasoning_tokens, message_count, is_turn_start, duration_ms, cost, cost_source,
-                cost_is_complete, model_attribution_conflicted, parser_version, revision)
-             values ${chunk.map(() => "(" + Array(28).fill("?").join(",") + ")").join(",")}
-             on conflict (event_id) do update set
-               client = excluded.client, provider_id = excluded.provider_id,
-               model_id = excluded.model_id, session_id = excluded.session_id,
-               session_title = excluded.session_title, workspace_key = excluded.workspace_key,
-               workspace_label = excluded.workspace_label, agent = excluded.agent,
-               occurred_at_ms = excluded.occurred_at_ms,
-               source_offset_minutes = excluded.source_offset_minutes,
-               source_timezone = excluded.source_timezone,
-               source_local_date = excluded.source_local_date,
-               input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens,
-               cache_read_tokens = excluded.cache_read_tokens,
-               cache_write_tokens = excluded.cache_write_tokens,
-               reasoning_tokens = excluded.reasoning_tokens,
-               message_count = excluded.message_count, is_turn_start = excluded.is_turn_start,
-               duration_ms = excluded.duration_ms, cost = excluded.cost,
-               cost_source = excluded.cost_source, cost_is_complete = excluded.cost_is_complete,
-               model_attribution_conflicted = excluded.model_attribution_conflicted,
-               parser_version = excluded.parser_version, revision = excluded.revision
-             where usage_events.revision = 0`,
-                chunk.flatMap((e) => [
-                  liveEventId(machine.slug, e.client, e.dedupKey),
-                  machine.id,
-                  e.client,
-                  e.providerId,
-                  e.modelId,
-                  e.sessionId,
-                  e.sessionTitle,
-                  e.workspaceKey,
-                  e.workspaceLabel,
-                  e.agent,
-                  e.occurredAtMs,
-                  e.sourceOffsetMinutes,
-                  e.sourceTimezone,
-                  e.sourceLocalDate,
-                  e.inputTokens,
-                  e.outputTokens,
-                  e.cacheReadTokens,
-                  e.cacheWriteTokens,
-                  e.reasoningTokens,
-                  e.messageCount,
-                  e.isTurnStart ? 1 : 0,
-                  e.durationMs,
-                  e.cost,
-                  e.costSource,
-                  e.costIsComplete ? 1 : 0,
-                  e.modelAttributionConflicted ? 1 : 0,
-                  e.parserVersion,
-                  0,
-                ]),
-              );
-            }
-            // Cursor advances only after the merge commits inside this
-            // transaction — a crashed pull re-pulls its window (idempotent).
-            await kvSetString(db, cursorKey(machine.id), String(now()));
-          });
-          invalidateEventCache(db);
-        });
-        publishMirrorChange(db, "events");
-
-        // Quotas: env-scoped upsert only — never touches other machines'
-        // rows, so the cloud path's wholesale replace stays impossible here.
-        let pulledQuotas = 0;
-        const quotaTimeout = withTimeout(probeSignal, options.pingTimeoutMs ?? 15_000);
-        let quotaPage;
-        try {
-          quotaPage = parseLiveQuotasPage(await api.quotas(quotaTimeout.signal));
-        } catch {
-          quotaPage = null; // quotas are best-effort; events already merged
-        } finally {
-          quotaTimeout.cancel();
-        }
-        if (quotaPage !== null && quotaPage.quotas.length > 0) {
-          await withWriteLock(async () => {
             assertActive();
-            await db.withTransactionAsync(async () => {
-              for (const q of quotaPage.quotas) {
-                await db.runAsync(
-                  `insert into quota_snapshots
-                     (row_key, environment_id, provider, account_key, account_label, plan, metric,
-                      used_percent, remaining_percent, remaining_label, resets_at, status, error, fetched_at)
-                   values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   on conflict (row_key) do update set
-                     used_percent = excluded.used_percent,
-                     remaining_percent = excluded.remaining_percent,
-                     remaining_label = excluded.remaining_label, resets_at = excluded.resets_at,
-                     status = excluded.status, error = excluded.error,
-                     fetched_at = excluded.fetched_at`,
-                  [
-                    `${machine.id}|${q.provider}|${q.accountKey}|${q.metric}`,
-                    machine.id,
-                    q.provider,
-                    q.accountKey,
-                    q.accountLabel,
-                    q.plan,
-                    q.metric,
-                    q.usedPercent,
-                    q.remainingPercent,
-                    q.remainingLabel,
-                    q.resetsAt,
-                    q.status,
-                    q.error,
-                    quotaPage.generatedAt,
-                  ],
-                );
-              }
-            });
           });
-          pulledQuotas = quotaPage.quotas.length;
-          publishMirrorChange(db, "quotas");
+        });
+        publishMirrorChange(db, "machines");
+        const quotaTask = (async () => {
+          const timeout = withTimeout(
+            probeSignal,
+            options.quotaTimeoutMs ?? 45_000,
+          );
+          try {
+            const page = parseLiveQuotasPage(await api.quotas(timeout.signal));
+            let quotaError: string | null = null;
+            await withWriteLock(async () => {
+              assertActive();
+              await db.withTransactionAsync(async () => {
+                for (const quota of page.quotas) {
+                  await mergeQuota(db, machine.id, quota, page.generatedAt);
+                  if (quota.status === "error")
+                    quotaError = quota.error ?? "Quota check failed";
+                  assertActive();
+                }
+              });
+            });
+            publishMirrorChange(db, "quotas");
+            return {
+              count: page.quotas.filter((q) => q.status === "ok").length,
+              error: quotaError,
+            };
+          } catch (err) {
+            assertActive();
+            return { count: 0, error: (err as Error).message };
+          } finally {
+            timeout.cancel();
+          }
+        })();
+        // Observe both channels even if one fails; quotas publish independently.
+        const eventTask = (async () => {
+          const stored = options.full
+            ? null
+            : await kvGetNumber(db, cursorKey(machine.id));
+          const progressKey = `direct_backfill_${machine.id}`;
+          const progressRaw = options.full
+            ? null
+            : (
+                await db.getFirstAsync<{ value: string }>(
+                  "select value from kv where key=?",
+                  [progressKey],
+                )
+              )?.value;
+          const progress: {
+            since: number;
+            cursor: string;
+            scanStartedAtMs: number;
+            snapshotId?: string;
+            contentHash?: string;
+            reconciliation: boolean;
+          } | null = progressRaw ? JSON.parse(progressRaw) : null;
+          const lastFull = await kvGetNumber(
+            db,
+            `direct_full_at_${machine.id}`,
+          );
+          const reconciliation =
+            progress?.reconciliation ??
+            (options.full === true ||
+              (stored !== null && ping.serverNowMs < stored) ||
+              stored === null ||
+              lastFull === null ||
+              now() < lastFull ||
+              now() - lastFull >= 86_400_000);
+          const since =
+            progress?.since ??
+            (reconciliation ? 0 : Math.max(0, stored! - LIVE_OVERLAP_MS));
+          const hashKey = `direct_hash_${machine.id}`;
+          const oldHash = options.full
+            ? null
+            : (
+                await db.getFirstAsync<{ value: string }>(
+                  "select value from kv where key=?",
+                  [hashKey],
+                )
+              )?.value;
+          let cursor = progress?.cursor;
+          let scanStartedAtMs: number | null =
+            progress?.scanStartedAtMs ?? null;
+          let snapshotId = progress?.snapshotId;
+          let contentHash = progress?.contentHash;
+          let pulled = 0;
+          let scanMs: number | null = null;
+          let restarted = false;
+          const seenCursors = new Set<string>();
+          for (
+            let pageNumber = 0;
+            pageNumber < (options.maxPages ?? 8);
+            pageNumber++
+          ) {
+            assertActive();
+            const timeout = withTimeout(
+              probeSignal,
+              options.eventsTimeoutMs ?? 120_000,
+            );
+            let page;
+            try {
+              page = parseLiveEventsPage(
+                await api.events(since, timeout.signal, {
+                  limit: 1000,
+                  ...(cursor ? { cursor } : {}),
+                  ...(oldHash && !cursor ? { knownHash: oldHash } : {}),
+                  ...(options.full && !cursor ? { force: true } : {}),
+                }),
+              );
+            } catch (err) {
+              if (
+                err instanceof LiveError &&
+                err.status === 410 &&
+                cursor &&
+                !restarted
+              ) {
+                assertActive();
+                restarted = true;
+                cursor = undefined;
+                scanStartedAtMs = null;
+                snapshotId = undefined;
+                seenCursors.clear();
+                pageNumber--;
+                continue;
+              }
+              throw err;
+            } finally {
+              timeout.cancel();
+            }
+            assertActive();
+            if (page.slug !== undefined && page.slug !== machine.slug)
+              throw new LiveError("Event page identity mismatch");
+            if (snapshotId && page.snapshotId !== snapshotId)
+              throw new LiveError("Event snapshot changed during backfill");
+            snapshotId = page.snapshotId;
+            scanStartedAtMs ??=
+              page.scanStartedAtMs ??
+              Math.min(ping.serverNowMs, Date.parse(page.generatedAt));
+            scanMs = page.scanMs ?? null;
+            contentHash = page.contentHash;
+            const done = !page.nextCursor;
+            if (page.nextCursor && seenCursors.has(page.nextCursor))
+              throw new LiveError("Repeated event page cursor");
+            await withWriteLock(async () => {
+              assertActive();
+              await db.withTransactionAsync(async () => {
+                pulled += await mergePeerEvents(
+                  db,
+                  machine.id,
+                  machine.slug,
+                  page.events,
+                  assertActive,
+                  options.authoritative,
+                );
+                if (done) {
+                  await kvSetString(
+                    db,
+                    cursorKey(machine.id),
+                    String(
+                      stored !== null && ping.serverNowMs < stored
+                        ? scanStartedAtMs!
+                        : Math.max(stored ?? 0, scanStartedAtMs!),
+                    ),
+                  );
+                  if (contentHash) await kvSetString(db, hashKey, contentHash);
+                  if (reconciliation)
+                    await kvSetString(
+                      db,
+                      `direct_full_at_${machine.id}`,
+                      String(now()),
+                    );
+                  await kvDelete(db, progressKey);
+                } else {
+                  await kvSetString(
+                    db,
+                    progressKey,
+                    JSON.stringify({
+                      since,
+                      cursor: page.nextCursor,
+                      scanStartedAtMs,
+                      snapshotId,
+                      contentHash,
+                      reconciliation,
+                    }),
+                  );
+                }
+                assertActive();
+              });
+              if (page.events.length) invalidateEventCache(db);
+            });
+            if (page.events.length) publishMirrorChange(db, "events");
+            if (done) {
+              await withWriteLock(async () => {
+                assertActive();
+                await db.runAsync(
+                  "update environments set last_success_at=? where id=?",
+                  [new Date(now()).toISOString(), machine.id],
+                );
+              });
+              publishMirrorChange(db, "machines");
+              return { pulled, scanMs, hasMore: false };
+            }
+            seenCursors.add(page.nextCursor!);
+            cursor = page.nextCursor!;
+          }
+          return { pulled, scanMs, hasMore: true };
+        })();
+        const [events, quotas] = await Promise.allSettled([
+          eventTask,
+          quotaTask,
+        ]);
+        assertActive();
+        const quotaResult =
+          quotas.status === "fulfilled"
+            ? quotas.value
+            : { count: 0, error: (quotas.reason as Error).message };
+        if (events.status === "rejected") {
+          const failure = describeFailure(events.reason);
+          await persistDirectError(db, machine.id, failure.error, assertActive);
+          return {
+            ...base,
+            ...failure,
+            pulledQuotas: quotaResult.count,
+            quotaError: quotaResult.error,
+            clockSkewMs,
+            elapsedMs: now() - started,
+          };
         }
-
+        await persistDirectError(
+          db,
+          machine.id,
+          quotaResult.error,
+          assertActive,
+        );
         return {
           ...base,
-          pulledEvents: eventsPage.events.length,
-          pulledQuotas,
+          pulledEvents: events.value.pulled,
+          pulledQuotas: quotaResult.count,
+          quotaError: quotaResult.error,
+          scanMs: events.value.scanMs,
+          hasMore: events.value.hasMore,
           clockSkewMs,
           elapsedMs: now() - started,
         };
       } catch (err) {
         assertActive();
         const failure = describeFailure(err);
+        await persistDirectError(db, machine.id, failure.error, assertActive);
         return { ...base, ...failure, elapsedMs: now() - started };
       }
     }),
   );
   return statuses;
+}
+
+export function cancelDirectPull(db: SQLiteDatabase): void {
+  inFlightController.get(db)?.abort();
+  inFlightController.delete(db);
+  inFlight.delete(db);
+}
+async function persistDirectError(
+  db: SQLiteDatabase,
+  id: string,
+  error: string | null,
+  assertActive: () => void,
+) {
+  await withWriteLock(async () => {
+    assertActive();
+    await db.runAsync("update direct_machines set last_error=? where id=?", [
+      error,
+      id,
+    ]);
+    await db.runAsync("update environments set last_error=? where id=?", [
+      error,
+      id,
+    ]);
+  });
+  publishMirrorChange(db, "machines");
 }

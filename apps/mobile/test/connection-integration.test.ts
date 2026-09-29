@@ -1,0 +1,95 @@
+import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { startLiveServer } from "../../reporter/src/serve";
+import { configSchema } from "../../reporter/src/config";
+import { addDirectMachine, pullDirectFromMachines } from "../src/lib/direct";
+import { mirrorFixture } from "./mirror-fixture";
+
+test("27k-row direct history transfers through real HTTP into SQLite, resumes across passes and then returns unchanged", async () => {
+  const config = configSchema.parse({
+    mode: "direct",
+    environmentSlug: "integration",
+    environmentName: "Integration",
+  });
+  const raw = readFileSync(
+    join(import.meta.dir, "../../reporter/fixtures/tokscale-events.jsonl"),
+    "utf8",
+  ).split("\n")[0]!;
+  const row = JSON.parse(raw);
+  const history = Array.from({ length: 27_001 }, (_, i) =>
+    JSON.stringify({
+      ...row,
+      dedup_key: `integration-${i}`,
+      timestamp: row.timestamp + i,
+      session_title: "Shared project 🔥 résumé ".repeat(8),
+    }),
+  ).join("\n");
+  let scans = 0;
+  let quotaScans = 0;
+  const started = Date.now();
+  const server = await startLiveServer(config, {
+    bind: "127.0.0.1",
+    port: 0,
+    deps: {
+      now: () => started,
+      cursor: () => ({
+        lastRevision: 0,
+        lastPushAt: new Date(0).toISOString(),
+      }),
+      exporterCheck: async () => config.tokscalePin,
+      exporterScan: async () => {
+        scans++;
+        return history;
+      },
+      usage: async () => {
+        quotaScans++;
+        return [];
+      },
+    },
+  });
+  const fx = mirrorFixture();
+  try {
+    const machine = await addDirectMachine(fx.db, server.url);
+    let passes = 0;
+    let changed = 0;
+    while (true) {
+      const statuses = await pullDirectFromMachines(fx.db, {
+        authoritative: true,
+      });
+      expect(statuses[0]!.state).toBe("live");
+      changed += statuses[0]!.pulledEvents;
+      passes++;
+      if (!statuses[0]!.hasMore) break;
+      expect(passes).toBeLessThan(5);
+    }
+    expect(passes).toBe(4);
+    expect(changed).toBe(27_001);
+    expect(scans).toBe(1);
+    expect(quotaScans).toBe(1);
+    expect(
+      await fx.db.getFirstAsync("select count(*) as n from usage_events"),
+    ).toEqual({ n: 27_001 });
+    expect(
+      await fx.db.getFirstAsync("select value from kv where key=?", [
+        `direct_since_v3_${machine.id}`,
+      ]),
+    ).toEqual({ value: String(started) });
+    const before = fx.writes.filter((write) =>
+      write.sql.includes("insert into usage_events"),
+    ).length;
+    expect(
+      (await pullDirectFromMachines(fx.db, { authoritative: true }))[0]!
+        .pulledEvents,
+    ).toBe(0);
+    expect(
+      fx.writes.filter((write) =>
+        write.sql.includes("insert into usage_events"),
+      ).length,
+    ).toBe(before);
+    expect(scans).toBe(1);
+  } finally {
+    server.stop();
+    fx.native.close();
+  }
+}, 30_000);
