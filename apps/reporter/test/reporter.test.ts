@@ -21,6 +21,7 @@ afterEach(() => {
 });
 
 const baseConfig = {
+  mode: "cloud" as const,
   supabaseUrl: "https://xyzcompany.supabase.co",
   publishableKey: "sb_publishable_KEY_1234567890",
   ingestToken: "ingest-token-0123456789abcdef",

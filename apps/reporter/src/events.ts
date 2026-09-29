@@ -19,21 +19,21 @@ export const eventExportRowSchema = z.object({
   workspace_label: z.string().nullable().optional(),
   agent: z.string().nullable().optional(),
   /** Authoritative UTC instant, epoch ms (tokscale UnifiedMessage.timestamp). */
-  timestamp: z.number().int().positive(),
+  timestamp: z.number().int().positive().safe(),
   /** Tokscale's derived calendar day — burn's source_local_date evidence. */
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   tokens: z.object({
-    input: z.number(),
-    output: z.number(),
-    cache_read: z.number(),
-    cache_write: z.number(),
-    reasoning: z.number(),
+    input: z.number().int().nonnegative().safe(),
+    output: z.number().int().nonnegative().safe(),
+    cache_read: z.number().int().nonnegative().safe(),
+    cache_write: z.number().int().nonnegative().safe(),
+    reasoning: z.number().int().nonnegative().safe(),
   }),
   /** serde f64 upstream; decimal strings accepted for forward compatibility. */
   cost: z.union([z.number(), z.string()]),
   cost_source: z.string(),
-  duration_ms: z.number().int().nullable().optional(),
-  message_count: z.number().int().optional(),
+  duration_ms: z.number().int().nonnegative().safe().nullable().optional(),
+  message_count: z.number().int().nonnegative().safe().optional(),
   is_turn_start: z.boolean().optional(),
   model_attribution_conflicted: z.boolean().optional(),
   /**

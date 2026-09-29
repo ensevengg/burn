@@ -3,6 +3,7 @@ import type { BurnConfig } from "../src/config.js";
 import { createLiveFetch, type LiveDeps } from "../src/serve.js";
 
 const CONFIG: BurnConfig = {
+  mode: "cloud",
   supabaseUrl: "https://example.supabase.co",
   publishableKey: "sb_publishable_test",
   ingestToken: "x".repeat(32),

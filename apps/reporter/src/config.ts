@@ -3,28 +3,46 @@
  * XDG on Linux/WSL and the platform app-data dir on Windows. Contains only
  * scoped tokens — the Supabase secret key never goes here.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  unlinkSync,
+} from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { TOKSCALE_PIN } from "@burn/sync-api";
 import { z } from "zod";
 
-export const configSchema = z.object({
-  supabaseUrl: z.string().url(),
-  publishableKey: z.string().min(10),
-  /** Per-environment ingest token; hashes live server-side only. */
-  ingestToken: z.string().min(24),
-  environmentSlug: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "slug must be kebab-case"),
-  environmentName: z.string().min(1),
-  /** `windows` and `wsl` on one physical box should share a hostGroup. */
-  hostGroup: z.string().nullable().default(null),
-  osKind: z.enum(["windows", "wsl", "linux", "macos"]).default("linux"),
-  /** Timezone evidence attached to rows; bucketing happens on the phone (D8). */
-  reportingTimezone: z.string().default("Asia/Kolkata"),
-  /** Minutes between scheduled pushes. */
-  intervalMinutes: z.number().int().min(1).max(1440).default(10),
-  tokscalePin: z.string().default(TOKSCALE_PIN),
-});
+export const configSchema = z
+  .object({
+    mode: z.enum(["cloud", "direct"]).default("cloud"),
+    supabaseUrl: z.string().url().optional(),
+    publishableKey: z.string().min(10).optional(),
+    /** Per-environment ingest token; hashes live server-side only. */
+    ingestToken: z.string().min(24).optional(),
+    environmentSlug: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9-]*$/, "slug must be kebab-case"),
+    environmentName: z.string().min(1),
+    /** `windows` and `wsl` on one physical box should share a hostGroup. */
+    hostGroup: z.string().nullable().default(null),
+    osKind: z.enum(["windows", "wsl", "linux", "macos"]).default("linux"),
+    /** Timezone evidence attached to rows; bucketing happens on the phone (D8). */
+    reportingTimezone: z.string().default("Asia/Kolkata"),
+    /** Minutes between scheduled pushes. */
+    intervalMinutes: z.number().int().min(1).max(1440).default(10),
+    tokscalePin: z.string().default(TOKSCALE_PIN),
+  })
+  .refine(
+    (c) =>
+      c.mode === "direct" ||
+      Boolean(c.supabaseUrl && c.publishableKey && c.ingestToken),
+    "Cloud mode requires URL, publishable key and ingest token",
+  );
 
 export type BurnConfig = z.infer<typeof configSchema>;
 
@@ -32,14 +50,44 @@ export function configDir(): string {
   const override = process.env["BURN_CONFIG_DIR"];
   if (override) return override;
   if (platform() === "win32") {
-    return join(process.env["APPDATA"] ?? join(homedir(), "AppData", "Roaming"), "burn");
+    return join(
+      process.env["APPDATA"] ?? join(homedir(), "AppData", "Roaming"),
+      "burn",
+    );
   }
-  return join(process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"), "burn");
+  return join(
+    process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config"),
+    "burn",
+  );
 }
 
 // Paths resolve lazily so BURN_CONFIG_DIR is honored at call time, not import time.
 export const configPath = (): string => join(configDir(), "config.json");
-export const cursorPath = (): string => join(configDir(), "cursor.json");
+export function cursorScope(config: BurnConfig): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        config.supabaseUrl ?? "direct",
+        config.environmentSlug,
+        config.tokscalePin,
+        config.ingestToken ?? "direct",
+      ]),
+    )
+    .digest("hex")
+    .slice(0, 24);
+}
+export const cursorPath = (config: BurnConfig = loadConfig()): string =>
+  join(configDir(), `cursor-${cursorScope(config)}.json`);
+export function atomicJson(path: string, data: unknown): void {
+  mkdirSync(configDir(), { recursive: true });
+  const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify(data) + "\n", { mode: 0o600 });
+    renameSync(temporary, path);
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
 export const setupSqlPath = (): string => join(configDir(), "setup-tokens.sql");
 
 export function loadConfig(): BurnConfig {
@@ -51,14 +99,16 @@ export function loadConfig(): BurnConfig {
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     if (issue === undefined) throw new Error(`Invalid config at ${path}`);
-    throw new Error(`Invalid config at ${path}: ${issue.path.join(".")} — ${issue.message}`);
+    throw new Error(
+      `Invalid config at ${path}: ${issue.path.join(".")} — ${issue.message}`,
+    );
   }
   return parsed.data;
 }
 
 export function saveConfig(config: BurnConfig): void {
   mkdirSync(configDir(), { recursive: true });
-  writeFileSync(configPath(), JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  atomicJson(configPath(), configSchema.parse(config));
 }
 
 /** Local cursor: the last revision the server acknowledged for this environment. */
@@ -67,17 +117,21 @@ export interface ReporterCursor {
   lastPushAt: string;
 }
 
-export function loadCursor(): ReporterCursor {
-  const path = cursorPath();
-  if (!existsSync(path)) return { lastRevision: 0, lastPushAt: new Date(0).toISOString() };
-  const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<ReporterCursor>;
-  return {
-    lastRevision: Number(raw.lastRevision ?? 0),
-    lastPushAt: typeof raw.lastPushAt === "string" ? raw.lastPushAt : new Date(0).toISOString(),
-  };
+export function loadCursor(config: BurnConfig = loadConfig()): ReporterCursor {
+  const path = cursorPath(config);
+  if (!existsSync(path))
+    return { lastRevision: 0, lastPushAt: new Date(0).toISOString() };
+  return z
+    .object({
+      lastRevision: z.number().int().nonnegative().safe(),
+      lastPushAt: z.string().datetime({ offset: true }),
+    })
+    .parse(JSON.parse(readFileSync(path, "utf8")));
 }
 
-export function saveCursor(cursor: ReporterCursor): void {
-  mkdirSync(configDir(), { recursive: true });
-  writeFileSync(cursorPath(), JSON.stringify(cursor, null, 2) + "\n");
+export function saveCursor(
+  cursor: ReporterCursor,
+  config: BurnConfig = loadConfig(),
+): void {
+  atomicJson(cursorPath(config), cursor);
 }

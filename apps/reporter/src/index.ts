@@ -1,5 +1,11 @@
 #!/usr/bin/env bun
-import { runDaemon, runDoctor, runInit, runPush, runUsage } from "./commands.js";
+import {
+  runDaemon,
+  runDoctor,
+  runInit,
+  runPush,
+  runUsage,
+} from "./commands.js";
 import { runServe } from "./serve.js";
 
 function usage(): never {
@@ -7,7 +13,8 @@ function usage(): never {
 
 Usage: npx burn-report <command> [flags]
 
-  init      Configure this machine (once): --url --key --slug --name
+  init      Configure this machine: --url --key --slug --name
+            Direct-only: --direct --slug --name
             [--os windows|wsl|linux|macos] [--host-group g] [--tz Asia/Kolkata] [--interval 10]
   doctor    Verify config, tokscale pin, burn-events exporter, backend, clock
   usage     Fetch vendor quotas (tokscale usage) and push snapshots
@@ -24,13 +31,22 @@ Docs: https://github.com/ensevengg/burn · AGENTS.md is the rulebook`);
 
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "help";
-const args = new Map<string, string>();
-for (let i = 1; i < argv.length; i++) {
-  const arg = argv[i]!;
-  if (arg.startsWith("--")) args.set(arg.slice(2), argv[++i] ?? "");
-}
-
 try {
+  const args = new Map<string, string>();
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (!arg.startsWith("--")) continue;
+    const name = arg.slice(2);
+    if (["full", "direct", "no-live"].includes(name)) args.set(name, "");
+    else {
+      const value = argv[i + 1];
+      if (!value || value.startsWith("--"))
+        throw new Error(`--${name} requires a value`);
+      args.set(name, value);
+      i++;
+    }
+  }
+
   switch (command) {
     case "init":
       runInit(args);
