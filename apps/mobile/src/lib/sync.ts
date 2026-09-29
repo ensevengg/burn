@@ -4,7 +4,11 @@
  * mode: the bundled generator writes the same mirror schema locally.
  */
 import { pullCloud, type SyncResult } from "./sync-cloud";
-import { cloudGeneration, advanceCloudGeneration, publishMirrorChange } from "./sync-state";
+import {
+  cloudGeneration,
+  advanceCloudGeneration,
+  publishMirrorChange,
+} from "./sync-state";
 import { invalidateEventCache } from "../data/repository";
 import { createBurnBackend } from "@burn/sync-api";
 import { kvSet, wipeForReseed, type SQLiteDatabase } from "./db";
@@ -99,7 +103,10 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
     // Unique-model price list (USD per million tokens) — cache savings math.
     // Already inside the seed transaction: no nested withTransactionAsync here
     // (expo-sqlite rejects nested transactions).
-    const prices: Record<string, { input: number; output: number; cacheRead: number }> = {};
+    const prices: Record<
+      string,
+      { input: number; output: number; cacheRead: number }
+    > = {};
     for (const model of MODELS) {
       prices[model.modelId] = {
         input: model.input,
@@ -124,26 +131,39 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
 export { type SyncResult } from "./sync-cloud";
 
 const inFlight = new WeakMap<SQLiteDatabase, Promise<SyncResult>>();
+const controllers = new WeakMap<SQLiteDatabase, AbortController>();
 export function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
   const existing = inFlight.get(db);
   if (existing) return existing;
   const generation = cloudGeneration(db);
+  const controller = new AbortController();
+  controllers.set(db, controller);
   const assertActive = () => {
-    if (cloudGeneration(db) !== generation) throw new Error("Sync cancelled");
+    if (cloudGeneration(db) !== generation || controller.signal.aborted)
+      throw new Error("Sync cancelled");
   };
   const pending = (async () => {
     const connection = await loadConnection();
     assertActive();
     if (connection === null) throw new Error("Not connected to a backend");
-    return pullCloud(db, createBurnBackend(connection).phone(connection.readToken), assertActive, (kind) => {
-      if (kind === "events") invalidateEventCache(db);
-      publishMirrorChange(db, kind);
-    });
+    return pullCloud(
+      db,
+      createBurnBackend(connection).phone(connection.readToken),
+      assertActive,
+      (kind) => {
+        if (kind === "events") invalidateEventCache(db);
+        publishMirrorChange(db, kind);
+      },
+      controller.signal,
+    );
   })();
   inFlight.set(db, pending);
   void pending
     .finally(() => {
-      if (inFlight.get(db) === pending) inFlight.delete(db);
+      if (inFlight.get(db) === pending) {
+        inFlight.delete(db);
+        controllers.delete(db);
+      }
     })
     .catch(() => {});
   return pending;
@@ -152,11 +172,16 @@ export function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
 /** Called before a reset/backend change; old network responses cannot commit. */
 export function cancelCloudSync(db: SQLiteDatabase): void {
   advanceCloudGeneration(db);
+  controllers.get(db)?.abort();
+  controllers.delete(db);
   inFlight.delete(db);
   invalidateEventCache(db);
 }
 
-export async function requestMachineSync(db: SQLiteDatabase, environmentId: string | null): Promise<void> {
+export async function requestMachineSync(
+  db: SQLiteDatabase,
+  environmentId: string | null,
+): Promise<void> {
   const generation = cloudGeneration(db);
   const connection = await loadConnection();
   if (cloudGeneration(db) !== generation) throw new Error("Sync cancelled");
