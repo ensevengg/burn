@@ -64,8 +64,8 @@ record the original failures; this document describes the resulting behavior.
 ## Upgrade
 
 Apply **every** SQL migration in numeric order through
-`0011_quota_idempotency.sql` to the user's Supabase project before running the
-updated cloud client/reporter. Migrations 0007–0011 were tested in embedded
+`0012_bounded_environment_deltas.sql` to the user's Supabase project before running the
+updated cloud client/reporter. Migrations 0007–0012 were tested in embedded
 PostgreSQL; this work did not access or migrate an external project. Direct-only
 operation does not require a database migration. Restart resident reporters to
 activate the snapshot cache/protocol changes. The exporter remains pinned at
@@ -77,7 +77,7 @@ appropriately: duplicate cleanup and unique-index creation require database work
 
 ## Validation
 
-- Committed-branch verification: **133 tests pass, 0 fail**, and strict type
+- Committed-branch verification: **151 tests pass, 0 fail**, and strict type
   checking passes. Tests include actual mirror SQL
   against SQLite and every migration applied in numeric order to PGlite
   PostgreSQL with anonymous/authenticated roles.
@@ -97,6 +97,50 @@ appropriately: duplicate cleanup and unique-index creation require database work
 - Expo Android export succeeded: 1,107 modules, Hermes bundle about 3.2MB.
   No Android device was attached to ADB; native UI interaction, device merge
   timings and real tailnet/vendor outages were not measured.
+
+## Second review fixes — 2026-10-01
+
+- Automatic full reconciliation downloads history even when an incremental pull
+  acknowledged the same global source hash. An incremental hash only proves the
+  requested tail was downloaded. Full reconciliations omit conditional GETs;
+  the next due reconciliation repairs old records missed by the preceding build.
+- Compatible direct refreshes coalesce; different targets/full-replay intents
+  queue. Queued work checks cancellation and reset generations before starting.
+  Adding a machine targets its first pull, and pending registration checks the
+  generation before and throughout its SQLite transaction.
+- Cloud membership removes replaced UUIDs before inserting a reused slug.
+  Successful membership is persisted with the event page. Delayed quota
+  responses check that membership (including direct registrations); membership
+  commits remove old orphan quotas and publish quota changes after pruning.
+- Quota failures return an independent diagnostic alongside successful event
+  progress. Foreground backfill continues from the committed cursors while the
+  UI shows the quota error.
+- Migration 0012 reads each environment through its environment/revision/event-id
+  index before merging a page. An embedded PostgreSQL plan regression loads
+  100,000 rows and verifies an idle pull filters no historical event rows. The
+  private candidate helper is inaccessible to anonymous callers.
+- Reporter locks atomically publish nonempty directories containing a unique
+  process owner. Dead owners recover immediately; stale cleanup removes only
+  that owner's filename and cannot remove a fresh nonempty lock directory.
+  Legacy PID-file locks remain recoverable; their unused recovery guards no
+  longer gate uploads. Legacy empty locks have a 30-second grace period.
+  Eight competing real processes exercise 160 acquisitions without overlapping
+  writes, and a real SIGKILL test verifies immediate dead-owner recovery.
+- Cloud event cost, tokens, parser version and revision are required. Percentages
+  accept finite numbers or decimal strings, with boolean/object/blank coercions
+  rejected. Timestamps require a valid calendar date and explicit timezone.
+- Live adapters apply one shared validation gate per response; injected adapters
+  pass through it too. Cloud/direct writes share the event column/binding shape.
+  Encoded pages skip repeated row serialization on cache hits, and gzip is
+  computed only when requested.
+- Machine minus buttons, disconnect/wipe and demo clearing retain their controls
+  and show native Yes/Cancel dialogs describing the data affected. Cancel, back
+  and outside dismissal perform no action. Yes runs once; failures are surfaced.
+
+The regression cases first failed on the preceding code. Confirmation tests
+exercise the action boundary and native-dismissal callbacks; no Android device
+was attached, so physical popup interaction remains unmeasured. Android Hermes
+export succeeds with these changes. No external Supabase project was migrated.
 
 ## Remaining work
 

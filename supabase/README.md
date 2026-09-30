@@ -18,6 +18,7 @@ Your project is the only place your data lives. Setup is three pastes and one
    - `migrations/0009_sync_delivery.sql` — per-machine refresh delivery and completion leases
    - `migrations/0010_channel_health.sql` — independent event, quota and connection health
    - `migrations/0011_quota_idempotency.sql` — retry-safe quota snapshots using collection time
+   - `migrations/0012_bounded_environment_deltas.sql` — indexed per-machine cursor reads, including idle pulls
 3. On a machine you control: `npx burn-report init --url <project-url> --key <publishable-key> --slug cachyos --name "CachyOS"`
    It writes `~/.config/burn/config.json` + `~/.config/burn/setup-tokens.sql`.
    Paste that SQL into the editor too (registers the machine and your phone).

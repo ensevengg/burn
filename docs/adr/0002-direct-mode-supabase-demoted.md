@@ -140,7 +140,7 @@ are at most 1,000 rows and approximately 4MB decoded; gzip and conditional
 GETs reduce repeated transfer. Old clients omitting page limits retain their
 original response shape.
 
-Cloud mode requires migrations through 0011, including environment-scoped
+Cloud mode requires migrations through 0012, including environment-scoped
 revision/event-id cursors, durable refresh deliveries and channel health.
 Direct-only reporter initialization needs no cloud URL, key or tokens.
 See [connection-transfer-fixes.md](../connection-transfer-fixes.md) for checks,
