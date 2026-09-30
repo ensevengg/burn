@@ -250,3 +250,49 @@ test("read RPCs reject invalid tokens and malformed continuation state", async (
     await db.exec("reset role");
   }
 });
+
+test("idle environment deltas use bounded index reads instead of filtering the full history", async () => {
+  await db.exec(`insert into burn.usage_events(event_id,environment_id,client,provider_id,model_id,session_id,occurred_at,parser_version,revision)
+    select lpad(i::text,12,'0'),env.id,'codex','openai','gpt','s',now(),'pin',i
+    from burn.environments env cross join generate_series(1,100000) i;
+    analyze burn.usage_events;`);
+  const env = (
+    await db.query<{ id: string }>("select id from burn.environments")
+  ).rows[0]!;
+  const cursors = { [env.id]: { revision: 100001, eventId: "" } };
+  expect((await delta(cursors)).events).toEqual([]);
+  const explain = await db.query<{ "QUERY PLAN": unknown }>(
+    "explain (analyze,format json) select * from burn_api._delta_candidates($1::jsonb,1000)",
+    [JSON.stringify(cursors)],
+  );
+  const plans: Record<string, unknown>[] = [];
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+    } else if (value && typeof value === "object") {
+      const node = value as Record<string, unknown>;
+      if (node["Node Type"]) plans.push(node);
+      for (const child of Object.values(node)) visit(child);
+    }
+  };
+  visit(explain.rows[0]!["QUERY PLAN"]);
+  const eventReads = plans.filter((p) => p["Relation Name"] === "usage_events");
+  expect(eventReads.length).toBeGreaterThan(0);
+  expect(
+    eventReads.every((p) => String(p["Index Cond"]).includes("environment_id")),
+  ).toBe(true);
+  expect(
+    eventReads.reduce(
+      (n, p) => n + Number(p["Rows Removed by Filter"] ?? 0),
+      0,
+    ),
+  ).toBe(0);
+  await db.exec("set role anon");
+  try {
+    await expect(
+      db.query("select * from burn_api._delta_candidates('{}',1)"),
+    ).rejects.toThrow();
+  } finally {
+    await db.exec("reset role");
+  }
+}, 30_000);
