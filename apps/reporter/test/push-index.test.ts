@@ -123,3 +123,81 @@ test("a concurrent process lock blocks a second push and releases after failure"
   const next = lockPush(config);
   next();
 });
+
+test("a crashed recovery owner and old empty recovery guard do not block future uploads", async () => {
+  const { utimesSync } = await import("node:fs");
+  const child = Bun.spawn([process.execPath, "-e", "process.exit(0)"]);
+  await child.exited;
+  const path = `${indexPath(config)}.lock`;
+  for (const recovery of [String(child.pid), ""]) {
+    writeFileSync(path, String(child.pid));
+    writeFileSync(`${path}.recovery`, recovery);
+    utimesSync(`${path}.recovery`, new Date(0), new Date(0));
+    const release = lockPush(config);
+    expect(() => lockPush(config)).toThrow("still running");
+    release();
+  }
+});
+
+test("competing reporter processes recover a dead owner and never overlap writes", async () => {
+  const { utimesSync } = await import("node:fs");
+  const dead = Bun.spawn([process.execPath, "-e", "process.exit(0)"]);
+  await dead.exited;
+  const path = `${indexPath(config)}.lock`;
+  writeFileSync(path, String(dead.pid));
+  writeFileSync(`${path}.recovery`, "");
+  utimesSync(`${path}.recovery`, new Date(0), new Date(0));
+  const source = `
+    const { lockPush } = await import(${JSON.stringify(new URL("../src/event-index.ts", import.meta.url).pathname)});
+    const { openSync,closeSync,unlinkSync } = await import('node:fs');
+    const config = ${JSON.stringify(config)};
+    for(let i=0;i<20;i++) {
+      let release;
+      for(let attempt=0;attempt<500;attempt++) {
+        try { release=lockPush(config); break; }
+        catch(err) { if(!/retry|still running/.test(err.message)) throw err; await Bun.sleep(2); }
+      }
+      if(!release) throw new Error('lock starved');
+      const marker = ${JSON.stringify(join(dir, "active-writer"))};
+      const fd = openSync(marker,'wx');
+      await Bun.sleep(2);
+      closeSync(fd); unlinkSync(marker); release();
+    }
+  `;
+  const workers = Array.from({ length: 8 }, () =>
+    Bun.spawn([process.execPath, "-e", source], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, BURN_CONFIG_DIR: dir },
+    }),
+  );
+  const results = await Promise.all(
+    workers.map(async (worker) => ({
+      code: await worker.exited,
+      error: await new Response(worker.stderr).text(),
+    })),
+  );
+  expect(results).toEqual(Array(8).fill({ code: 0, error: "" }));
+}, 20_000);
+
+test("a killed reporter's published owner directory is recoverable immediately", async () => {
+  const source = `const {lockPush}=await import(${JSON.stringify(new URL("../src/event-index.ts", import.meta.url).pathname)}); lockPush(${JSON.stringify(config)}); console.log('owned'); setInterval(()=>{},1000);`;
+  const child = Bun.spawn([process.execPath, "-e", source], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, BURN_CONFIG_DIR: dir },
+  });
+  try {
+    expect(
+      new TextDecoder().decode((await child.stdout.getReader().read()).value),
+    ).toContain("owned");
+    expect(() => lockPush(config)).toThrow("still running");
+    child.kill("SIGKILL");
+    await child.exited;
+    const release = lockPush(config);
+    release();
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+    await child.exited;
+  }
+});
