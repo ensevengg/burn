@@ -1,4 +1,4 @@
-import { mergeQuota } from "./mirror-writes";
+import { mergeCloudEvents, mergeQuota } from "./mirror-writes";
 import { quotaMirrorKey } from "@burn/sync-api";
 import type { DeltaCursors, MobileSyncApi } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
@@ -10,10 +10,12 @@ export interface SyncResult {
   pages: number;
   watermark: number;
   hasMore: boolean;
+  quotaError?: string;
 }
 const WATERMARK_KEY = "watermark_revision";
 const MAX_PAGES = 8;
 const CURSORS_KEY = "cloud_cursors_v2";
+const MEMBERSHIP_KEY = "cloud_membership_v2";
 async function kvGet(db: SQLiteDatabase, key: string): Promise<string | null> {
   return (
     (
@@ -65,10 +67,35 @@ export async function pullCloud(
       await withWriteLock(async () => {
         assertActive();
         let membershipChanged = false;
+        let quotasChanged = false;
         await db.withTransactionAsync(async () => {
           const direct = await db.getAllAsync<{ id: string; slug: string }>(
             "select id,slug from direct_machines",
           );
+          // Environment membership is authoritative in cloud mode. Reconcile
+          // deletions without removing machines registered directly on this phone.
+          const local = await db.getAllAsync<{ id: string }>(
+            "select id from environments",
+          );
+          const present = new Set([
+            ...delta.environments.map((env) => env.id),
+            ...direct.map((machine) => machine.id),
+          ]);
+          for (const env of local) {
+            if (present.has(env.id)) continue;
+            await db.runAsync(
+              "delete from usage_events where environment_id=?",
+              [env.id],
+            );
+            const removedQuotas = await db.runAsync(
+              "delete from quota_snapshots where environment_id=?",
+              [env.id],
+            );
+            quotasChanged ||= removedQuotas.changes > 0;
+            await db.runAsync("delete from environments where id=?", [env.id]);
+            delete cursors[env.id];
+            membershipChanged = true;
+          }
           for (const env of delta.environments) {
             const peer = direct.find(
               (machine) => machine.slug === env.slug && machine.id !== env.id,
@@ -95,6 +122,7 @@ export async function pullCloud(
                 [peer.id],
               );
               for (const q of quotas) {
+                quotasChanged = true;
                 const target = quotaMirrorKey(
                   env.id,
                   q.provider,
@@ -170,76 +198,16 @@ export async function pullCloud(
               ],
             );
           }
-          // Environment membership is authoritative in cloud mode. Reconcile
-          // deletions without removing machines registered directly on this phone.
-          const local = await db.getAllAsync<{ id: string }>(
-            "select id from environments",
+          await kvSet(
+            db,
+            MEMBERSHIP_KEY,
+            JSON.stringify(delta.environments.map((env) => env.id)),
           );
-          const present = new Set([
-            ...delta.environments.map((env) => env.id),
-            ...direct.map((machine) => machine.id),
-          ]);
-          for (const env of local) {
-            if (present.has(env.id)) continue;
-            await db.runAsync(
-              "delete from usage_events where environment_id=?",
-              [env.id],
-            );
-            await db.runAsync(
-              "delete from quota_snapshots where environment_id=?",
-              [env.id],
-            );
-            await db.runAsync("delete from environments where id=?", [env.id]);
-            delete cursors[env.id];
-            membershipChanged = true;
-          }
-          // 32 rows × 28 bindings = 896 parameters, deliberately under the
-          // classic 999 SQLITE_MAX_VARIABLE_NUMBER cap of older system SQLite
-          // builds (expo-sqlite's bundled build allows far more). If a column
-          // is added, recheck the product or shrink the chunk.
-          for (let i = 0; i < delta.events.length; i += 32) {
-            assertActive();
-            const chunk = delta.events.slice(i, i + 32);
-            await db.runAsync(
-              `insert or replace into usage_events
-             (event_id, environment_id, client, provider_id, model_id, session_id, session_title,
-              workspace_key, workspace_label, agent, occurred_at_ms, source_offset_minutes, source_timezone,
-              source_local_date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-              reasoning_tokens, message_count, is_turn_start, duration_ms, cost, cost_source,
-              cost_is_complete, model_attribution_conflicted, parser_version, revision)
-           values ${chunk.map(() => "(" + Array(28).fill("?").join(",") + ")").join(",")}`,
-              chunk.flatMap((e) => [
-                e.eventId,
-                e.environmentId,
-                e.client,
-                e.providerId,
-                e.modelId,
-                e.sessionId,
-                e.sessionTitle,
-                e.workspaceKey,
-                e.workspaceLabel,
-                e.agent,
-                e.occurredAtMs,
-                e.sourceOffsetMinutes,
-                e.sourceTimezone,
-                e.sourceLocalDate,
-                e.inputTokens,
-                e.outputTokens,
-                e.cacheReadTokens,
-                e.cacheWriteTokens,
-                e.reasoningTokens,
-                e.messageCount,
-                e.isTurnStart ? 1 : 0,
-                e.durationMs,
-                e.cost,
-                e.costSource,
-                e.costIsComplete ? 1 : 0,
-                e.modelAttributionConflicted ? 1 : 0,
-                e.parserVersion,
-                e.revision,
-              ]),
-            );
-          }
+          const orphanQuotas =
+            await db.runAsync(`delete from quota_snapshots where environment_id is not null
+            and environment_id not in (select id from environments)`);
+          quotasChanged ||= orphanQuotas.changes > 0;
+          await mergeCloudEvents(db, delta.events, assertActive);
           assertActive();
           const next = delta.cursors ?? { ...cursors };
           // Non-Supabase adapters may derive continuations from their returned rows.
@@ -257,7 +225,12 @@ export async function pullCloud(
               };
             }
           }
+          for (const envId of Object.keys(next)) {
+            if (!delta.environments.some((env) => env.id === envId))
+              delete next[envId];
+          }
           for (const [envId, cursor] of Object.entries(cursors)) {
+            if (!delta.environments.some((env) => env.id === envId)) continue;
             const nextCursor = next[envId];
             if (
               !nextCursor ||
@@ -279,6 +252,7 @@ export async function pullCloud(
         // Membership changes can remove or reattribute events too.
         if (delta.events.length || membershipChanged) onChange("events");
         onChange("machines");
+        if (quotasChanged) onChange("quotas");
       });
       watermark = Math.max(watermark, delta.maxRevision);
       pulledEvents += delta.events.length;
@@ -295,7 +269,22 @@ export async function pullCloud(
     await withWriteLock(async () => {
       assertActive();
       await db.withTransactionAsync(async () => {
+        const membershipRaw = await kvGet(db, MEMBERSHIP_KEY);
+        const members =
+          membershipRaw === null
+            ? null
+            : new Set<string>(JSON.parse(membershipRaw));
+        const direct = await db.getAllAsync<{ id: string }>(
+          "select id from direct_machines",
+        );
+        for (const machine of direct) members?.add(machine.id);
         for (const q of quotas) {
+          if (
+            members &&
+            q.environmentId !== null &&
+            !members.has(q.environmentId)
+          )
+            continue;
           await mergeQuota(
             db,
             q.environmentId,
@@ -310,9 +299,19 @@ export async function pullCloud(
     });
   };
   const results = await Promise.allSettled([pullEvents(), pullQuotas()]);
-  for (const result of results)
-    if (result.status === "rejected") throw result.reason;
   const events = results[0];
-  if (events.status !== "fulfilled") throw new Error("Event sync failed");
-  return events.value;
+  if (events.status === "rejected") throw events.reason;
+  assertActive();
+  const quotas = results[1];
+  return {
+    ...events.value,
+    ...(quotas.status === "rejected"
+      ? {
+          quotaError:
+            quotas.reason instanceof Error
+              ? quotas.reason.message
+              : String(quotas.reason),
+        }
+      : {}),
+  };
 }

@@ -3,6 +3,7 @@ import {
   quotaMirrorKey,
   type IngestEventInput,
   type IngestQuotaInput,
+  type UsageEvent,
 } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
 
@@ -47,49 +48,87 @@ export async function mergePeerEvents(
   assertActive: () => void,
   authoritative = false,
 ): Promise<number> {
+  return writeEvents(
+    db,
+    events.map((event) => ({
+      ...event,
+      eventId: liveEventId(slug, event.client, event.dedupKey),
+      environmentId,
+      revision: 0,
+    })),
+    assertActive,
+    authoritative ? "direct" : "live",
+  );
+}
+
+/** Cloud and peer writers share the column/binding contract. Caller owns the
+ * transaction and lock; cloud revisions remain authoritative in cloud mode. */
+export async function mergeCloudEvents(
+  db: SQLiteDatabase,
+  events: UsageEvent[],
+  assertActive: () => void,
+): Promise<number> {
+  return writeEvents(db, events, assertActive, "cloud");
+}
+
+function eventBindings(e: UsageEvent) {
+  return [
+    e.eventId,
+    e.environmentId,
+    e.client,
+    e.providerId,
+    e.modelId,
+    e.sessionId,
+    e.sessionTitle,
+    e.workspaceKey,
+    e.workspaceLabel,
+    e.agent,
+    e.occurredAtMs,
+    e.sourceOffsetMinutes,
+    e.sourceTimezone,
+    e.sourceLocalDate,
+    e.inputTokens,
+    e.outputTokens,
+    e.cacheReadTokens,
+    e.cacheWriteTokens,
+    e.reasoningTokens,
+    e.messageCount,
+    e.isTurnStart ? 1 : 0,
+    e.durationMs,
+    e.cost,
+    e.costSource,
+    e.costIsComplete ? 1 : 0,
+    e.modelAttributionConflicted ? 1 : 0,
+    e.parserVersion,
+    e.revision,
+  ];
+}
+
+async function writeEvents(
+  db: SQLiteDatabase,
+  events: UsageEvent[],
+  assertActive: () => void,
+  mode: "cloud" | "direct" | "live",
+): Promise<number> {
   let changed = 0;
+  // 32 × 28 bindings stays below the classic 999-parameter SQLite limit.
   for (let i = 0; i < events.length; i += 32) {
     assertActive();
     const chunk = events.slice(i, i + 32);
-    const result = await db.runAsync(
-      `insert into usage_events (${columns.join(",")})
-      values ${chunk.map(() => `(${Array(28).fill("?").join(",")})`).join(",")}
+    const conflict =
+      mode === "cloud"
+        ? ""
+        : `
       on conflict(event_id) do update set ${columns
         .slice(1)
         .map((c) => `${c}=excluded.${c}`)
         .join(",")}
-      where (${authoritative ? "1" : "usage_events.revision=0"})
-        and (${contentColumns.join(",")}) is not (${contentColumns.map((c) => `excluded.${c}`).join(",")})`,
-      chunk.flatMap((e) => [
-        liveEventId(slug, e.client, e.dedupKey),
-        environmentId,
-        e.client,
-        e.providerId,
-        e.modelId,
-        e.sessionId,
-        e.sessionTitle,
-        e.workspaceKey,
-        e.workspaceLabel,
-        e.agent,
-        e.occurredAtMs,
-        e.sourceOffsetMinutes,
-        e.sourceTimezone,
-        e.sourceLocalDate,
-        e.inputTokens,
-        e.outputTokens,
-        e.cacheReadTokens,
-        e.cacheWriteTokens,
-        e.reasoningTokens,
-        e.messageCount,
-        e.isTurnStart ? 1 : 0,
-        e.durationMs,
-        e.cost,
-        e.costSource,
-        e.costIsComplete ? 1 : 0,
-        e.modelAttributionConflicted ? 1 : 0,
-        e.parserVersion,
-        0,
-      ]),
+      where (${mode === "direct" ? "1" : "usage_events.revision=0"})
+        and (${contentColumns.join(",")}) is not (${contentColumns.map((c) => `excluded.${c}`).join(",")})`;
+    const result = await db.runAsync(
+      `insert ${mode === "cloud" ? "or replace " : ""}into usage_events (${columns.join(",")})
+      values ${chunk.map(() => `(${Array(columns.length).fill("?").join(",")})`).join(",")}${conflict}`,
+      chunk.flatMap(eventBindings),
     );
     changed += result.changes;
   }

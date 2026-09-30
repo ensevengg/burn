@@ -34,7 +34,7 @@ const quota: QuotaSnapshot = {
 };
 const phone = (overrides: Partial<MobileSyncApi> = {}): MobileSyncApi => ({
   fetchDelta: async () => ({
-    environments: [],
+    environments: [cloudEnvironment("windows")],
     events: [],
     maxRevision: 0,
     hasMore: false,
@@ -506,7 +506,17 @@ test("cloud membership removal prunes departed history but preserves direct regi
   await fx.db.runAsync(
     "insert into direct_machines(id,slug,base_url,display_name,added_at) values ('direct','direct','http://direct','Direct','2026-09-30T10:00:00Z')",
   );
-  await pullCloud(fx.db, phone());
+  await pullCloud(
+    fx.db,
+    phone({
+      fetchDelta: async () => ({
+        environments: [],
+        events: [],
+        maxRevision: 0,
+        hasMore: false,
+      }),
+    }),
+  );
   expect(await fx.db.getAllAsync("select id from environments")).toEqual([
     { id: "direct" },
   ]);
@@ -580,4 +590,172 @@ test("cloud pairing reuses the direct machine card and moves its local cursor at
       "select used_percent from quota_snapshots where environment_id='cloud-uuid'",
     ),
   ).toEqual({ used_percent: 70 });
+});
+
+const cloudEnvironment = (id: string, slug = id) => ({
+  id,
+  slug,
+  displayName: slug,
+  hostGroup: null,
+  osKind: "linux" as const,
+  reporterVersion: null,
+  tokscaleVersion: null,
+  exportSchema: null,
+  reportingTimezone: null,
+  lastHeartbeatAt: null,
+  lastSuccessAt: null,
+  lastError: null,
+  latestRevision: 0,
+  liveEndpoint: null,
+});
+
+test("a cloud environment recreated under the same slug replaces its old UUID", async () => {
+  const fx = mirrorFixture();
+  await fx.db.runAsync(
+    "insert into environments(id,slug,display_name,os_kind) values ('old','machine','Machine','linux')",
+  );
+  try {
+    await pullCloud(
+      fx.db,
+      phone({
+        fetchDelta: async () => ({
+          environments: [cloudEnvironment("new", "machine")],
+          events: [],
+          cursors: {},
+          maxRevision: 0,
+          hasMore: false,
+        }),
+        fetchQuotaLatest: async () => [],
+      }),
+    );
+    expect(await fx.db.getAllAsync("select id,slug from environments")).toEqual(
+      [{ id: "new", slug: "machine" }],
+    );
+  } finally {
+    fx.native.close();
+  }
+});
+
+test("a delayed quota response cannot resurrect a departed environment's card", async () => {
+  const fx = mirrorFixture();
+  await fx.db.runAsync(
+    "insert into environments(id,slug,display_name,os_kind) values ('windows','windows','Windows','windows')",
+  );
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  try {
+    await pullCloud(
+      fx.db,
+      phone({
+        fetchDelta: async () => ({
+          environments: [],
+          events: [],
+          maxRevision: 0,
+          hasMore: false,
+        }),
+        fetchQuotaLatest: async () => {
+          await gate;
+          return [quota];
+        },
+      }),
+      undefined,
+      (kind) => {
+        if (kind === "machines") release();
+      },
+    );
+    expect(await queryQuotas(fx.db)).toEqual([]);
+    // Repair orphan quotas left by older installs too.
+    const { mergeQuota } = await import("../src/lib/mirror-writes");
+    await mergeQuota(fx.db, "windows", quota, quota.fetchedAt);
+    await pullCloud(
+      fx.db,
+      phone({
+        fetchDelta: async () => ({
+          environments: [],
+          events: [],
+          maxRevision: 0,
+          hasMore: false,
+        }),
+        fetchQuotaLatest: async () => [],
+      }),
+    );
+    expect(await queryQuotas(fx.db)).toEqual([]);
+  } finally {
+    release();
+    fx.native.close();
+  }
+});
+
+test("quota outages retain event backfill progress and its continuation", async () => {
+  const fx = mirrorFixture();
+  let pages = 0;
+  try {
+    const result = await pullCloud(
+      fx.db,
+      phone({
+        fetchDelta: async () => {
+          pages++;
+          return {
+            environments: [cloudEnvironment("windows")],
+            events: [usage({ eventId: `e${pages}`, revision: pages })],
+            maxRevision: pages,
+            hasMore: true,
+          };
+        },
+        fetchQuotaLatest: async () => {
+          throw new Error("quota outage");
+        },
+      }),
+    );
+    expect(result.hasMore).toBe(true);
+    expect(result.quotaError).toBe("quota outage");
+    expect(result.pulledEvents).toBe(8);
+    expect(
+      await fx.db.getFirstAsync("select count(*) as n from usage_events"),
+    ).toEqual({ n: 8 });
+  } finally {
+    fx.native.close();
+  }
+});
+
+test("membership pruning republishes quotas when a quota response committed first", async () => {
+  const fx = mirrorFixture();
+  await fx.db.runAsync(
+    "insert into environments(id,slug,display_name,os_kind) values ('windows','windows','Windows','windows')",
+  );
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const changes: string[] = [];
+  try {
+    await pullCloud(
+      fx.db,
+      phone({
+        fetchDelta: async () => {
+          await gate;
+          return {
+            environments: [],
+            events: [],
+            maxRevision: 0,
+            hasMore: false,
+          };
+        },
+      }),
+      undefined,
+      (kind) => {
+        changes.push(kind);
+        if (kind === "quotas") release();
+      },
+    );
+    expect(changes[0]).toBe("quotas");
+    expect(changes.at(-1)).toBe("quotas");
+    expect(changes.filter((kind) => kind === "quotas")).toHaveLength(2);
+    expect(await queryQuotas(fx.db)).toEqual([]);
+  } finally {
+    release();
+    fx.native.close();
+  }
 });
