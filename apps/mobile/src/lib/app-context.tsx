@@ -238,7 +238,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         patchStatus({
           lastSync: new Date(),
-          syncError: null,
+          syncError: result.quotaError ?? null,
           syncNotice: result.hasMore
             ? "Loading history in the background."
             : null,
