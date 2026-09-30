@@ -325,7 +325,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const added = await addDirectMachine(db, url);
         invalidate();
         // First data lands immediately; statuses feed the Machines card.
-        void sync();
+        void sync(added.id);
         return added;
       },
       async disconnect() {
@@ -438,7 +438,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 ? "Loading machine history in the background."
                 : null,
             });
-            if (statuses.some((s) => s.hasMore))
+            if (
+              statuses.some((s) => s.hasMore) &&
+              NativeAppState.currentState === "active"
+            )
               backfillTimer.current = setTimeout(() => {
                 backfillTimer.current = null;
                 void continueSync.current();

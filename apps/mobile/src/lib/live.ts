@@ -24,8 +24,7 @@ import { mergePeerEvents } from "./mirror-writes";
  */
 import {
   httpLiveApiFor,
-  parseLiveEventsPage,
-  parseLivePing,
+  validateLiveApi,
   LiveError,
   type LiveApi,
 } from "@burn/sync-api";
@@ -208,9 +207,11 @@ async function pullLiveUnlocked(
         error: null,
         elapsedMs: 0,
       };
-      const api = options.apiFor
-        ? options.apiFor(target.liveEndpoint)
-        : httpLiveApiFor(target.liveEndpoint, options.fetchImpl ?? fetch);
+      const api = validateLiveApi(
+        options.apiFor
+          ? options.apiFor(target.liveEndpoint)
+          : httpLiveApiFor(target.liveEndpoint, options.fetchImpl ?? fetch),
+      );
       try {
         // 1. Reachability + identity. A slow-to-answer machine counts as
         // offline: the mirror is already correct, live is opportunistic.
@@ -220,7 +221,7 @@ async function pullLiveUnlocked(
         );
         let ping;
         try {
-          ping = parseLivePing(await api.ping(pingTimeout.signal));
+          ping = await api.ping(pingTimeout.signal);
         } finally {
           pingTimeout.cancel();
         }
@@ -248,12 +249,10 @@ async function pullLiveUnlocked(
           );
           let page;
           try {
-            page = parseLiveEventsPage(
-              await api.events(null, timeout.signal, {
-                limit: 1000,
-                ...(cursor ? { cursor } : {}),
-              }),
-            );
+            page = await api.events(null, timeout.signal, {
+              limit: 1000,
+              ...(cursor ? { cursor } : {}),
+            });
           } finally {
             timeout.cancel();
           }

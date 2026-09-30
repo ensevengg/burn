@@ -771,3 +771,137 @@ test("machine clock rollback forces full reconciliation and resets the scan chec
     ),
   ).toEqual({ value: "100000" });
 });
+
+test("an add-machine ping released after reset cannot recreate the registry", async () => {
+  const fx = mirrorFixture();
+  const { advanceCloudGeneration } = await import("../src/lib/sync-state");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const api: LiveApi = {
+    ping: async () => {
+      await gate;
+      return ping();
+    },
+    events: async () => {
+      throw new Error("unused");
+    },
+    quotas: async () => {
+      throw new Error("unused");
+    },
+  };
+  const pending = addDirectMachine(fx.db, "http://win", { apiFor: () => api });
+  const result = pending.catch((err: Error) => err);
+  advanceCloudGeneration(fx.db);
+  release();
+  try {
+    expect(await result).toBeInstanceOf(Error);
+    expect(await listDirectMachines(fx.db)).toEqual([]);
+    expect(await fx.db.getAllAsync("select id from environments")).toEqual([]);
+  } finally {
+    await result;
+    fx.native.close();
+  }
+});
+
+test("refreshes for different machines queue instead of silently dropping the second target", async () => {
+  const fx = mirrorFixture();
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const started = new Promise<void>((r) => {
+    entered = r;
+  });
+  let block = false;
+  const calls: string[] = [];
+  const apiFor = (url: string): LiveApi => ({
+    ping: async () => {
+      const slug = url.endsWith("/a") ? "a" : "b";
+      if (block) {
+        calls.push(slug);
+        if (slug === "a") {
+          entered();
+          await gate;
+        }
+      }
+      return ping({ slug });
+    },
+    events: async () => ({
+      sinceMs: 0,
+      generatedAt: new Date().toISOString(),
+      events: [],
+    }),
+    quotas: async () => ({ generatedAt: new Date().toISOString(), quotas: [] }),
+  });
+  const a = await addDirectMachine(fx.db, "http://probe/a", { apiFor });
+  const b = await addDirectMachine(fx.db, "http://probe/b", { apiFor });
+  block = true;
+  const first = pullDirectFromMachines(fx.db, { environmentId: a.id, apiFor });
+  await started;
+  const second = pullDirectFromMachines(fx.db, { environmentId: b.id, apiFor });
+  release();
+  try {
+    expect((await second).map((s) => s.environmentId)).toEqual([b.id]);
+    expect(calls).toEqual(["a", "b"]);
+    await first;
+  } finally {
+    release();
+    await Promise.allSettled([first, second]);
+    fx.native.close();
+  }
+});
+
+test("a queued targeted refresh is cancelled by reset before it can contact its machine", async () => {
+  const { cancelDirectPull } = await import("../src/lib/direct");
+  const { advanceCloudGeneration } = await import("../src/lib/sync-state");
+  const fx = mirrorFixture();
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const started = new Promise<void>((r) => {
+    entered = r;
+  });
+  let block = false;
+  const calls: string[] = [];
+  const apiFor = (url: string): LiveApi => ({
+    ping: async () => {
+      const slug = url.endsWith("/a") ? "a" : "b";
+      if (block) {
+        calls.push(slug);
+        entered();
+        await gate;
+      }
+      return ping({ slug });
+    },
+    events: async () => ({
+      sinceMs: 0,
+      generatedAt: new Date().toISOString(),
+      events: [],
+    }),
+    quotas: async () => ({ generatedAt: new Date().toISOString(), quotas: [] }),
+  });
+  const a = await addDirectMachine(fx.db, "http://probe/a", { apiFor });
+  const b = await addDirectMachine(fx.db, "http://probe/b", { apiFor });
+  block = true;
+  const first = pullDirectFromMachines(fx.db, { environmentId: a.id, apiFor });
+  const firstError = first.catch((e: Error) => e);
+  await started;
+  const second = pullDirectFromMachines(fx.db, { environmentId: b.id, apiFor });
+  const secondError = second.catch((e: Error) => e);
+  advanceCloudGeneration(fx.db);
+  cancelDirectPull(fx.db);
+  release();
+  try {
+    expect(await firstError).toBeInstanceOf(Error);
+    expect(await secondError).toBeInstanceOf(Error);
+    expect(calls).toEqual(["a"]);
+  } finally {
+    await Promise.allSettled([first, second]);
+    fx.native.close();
+  }
+});

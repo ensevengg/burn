@@ -14,9 +14,7 @@ import { mergePeerEvents, mergeQuota } from "./mirror-writes";
 import {
   LIVE_OVERLAP_MS,
   httpLiveApiFor,
-  parseLiveEventsPage,
-  parseLivePing,
-  parseLiveQuotasPage,
+  validateLiveApi,
   LiveError,
   type LiveApi,
 } from "@burn/sync-api";
@@ -68,6 +66,8 @@ export interface DirectPullOptions {
 
 const inFlight = new WeakMap<SQLiteDatabase, Promise<DirectPullStatus[]>>();
 const inFlightController = new WeakMap<SQLiteDatabase, AbortController>();
+const inFlightOptions = new WeakMap<SQLiteDatabase, DirectPullOptions>();
+const cancellationEpochs = new WeakMap<SQLiteDatabase, number>();
 
 export function directEnvId(slug: string): string {
   return `direct-${slug}`;
@@ -148,22 +148,28 @@ export async function addDirectMachine(
     now?: () => number;
   } = {},
 ): Promise<{ id: string; slug: string; displayName: string }> {
+  const generation = cloudGeneration(db);
+  const assertActive = () => {
+    if (cloudGeneration(db) !== generation)
+      throw new LiveError("add machine cancelled");
+  };
   const base = rawUrl.trim().replace(/\/+$/, "");
   if (!/^https?:\/\//.test(base))
     throw new LiveError("machine URL must start with http:// or https://");
   const now = options.now ?? Date.now;
   const pingTimeout = withTimeout(undefined, options.pingTimeoutMs ?? 3_000);
-  const api = options.apiFor
-    ? options.apiFor(base)
-    : httpLiveApiFor(base, fetch);
+  const api = validateLiveApi(
+    options.apiFor ? options.apiFor(base) : httpLiveApiFor(base, fetch),
+  );
   let ping;
   try {
-    ping = parseLivePing(await api.ping(pingTimeout.signal));
+    ping = await api.ping(pingTimeout.signal);
   } catch (err) {
     throw new LiveError(`no answer from ${base}: ${(err as Error).message}`);
   } finally {
     pingTimeout.cancel();
   }
+  assertActive();
   if (ping.slug.trim().length === 0)
     throw new LiveError("machine reported an empty slug");
 
@@ -181,6 +187,7 @@ export async function addDirectMachine(
   }
 
   await withWriteLock(async () => {
+    assertActive();
     await db.withTransactionAsync(async () => {
       await db.runAsync(
         `insert into direct_machines (id, slug, base_url, display_name, added_at, last_ping_at, last_error)
@@ -197,6 +204,7 @@ export async function addDirectMachine(
           new Date(now()).toISOString(),
         ],
       );
+      assertActive();
       // The card exists immediately, even before the first pull.
       await db.runAsync(
         `insert into environments
@@ -221,6 +229,7 @@ export async function addDirectMachine(
           base,
         ],
       );
+      assertActive();
     });
     invalidateEventCache(db);
   });
@@ -278,9 +287,31 @@ export function pullDirectFromMachines(
 ): Promise<DirectPullStatus[]> {
   if (options.signal?.aborted)
     return Promise.reject(new LiveError("direct pull cancelled"));
-  const existing = inFlight.get(db);
-  if (existing) return existing;
   const generation = cloudGeneration(db);
+  const epoch = cancellationEpochs.get(db) ?? 0;
+  const existing = inFlight.get(db);
+  if (existing) {
+    const running = inFlightOptions.get(db)!;
+    if (
+      running.environmentId === options.environmentId &&
+      Boolean(running.full) === Boolean(options.full) &&
+      Boolean(running.authoritative) === Boolean(options.authoritative)
+    )
+      return existing;
+    // A different target/full replay must run after the current pass. Even an
+    // all-machine pass may have captured membership before this target was added.
+    return existing
+      .catch(() => {})
+      .then(() => {
+        if (
+          cloudGeneration(db) !== generation ||
+          (cancellationEpochs.get(db) ?? 0) !== epoch ||
+          options.signal?.aborted
+        )
+          throw new LiveError("direct pull cancelled");
+        return pullDirectFromMachines(db, options);
+      });
+  }
   const internal = new AbortController();
   inFlightController.set(db, internal);
   const relayCaller = () => internal.abort(new Error("cancelled"));
@@ -299,6 +330,7 @@ export function pullDirectFromMachines(
       if (inFlight.get(db) === pending) {
         inFlight.delete(db);
         inFlightController.delete(db);
+        inFlightOptions.delete(db);
       }
     })
     .catch((err: unknown) => {
@@ -307,6 +339,7 @@ export function pullDirectFromMachines(
       throw err;
     });
   inFlight.set(db, pending);
+  inFlightOptions.set(db, options);
   return pending;
 }
 
@@ -338,9 +371,11 @@ async function pullDirectUnlocked(
         error: null,
         elapsedMs: 0,
       };
-      const api = options.apiFor
-        ? options.apiFor(machine.baseUrl)
-        : httpLiveApiFor(machine.baseUrl, options.fetchImpl ?? fetch);
+      const api = validateLiveApi(
+        options.apiFor
+          ? options.apiFor(machine.baseUrl)
+          : httpLiveApiFor(machine.baseUrl, options.fetchImpl ?? fetch),
+      );
       try {
         const pingTimeout = withTimeout(
           probeSignal,
@@ -348,7 +383,7 @@ async function pullDirectUnlocked(
         );
         let ping;
         try {
-          ping = parseLivePing(await api.ping(pingTimeout.signal));
+          ping = await api.ping(pingTimeout.signal);
         } finally {
           pingTimeout.cancel();
         }
@@ -398,7 +433,7 @@ async function pullDirectUnlocked(
             options.quotaTimeoutMs ?? 45_000,
           );
           try {
-            const page = parseLiveQuotasPage(await api.quotas(timeout.signal));
+            const page = await api.quotas(timeout.signal);
             let quotaError: string | null = null;
             await withWriteLock(async () => {
               assertActive();
@@ -490,14 +525,16 @@ async function pullDirectUnlocked(
             );
             let page;
             try {
-              page = parseLiveEventsPage(
-                await api.events(since, timeout.signal, {
-                  limit: 1000,
-                  ...(cursor ? { cursor } : {}),
-                  ...(oldHash && !cursor ? { knownHash: oldHash } : {}),
-                  ...(options.full && !cursor ? { force: true } : {}),
-                }),
-              );
+              page = await api.events(since, timeout.signal, {
+                limit: 1000,
+                ...(cursor ? { cursor } : {}),
+                // Incremental hashes describe the whole source snapshot, not
+                // proof that this phone downloaded its historical contents.
+                ...(oldHash && !cursor && !reconciliation
+                  ? { knownHash: oldHash }
+                  : {}),
+                ...(options.full && !cursor ? { force: true } : {}),
+              });
             } catch (err) {
               if (
                 err instanceof LiveError &&
@@ -645,9 +682,11 @@ async function pullDirectUnlocked(
 }
 
 export function cancelDirectPull(db: SQLiteDatabase): void {
+  cancellationEpochs.set(db, (cancellationEpochs.get(db) ?? 0) + 1);
   inFlightController.get(db)?.abort();
   inFlightController.delete(db);
   inFlight.delete(db);
+  inFlightOptions.delete(db);
 }
 async function persistDirectError(
   db: SQLiteDatabase,

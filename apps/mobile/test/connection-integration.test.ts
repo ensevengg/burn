@@ -93,3 +93,72 @@ test("27k-row direct history transfers through real HTTP into SQLite, resumes ac
     fx.native.close();
   }
 }, 30_000);
+
+test("automatic full reconciliation downloads late historical rows even after an incremental hash acknowledgement", async () => {
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  const config = configSchema.parse({
+    mode: "direct",
+    environmentSlug: "reconcile",
+    environmentName: "Reconcile",
+  });
+  const row = JSON.parse(
+    readFileSync(
+      join(import.meta.dir, "../../reporter/fixtures/tokscale-events.jsonl"),
+      "utf8",
+    ).split("\n")[0]!,
+  );
+  let history = [
+    { ...row, dedup_key: "old", timestamp: clock - 2 * 86_400_000, cost: 1 },
+  ];
+  const server = await startLiveServer(config, {
+    bind: "127.0.0.1",
+    port: 0,
+    deps: {
+      now: () => clock,
+      cursor: () => ({
+        lastRevision: 0,
+        lastPushAt: new Date(0).toISOString(),
+      }),
+      exporterCheck: async () => config.tokscalePin,
+      exporterScan: async () =>
+        history.map((r) => JSON.stringify(r)).join("\n"),
+      usage: async () => [],
+    },
+  });
+  const fx = mirrorFixture();
+  try {
+    await addDirectMachine(fx.db, server.url, { now: () => clock });
+    await pullDirectFromMachines(fx.db, {
+      authoritative: true,
+      now: () => clock,
+    });
+    clock += 60_000;
+    history = [
+      { ...history[0]!, cost: 2 },
+      { ...row, dedup_key: "late", timestamp: clock - 3 * 86_400_000, cost: 3 },
+    ];
+    expect(
+      (
+        await pullDirectFromMachines(fx.db, {
+          authoritative: true,
+          now: () => clock,
+        })
+      )[0]!.pulledEvents,
+    ).toBe(0);
+    clock += 86_400_001;
+    expect(
+      (
+        await pullDirectFromMachines(fx.db, {
+          authoritative: true,
+          now: () => clock,
+        })
+      )[0]!.pulledEvents,
+    ).toBe(2);
+    expect(
+      await fx.db.getAllAsync("select cost from usage_events order by cost"),
+    ).toEqual([{ cost: "2.000000" }, { cost: "3.000000" }]);
+  } finally {
+    server.stop();
+    fx.native.close();
+  }
+});
