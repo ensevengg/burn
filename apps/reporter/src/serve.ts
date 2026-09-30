@@ -104,22 +104,13 @@ export function createLiveFetch(
           now,
         )
       : shared.quotas;
-  const encoded = new Map<string, { text: string; gzip: Uint8Array }>();
+  const encoded = new Map<string, { text: string; gzip?: Uint8Array }>();
   const respond = (
     req: Request,
     payload: unknown,
     cacheKey?: string,
     headers: Record<string, string> = {},
   ) => {
-    let body = cacheKey ? encoded.get(cacheKey) : undefined;
-    if (!body) {
-      const text = JSON.stringify(payload);
-      body = { text, gzip: gzipSync(text) };
-      if (cacheKey) {
-        encoded.set(cacheKey, body);
-        while (encoded.size > 4) encoded.delete(encoded.keys().next().value!);
-      }
-    }
     const gzip = (req.headers.get("accept-encoding") ?? "")
       .split(",")
       .some((part) => {
@@ -129,6 +120,16 @@ export function createLiveFetch(
           !parameters.some((p) => /^\s*q\s*=\s*0(?:\.0*)?\s*$/.test(p))
         );
       });
+    let body = cacheKey ? encoded.get(cacheKey) : undefined;
+    if (!body) {
+      const text = JSON.stringify(payload);
+      body = { text };
+      if (cacheKey) {
+        encoded.set(cacheKey, body);
+        while (encoded.size > 4) encoded.delete(encoded.keys().next().value!);
+      }
+    }
+    if (gzip && !body.gzip) body.gzip = gzipSync(body.text);
     return new Response(gzip ? body.gzip : body.text, {
       headers: {
         "content-type": "application/json",
@@ -242,6 +243,8 @@ export function createLiveFetch(
             limitParam === null
               ? count
               : Math.max(1, Math.min(requestedLimit, 1000));
+          const pageKey = `${snapshot.id}:${sinceMs}:${offset}:${limit}`;
+          if (encoded.has(pageKey)) return respond(req, null, pageKey, headers);
           const events = snapshot.events.slice(
             first + offset,
             first + offset + limit,
@@ -281,7 +284,7 @@ export function createLiveFetch(
               events,
               nextCursor,
             },
-            `${snapshot.id}:${sinceMs}:${offset}:${limit}`,
+            pageKey,
             headers,
           );
         } catch (err) {

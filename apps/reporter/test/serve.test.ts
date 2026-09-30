@@ -342,3 +342,33 @@ test("a cold scan longer than Bun's default idle deadline reaches the HTTP clien
     server.stop();
   }
 }, 20_000);
+
+test("encoded page cache bypasses repeated row serialization and preserves negotiated encoding", async () => {
+  const { spyOn } = await import("bun:test");
+  const handler = createLiveFetch(
+    deps({
+      exporterScan: async () =>
+        Array.from({ length: 1000 }, (_, i) =>
+          JSON.stringify({
+            ...EXPORTER_ROW_WITH_KEY,
+            dedup_key: `cached-${i}`,
+          }),
+        ).join("\n"),
+    }),
+  );
+  const request = (encoding: string) =>
+    new Request("http://machine/live/events?since=0&limit=1000", {
+      headers: { "accept-encoding": encoding },
+    });
+  await (await handler(request("identity"))).text();
+  const spy = spyOn(JSON, "stringify");
+  try {
+    const cached = await handler(request("gzip"));
+    expect(spy).not.toHaveBeenCalled();
+    expect(cached.headers.get("content-encoding")).toBe("gzip");
+    const plain = await handler(request("gzip;q=0"));
+    expect(plain.headers.get("content-encoding")).toBeNull();
+  } finally {
+    spy.mockRestore();
+  }
+});
