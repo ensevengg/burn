@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useApp, useSyncStatus } from "../lib/app-context";
+import { confirmDestructive } from "../lib/confirm-destructive";
 import { useTheme, type ThemeMode } from "../lib/theme-context";
 import { spacing, type } from "../theme";
 import { Card, SectionTitle, Segmented, Chip } from "../ui/primitives";
@@ -27,6 +28,17 @@ export function SettingsScreen() {
   const { lastSync } = useSyncStatus();
   const { C, themeMode, setThemeMode } = useThemeExtras();
   const [tzPicker, setTzPicker] = useState(false);
+  const confirmWipe = () =>
+    confirmDestructive(
+      Alert,
+      mode === "demo" ? "Clear demo data?" : "Disconnect and wipe local cache?",
+      mode === "direct"
+        ? "This removes all machine connections, cached usage, quotas and reference prices from this phone. You will need to add your machine URLs again. Data on your machines and backend stays intact."
+        : mode === "cloud"
+          ? "This removes the backend connection and cached usage, quotas and reference prices from this phone. You will need to connect again. Data in your backend stays intact."
+          : "This clears the demo data from this phone and returns to setup.",
+      mode === "cloud" ? disconnect : clearData,
+    );
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: C.bg }]} edges={["top"]}>
@@ -57,7 +69,7 @@ export function SettingsScreen() {
               accessibilityRole="button"
               android_ripple={{ color: C.border, foreground: true, borderless: false }}
               style={[styles.dangerButton, { borderColor: C.border }]}
-              onPress={() => void disconnect()}
+              onPress={confirmWipe}
             >
               <Text style={{ color: C.err, fontWeight: "600" }}>Disconnect & wipe local cache</Text>
             </Pressable>
@@ -67,7 +79,7 @@ export function SettingsScreen() {
               accessibilityRole="button"
               android_ripple={{ color: C.border, foreground: true, borderless: false }}
               style={[styles.dangerButton, { borderColor: C.border }]}
-              onPress={() => void clearData()}
+              onPress={confirmWipe}
             >
               <Text style={{ color: C.err, fontWeight: "600" }}>Disconnect & wipe local cache</Text>
             </Pressable>
@@ -77,7 +89,7 @@ export function SettingsScreen() {
               accessibilityRole="button"
               android_ripple={{ color: C.border, foreground: true, borderless: false }}
               style={[styles.dangerButton, { borderColor: C.border }]}
-              onPress={() => void clearData()}
+              onPress={confirmWipe}
             >
               <Text style={{ color: C.err, fontWeight: "600" }}>Clear demo data</Text>
             </Pressable>

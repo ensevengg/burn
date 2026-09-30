@@ -15,6 +15,7 @@ import { formatRelative } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp, useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
+import { confirmDestructive } from "../lib/confirm-destructive";
 import { loadConnection } from "../lib/settings";
 import { spacing, type } from "../theme";
 import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
@@ -42,23 +43,15 @@ export function MachinesScreen() {
   // Removal is destructive (server-side cascade of the machine's events +
   // quotas), so it always confirms first (user direction).
   const confirmRemove = (machineId: string, name: string) => {
-    Alert.alert(
-      "Remove machine",
-      mode === "direct"
-        ? `Remove "${name}" and its cached data from this phone? Add its URL again to reconnect.`
-        : `Stop managing "${name}"? Its usage history and quota snapshots are removed from the backend. The reporter must re-run \`npx burn-report init\` to re-pair.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Remove",
-          style: "destructive",
-          onPress: () => {
-            void removeMachine(machineId).catch((err: Error) =>
-              Alert.alert("Remove failed", err.message),
-            );
-          },
-        },
-      ],
+    confirmDestructive(
+      Alert,
+      "Remove machine?",
+      mode === "cloud"
+        ? `Remove "${name}"? Its usage history and quota snapshots will be deleted from your backend and this phone. The reporter must re-run npx burn-report init to reconnect.`
+        : mode === "direct"
+          ? `Remove "${name}" and its cached usage and quotas from this phone? You will need to add its URL again to reconnect. Machine files stay intact.`
+          : `Remove "${name}" and its demo usage and quotas from this phone?`,
+      () => removeMachine(machineId),
     );
   };
 
