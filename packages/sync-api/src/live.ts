@@ -95,6 +95,25 @@ export interface LiveApi {
   quotas(signal?: AbortSignal): Promise<LiveQuotasPage>;
 }
 
+type LiveTransport = {
+  [K in keyof LiveApi]: (...args: Parameters<LiveApi[K]>) => Promise<unknown>;
+};
+const validatedApis = new WeakSet<LiveApi>();
+/** One schema gate per transport response, including injected adapters. An
+ * HTTP adapter already wrapped here is reused by the mobile drivers. */
+export function validateLiveApi(transport: LiveTransport): LiveApi {
+  if (validatedApis.has(transport as LiveApi)) return transport as LiveApi;
+  const api: LiveApi = {
+    ping: async (...args) => parseLivePing(await transport.ping(...args)),
+    events: async (...args) =>
+      parseLiveEventsPage(await transport.events(...args)),
+    quotas: async (...args) =>
+      parseLiveQuotasPage(await transport.quotas(...args)),
+  };
+  validatedApis.add(api);
+  return api;
+}
+
 /** Re-send window shared by push, live pull, and direct mode: a message
  * completed just after a scan is caught by the next pull's overlap. */
 export const LIVE_OVERLAP_MS = 60 * 60_000;
@@ -155,7 +174,10 @@ export function httpLiveApiFor(
         generatedAt: response.headers.get("x-generated-at"),
         scanStartedAtMs: Number(response.headers.get("x-scan-started-at-ms")),
         slug: response.headers.get("x-burn-slug"),
-        contentHash: response.headers.get("etag")?.replace(/^W\//, "").replaceAll('"', ""),
+        contentHash: response.headers
+          .get("etag")
+          ?.replace(/^W\//, "")
+          .replaceAll('"', ""),
         notModified: true,
       };
     }
@@ -180,25 +202,22 @@ export function httpLiveApiFor(
     }
     return body;
   }
-  return {
-    ping: async (signal) => parseLivePing(await call("/ping", signal)),
+  return validateLiveApi({
+    ping: async (signal) => call("/ping", signal),
     events: async (sinceMs, signal, page = {}) => {
       const params = new URLSearchParams();
       if (sinceMs !== null) params.set("since", String(Math.floor(sinceMs)));
       if (page.limit !== undefined) params.set("limit", String(page.limit));
       if (page.cursor) params.set("cursor", page.cursor);
       if (page.force) params.set("force", "1");
-      return parseLiveEventsPage(
-        await call(
-          `/live/events${params.size ? `?${params}` : ""}`,
-          signal,
-          page.knownHash,
-        ),
+      return call(
+        `/live/events${params.size ? `?${params}` : ""}`,
+        signal,
+        page.knownHash,
       );
     },
-    quotas: async (signal) =>
-      parseLiveQuotasPage(await call("/live/quotas", signal)),
-  };
+    quotas: async (signal) => call("/live/quotas", signal),
+  });
 }
 
 /**

@@ -16,8 +16,11 @@ import type { CostSource } from "./types";
  *     (pricing/parser fixes) upsert in place and advance the environment
  *     revision, which propagates to phones via the revision watermark.
  *
- * quota_snapshots: append-only, no dedup key — freshness selection happens at
- * read time per (provider, account_key, metric).
+ * quota_snapshots: history is append-only with retry identity =
+ *   (environment_id, provider, account_key, metric, status, fetched_at).
+ *   Collection time is preserved across retries. Freshness selection happens
+ *   at read time per (provider, account_key, metric); the phone mirror keeps
+ *   one latest row per environment/provider/account/metric/status.
  *
  * environments: natural key = slug (one reporter installation each; `windows`
  * and `wsl` are distinct slugs sharing a host_group).

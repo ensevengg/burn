@@ -44,8 +44,24 @@ export function boolean(
 }
 export function timestamp(value: unknown, where: string): string {
   const result = string(value, where);
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.exec(
+      result,
+    );
+  const year = Number(match?.[1]);
+  const month = Number(match?.[2]);
+  const day = Number(match?.[3]);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
   if (
-    !/^\d{4}-\d{2}-\d{2}T/.test(result) ||
+    !match ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > days[month - 1]! ||
+    Number(match[4]) > 23 ||
+    Number(match[5]) > 59 ||
+    Number(match[6]) > 59 ||
     !Number.isFinite(Date.parse(result))
   )
     throw new Error(`${where}: invalid timestamp`);

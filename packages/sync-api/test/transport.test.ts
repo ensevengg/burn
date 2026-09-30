@@ -149,6 +149,11 @@ test("malformed money, booleans, tokens and dates fail before mirror writes", ()
     parser_version: "pin",
     revision: 1,
     cost: "0.000001",
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
   };
   expect(parseEventRow(event).cost).toBe("0.000001");
   for (const bad of [
@@ -191,8 +196,127 @@ test("malformed money, booleans, tokens and dates fail before mirror writes", ()
   ).toThrow();
 });
 
-test("weak conditional validators preserve the snapshot content hash",async () => {
-  const fetchImpl=(async (_url: string | URL | Request,_init?: RequestInit) => new Response(null,{ status: 304,headers: { etag: 'W/"abcdef"',"x-generated-at": "2026-09-30T10:00:00Z","x-scan-started-at-ms": "1000","x-burn-slug": "machine" } })) as typeof fetch;
-  const page=await httpLiveApiFor("http://machine",fetchImpl).events(0,undefined,{ knownHash: "abcdef" });
-  expect(page.contentHash).toBe("abcdef"); expect(page.notModified).toBe(true); expect(page.events).toEqual([]);
+test("weak conditional validators preserve the snapshot content hash", async () => {
+  const fetchImpl = (async (
+    _url: string | URL | Request,
+    _init?: RequestInit,
+  ) =>
+    new Response(null, {
+      status: 304,
+      headers: {
+        etag: 'W/"abcdef"',
+        "x-generated-at": "2026-09-30T10:00:00Z",
+        "x-scan-started-at-ms": "1000",
+        "x-burn-slug": "machine",
+      },
+    })) as typeof fetch;
+  const page = await httpLiveApiFor("http://machine", fetchImpl).events(
+    0,
+    undefined,
+    { knownHash: "abcdef" },
+  );
+  expect(page.contentHash).toBe("abcdef");
+  expect(page.notModified).toBe(true);
+  expect(page.events).toEqual([]);
+});
+
+test("cloud numeric fields reject coercions and required event content cannot default to zero", () => {
+  const row = {
+    event_id: "id",
+    environment_id: "env",
+    client: "codex",
+    provider_id: "openai",
+    model_id: "model",
+    session_id: "s",
+    occurred_at: "2026-10-01T00:00:00Z",
+    parser_version: "pin",
+    revision: 1,
+    input_tokens: 1,
+    output_tokens: 1,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    cost: "0.1",
+  };
+  for (const key of [
+    "cost",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "revision",
+    "parser_version",
+  ]) {
+    const malformed: Record<string, unknown> = { ...row };
+    delete malformed[key];
+    expect(() => parseEventRow(malformed)).toThrow();
+  }
+  for (const value of [true, false, "", " ", [], {}, "NaN"]) {
+    expect(() =>
+      parseQuotaRow({
+        provider: "openai",
+        account_key: "a",
+        metric: "weekly",
+        status: "ok",
+        fetched_at: "2026-10-01T00:00:00Z",
+        used_percent: value,
+      }),
+    ).toThrow();
+  }
+  expect(
+    parseQuotaRow({
+      provider: "openai",
+      account_key: "a",
+      metric: "weekly",
+      status: "ok",
+      fetched_at: "2026-10-01T00:00:00Z",
+      used_percent: "12.50",
+    }).usedPercent,
+  ).toBe(12.5);
+});
+
+test("timestamp gates reject impossible days and instants without a timezone", () => {
+  const row = {
+    provider: "codex",
+    account_key: "a",
+    metric: "weekly",
+    status: "ok",
+  };
+  for (const fetched_at of [
+    "2026-02-29T00:00:00Z",
+    "2026-04-31T00:00:00Z",
+    "2026-10-01T00:00:00",
+    "2026-10-01T24:00:00Z",
+  ]) {
+    expect(() => parseQuotaRow({ ...row, fetched_at })).toThrow();
+  }
+  expect(
+    parseQuotaRow({ ...row, fetched_at: "2024-02-29T00:00:00+05:30" })
+      .fetchedAt,
+  ).toBe("2024-02-29T00:00:00+05:30");
+});
+
+test("validated live adapters are reused and injected adapters still pass through the schema gate", async () => {
+  const { validateLiveApi } = await import("../src/live");
+  const api = httpLiveApiFor(
+    "http://machine",
+    (async (_url: string | URL | Request, _init?: RequestInit) =>
+      new Response(
+        JSON.stringify({
+          generatedAt: "2026-10-01T00:00:00Z",
+          sinceMs: 0,
+          events: [],
+        }),
+      )) as typeof fetch,
+  );
+  expect(validateLiveApi(api)).toBe(api);
+  const injected = validateLiveApi({
+    ping: async () => ({ protocol: 999 }),
+    events: async () => ({ events: [{}] }),
+    quotas: async () => ({ quotas: "bad" }),
+  });
+  await expect(injected.ping()).rejects.toThrow("Unsupported live protocol");
+  await expect(injected.events(0)).rejects.toThrow();
+  await expect(injected.quotas()).rejects.toThrow();
 });

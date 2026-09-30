@@ -58,9 +58,17 @@ function isoToMs(value: unknown): number {
 function numToCostString(value: unknown): string {
   if (typeof value === "string") return decimal(value, "cost");
   if (typeof value === "number" && Number.isFinite(value))
-    return value.toFixed(6);
-  if (value === undefined) return "0.000000";
+    return decimal(value.toFixed(6), "cost");
   throw new BurnBackendError("Invalid cost");
+}
+
+function percent(value: unknown, field: string): number | null {
+  if (value === undefined || value === null) return null;
+  // PostgREST may encode numeric as a number or decimal string, never coercions.
+  return nullableNumber(
+    typeof value === "string" ? Number(decimal(value, field)) : value,
+    field,
+  );
 }
 
 function orNull<T>(value: T | null | undefined): T | null {
@@ -117,14 +125,11 @@ export function parseEventRow(value: unknown): UsageEvent {
     ),
     sourceTimezone: nullableString(raw.source_timezone, "source_timezone"),
     sourceLocalDate: nullableString(raw.source_local_date, "source_local_date"),
-    inputTokens: integer(raw.input_tokens ?? 0, "input_tokens"),
-    outputTokens: integer(raw.output_tokens ?? 0, "output_tokens"),
-    cacheReadTokens: integer(raw.cache_read_tokens ?? 0, "cache_read_tokens"),
-    cacheWriteTokens: integer(
-      raw.cache_write_tokens ?? 0,
-      "cache_write_tokens",
-    ),
-    reasoningTokens: integer(raw.reasoning_tokens ?? 0, "reasoning_tokens"),
+    inputTokens: integer(raw.input_tokens, "input_tokens"),
+    outputTokens: integer(raw.output_tokens, "output_tokens"),
+    cacheReadTokens: integer(raw.cache_read_tokens, "cache_read_tokens"),
+    cacheWriteTokens: integer(raw.cache_write_tokens, "cache_write_tokens"),
+    reasoningTokens: integer(raw.reasoning_tokens, "reasoning_tokens"),
     messageCount: integer(raw.message_count ?? 1, "message_count"),
     isTurnStart: boolean(raw.is_turn_start, "is_turn_start"),
     durationMs:
@@ -142,8 +147,8 @@ export function parseEventRow(value: unknown): UsageEvent {
       raw.model_attribution_conflicted,
       "model_attribution_conflicted",
     ),
-    parserVersion: identity(raw.parser_version ?? "unknown", "parser_version"),
-    revision: integer(raw.revision ?? 0, "revision"),
+    parserVersion: identity(raw.parser_version, "parser_version"),
+    revision: integer(raw.revision, "revision"),
   };
 }
 
@@ -156,14 +161,8 @@ export function parseQuotaRow(value: unknown): QuotaSnapshot {
     accountLabel: nullableString(raw.account_label, "account_label"),
     plan: nullableString(raw.plan, "plan"),
     metric: identity(raw.metric, "metric"),
-    usedPercent:
-      raw.used_percent === null || raw.used_percent === undefined
-        ? null
-        : nullableNumber(Number(raw.used_percent), "used_percent"),
-    remainingPercent:
-      raw.remaining_percent === null || raw.remaining_percent === undefined
-        ? null
-        : nullableNumber(Number(raw.remaining_percent), "remaining_percent"),
+    usedPercent: percent(raw.used_percent, "used_percent"),
+    remainingPercent: percent(raw.remaining_percent, "remaining_percent"),
     remainingLabel: nullableString(raw.remaining_label, "remaining_label"),
     resetsAt: nullableTimestamp(raw.resets_at, "resets_at"),
     creditStatus: nullableObject(raw.credit_status, "credit_status"),

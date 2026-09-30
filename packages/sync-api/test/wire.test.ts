@@ -1,10 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { eventIdentityDescription, normalizeCostSource, quotaAccountKey, quotaMetricLabel } from "../src/keys";
-import { parseEventRow, parseEnvironmentRow, parseQuotaRow } from "../src/supabase";
+import {
+  eventIdentityDescription,
+  normalizeCostSource,
+  quotaAccountKey,
+  quotaMetricLabel,
+} from "../src/keys";
+import {
+  parseEventRow,
+  parseEnvironmentRow,
+  parseQuotaRow,
+} from "../src/supabase";
 
 describe("keys", () => {
   test("event identity is server-side sha256 of slug|client|dedup_key", () => {
-    expect(eventIdentityDescription()).toBe("sha256(environment_slug | client | dedup_key)");
+    expect(eventIdentityDescription()).toBe(
+      "sha256(environment_slug | client | dedup_key)",
+    );
   });
 
   test("quota account key falls back for accountless providers", () => {
@@ -51,6 +62,11 @@ describe("wire parsing", () => {
       session_id: "s1",
       occurred_at: "2026-09-05T10:00:00+00:00",
       input_tokens: 10,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      parser_version: "pin",
       cost: 0.012345,
       revision: 7,
     });
@@ -69,13 +85,21 @@ describe("wire parsing", () => {
       session_id: "s2",
       occurred_at: "2026-09-05T10:00:00+00:00",
       duration_ms: null,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      cost: "0.000000",
+      parser_version: "pin",
+      revision: 1,
     });
     expect(ev.durationMs).toBeNull();
     expect(ev.workspaceLabel).toBeNull();
     expect(ev.costIsComplete).toBe(false);
   });
 
-  test("quota row maps percents leniently", () => {
+  test("quota row accepts PostgREST decimal percent strings", () => {
     const q = parseQuotaRow({
       provider: "Codex",
       account_key: "acct",
