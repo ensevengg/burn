@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import type { IngestEventInput, IngestQuotaInput } from "@burn/sync-api";
+import type { MachineEventInput, MachineQuotaInput } from "@burn/sync-api";
 import type { BurnConfig } from "./config";
-import { parseEventsJsonl, exportRowsToIngestInputs } from "./events";
+import { parseEventsJsonl, exportRowsToMachineInputs } from "./events";
 import {
   exporterVersion,
   assertExporterMatchesPin,
@@ -15,7 +15,7 @@ export interface MachineSnapshot {
   startedAtMs: number;
   generatedAt: string;
   scanMs: number;
-  events: IngestEventInput[];
+  events: MachineEventInput[];
 }
 interface SnapshotDeps {
   now?: () => number;
@@ -25,7 +25,7 @@ interface SnapshotDeps {
 }
 
 /** A normalized full snapshot covers every requested window. One scan promise
- * is shared by HTTP and daemon push; old generations remain briefly pageable. */
+ * is shared by HTTP consumers; old generations remain briefly pageable. */
 export class MachineSnapshots {
   private latest: MachineSnapshot | null = null;
   private pending: Promise<MachineSnapshot> | null = null;
@@ -78,7 +78,7 @@ export class MachineSnapshots {
     const rows = parseEventsJsonl(
       await (this.deps.scan ?? ((since) => fetchEventsJsonl(since, 90_000)))(0),
     );
-    const events = exportRowsToIngestInputs(rows, this.pin).sort(
+    const events = exportRowsToMachineInputs(rows, this.pin).sort(
       (a, b) =>
         a.occurredAtMs - b.occurredAtMs ||
         a.client.localeCompare(b.client) ||
@@ -109,14 +109,14 @@ export class MachineSnapshots {
 }
 
 export class QuotaSnapshots {
-  private cached: { generatedAt: string; quotas: IngestQuotaInput[] } | null =
+  private cached: { generatedAt: string; quotas: MachineQuotaInput[] } | null =
     null;
   private pending: Promise<{
     generatedAt: string;
-    quotas: IngestQuotaInput[];
+    quotas: MachineQuotaInput[];
   }> | null = null;
   constructor(
-    private readonly load: () => Promise<IngestQuotaInput[]>,
+    private readonly load: () => Promise<MachineQuotaInput[]>,
     private readonly now: () => number = Date.now,
   ) {}
   get() {

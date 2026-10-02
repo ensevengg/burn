@@ -3,16 +3,11 @@ import type { BurnConfig } from "../src/config.js";
 import { createLiveFetch, type LiveDeps } from "../src/serve.js";
 
 const CONFIG: BurnConfig = {
-  mode: "cloud",
-  supabaseUrl: "https://example.supabase.co",
-  publishableKey: "sb_publishable_test",
-  ingestToken: "x".repeat(32),
   environmentSlug: "lenovo-windows",
   environmentName: "Lenovo Windows",
   hostGroup: null,
   osKind: "windows",
   reportingTimezone: "Asia/Kolkata",
-  intervalMinutes: 10,
   tokscalePin: "4.15.1",
 };
 
@@ -52,17 +47,10 @@ const EXPORTER_ROW_WITHOUT_KEY = {
   dedup_key: null,
 };
 
-const CURSOR = {
-  lastRevision: 5,
-  lastPushAt: new Date(EXPORTER_ROW_WITH_KEY.timestamp).toISOString(),
-};
-const SINCE = Date.parse(CURSOR.lastPushAt) - 60 * 60_000;
-
 function deps(overrides: Partial<LiveDeps> = {}): LiveDeps {
   return {
     config: CONFIG,
     now: () => Date.parse("2026-09-07T10:05:00.000Z"),
-    cursor: () => CURSOR,
     exporterCheck: async () => "4.15.1",
     exporterScan: async () =>
       `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n${JSON.stringify(EXPORTER_ROW_WITHOUT_KEY)}\n`,
@@ -86,7 +74,7 @@ function deps(overrides: Partial<LiveDeps> = {}): LiveDeps {
 }
 
 describe("live server", () => {
-  test("/ping advertises identity, contract version, and the cursor-minus-overlap window", async () => {
+  test("/ping advertises identity, contract version, and full history availability", async () => {
     const res = await createLiveFetch(deps())(
       new Request("http://machine/ping"),
     );
@@ -98,11 +86,11 @@ describe("live server", () => {
     expect(body.osKind).toBe("windows");
     expect(body.reportingTimezone).toBe("Asia/Kolkata");
     expect(body.exportSchema).toBe(1);
-    expect(body.sinceMs).toBe(SINCE);
+    expect(body.sinceMs).toBe(0);
     expect(body.serverNowMs).toBe(Date.parse("2026-09-07T10:05:00.000Z"));
   });
 
-  test("/live/events serves ingest-shaped rows with server-matchable identities", async () => {
+  test("/live/events serves ingest-shaped rows with stable machine identities", async () => {
     const res = await createLiveFetch(deps())(
       new Request("http://machine/live/events"),
     );
@@ -111,7 +99,7 @@ describe("live server", () => {
       sinceMs: number;
       events: Record<string, unknown>[];
     };
-    expect(body.sinceMs).toBe(SINCE);
+    expect(body.sinceMs).toBe(0);
     expect(body.events).toHaveLength(2);
     const [first, second] = body.events;
     // Decimal-string cost (D8), pinned parser version, identity fields.
@@ -165,7 +153,7 @@ describe("live server", () => {
     expect(body.error).toContain("schema drift");
   });
 
-  test("/live/events honors a ?since= cursor (direct mode) over the machine's own", async () => {
+  test("/live/events honors a ?since= cursor (direct mode) independently per phone", async () => {
     let scanned: number | null = null;
     const res = await createLiveFetch(
       deps({

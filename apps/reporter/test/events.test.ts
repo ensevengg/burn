@@ -5,10 +5,8 @@ import { TOKSCALE_PIN } from "@burn/sync-api";
 import {
   costToDecimalString,
   deriveDedupKeys,
-  exportRowsToIngestInputs,
+  exportRowsToMachineInputs,
   parseEventsJsonl,
-  planBatches,
-  pushSinceMs,
 } from "../src/events.js";
 import { assertExporterMatchesPin } from "../src/exporter.js";
 import { ExporterError } from "../src/exporter.js";
@@ -36,11 +34,11 @@ describe("events jsonl", () => {
   });
 });
 
-describe("ingest mapping", () => {
+describe("machine payload mapping", () => {
   const rows = parseEventsJsonl(fixtureText);
 
-  test("maps to IngestEventInput with pin-stamped parser version", () => {
-    const inputs = exportRowsToIngestInputs(rows, TOKSCALE_PIN);
+  test("maps to MachineEventInput with pin-stamped parser version", () => {
+    const inputs = exportRowsToMachineInputs(rows, TOKSCALE_PIN);
     expect(inputs).toHaveLength(6);
     const first = inputs[0]!;
     expect(first.client).toBe("zcode");
@@ -57,12 +55,12 @@ describe("ingest mapping", () => {
   });
 
   test("normalizes tokscale camelCase cost_source", () => {
-    const inputs = exportRowsToIngestInputs(rows, TOKSCALE_PIN);
+    const inputs = exportRowsToMachineInputs(rows, TOKSCALE_PIN);
     expect(inputs[1]!.costSource).toBe("provider_reported");
   });
 
   test("unknown pricing and conflicted attribution are never cost-complete", () => {
-    const inputs = exportRowsToIngestInputs(rows, TOKSCALE_PIN);
+    const inputs = exportRowsToMachineInputs(rows, TOKSCALE_PIN);
     expect(inputs[3]!.costSource).toBe("unknown");
     expect(inputs[3]!.costIsComplete).toBe(false);
     expect(inputs[5]!.modelAttributionConflicted).toBe(true);
@@ -70,7 +68,7 @@ describe("ingest mapping", () => {
   });
 
   test("decimal string costs pass through the D8 conversion", () => {
-    const inputs = exportRowsToIngestInputs(rows, TOKSCALE_PIN);
+    const inputs = exportRowsToMachineInputs(rows, TOKSCALE_PIN);
     expect(inputs[5]!.cost).toBe("0.010000");
   });
 
@@ -99,30 +97,6 @@ describe("dedup fallback (D2)", () => {
     const bySignature = (rows: typeof forward) =>
       new Map(rows.filter((r) => r.dedup_key?.startsWith("v1:")).map((r) => [signature(r), r.dedup_key]));
     expect(bySignature(shuffled)).toEqual(bySignature(forward));
-  });
-});
-
-describe("push window and batching", () => {
-  test("full mode pushes everything", () => {
-    expect(pushSinceMs("2026-09-06T00:00:00Z", true)).toBe(0);
-  });
-
-  test("incremental mode re-sends the overlap window", () => {
-    const lastPush = "2026-09-06T12:00:00.000Z";
-    const expected = Date.parse(lastPush) - 60 * 60_000;
-    expect(pushSinceMs(lastPush, false)).toBe(expected);
-  });
-
-  test("unparseable or zero cursor starts from the beginning", () => {
-    expect(pushSinceMs("not-a-date", false)).toBe(0);
-    expect(pushSinceMs("1970-01-01T00:00:00.000Z", false)).toBe(0);
-  });
-
-  test("planBatches chunks and handles empty input", () => {
-    const rows = Array.from({ length: 1201 }, (_, i) => i);
-    const batches = planBatches(rows, 500);
-    expect(batches.map((b) => b.length)).toEqual([500, 500, 201]);
-    expect(planBatches([], 500)).toEqual([]);
   });
 });
 

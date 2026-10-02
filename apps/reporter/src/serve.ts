@@ -1,28 +1,10 @@
 import { gzipSync } from "node:zlib";
 import { MachineSnapshots, QuotaSnapshots, snapshotsFor } from "./snapshots";
-/**
- * Live server (D1 v2, docs/adr/0001-tailscale-direct-pull): a read-only HTTP
- * endpoint that serves the not-yet-pushed tail of this machine's event stream
- * to the phone over the tailnet.
- *
- * Auth model: the server binds the tailnet interface (or loopback when no
- * tailnet is detected), so tailnet membership IS the authorization. No tokens
- * cross this boundary — D7's secret surface is unchanged.
- *
- * Everything served is exactly what the next `push` would send: same exporter,
- * same schema gate, same dedup fallback, same cursor-minus-overlap window.
- * The phone merges those rows with revision 0, and the server's own revisioned
- * copy wins the upsert once the real push lands — the two paths converge by
- * construction instead of by reconciliation.
- */
-import { EVENT_EXPORT_SCHEMA, type IngestQuotaInput } from "@burn/sync-api";
-import {
-  loadConfig,
-  loadCursor,
-  type BurnConfig,
-  type ReporterCursor,
-} from "./config.js";
-import { pushSinceMs } from "./events.js";
+/** Read-only machine backend bound to the tailnet (or loopback for local
+ * diagnostics). Serves validated, priced tokscale rows and vendor quotas from
+ * shared snapshots. The phone owns incremental cursors and history storage. */
+import { EVENT_EXPORT_SCHEMA, type MachineQuotaInput } from "@burn/sync-api";
+import { loadConfig, type BurnConfig } from "./config.js";
 import {
   fetchUsage,
   spawnRunner,
@@ -34,7 +16,6 @@ import {
 export interface LiveDeps {
   config: BurnConfig;
   now?: () => number;
-  cursor?: () => ReporterCursor;
   exporterScan?: (sinceMs: number) => Promise<string>;
   exporterCheck?: () => Promise<string | null>;
   usage?: (pin: string) => Promise<unknown>;
@@ -43,7 +24,7 @@ export interface LiveDeps {
 export interface LiveServerHandle {
   hostname: string;
   port: number;
-  /** What the machine advertises in heartbeats while running. */
+  /** Endpoint to add on the phone. */
   url: string;
   stop(): void;
 }
@@ -142,7 +123,6 @@ export function createLiveFetch(
   };
 
   const pingPayload = () => {
-    const cursor = (deps.cursor ?? (() => loadCursor(deps.config)))();
     return {
       protocol: 1 as const,
       capabilities: ["paged-events", "content-hash"],
@@ -159,7 +139,7 @@ export function createLiveFetch(
       tokscaleVersion: null,
       exportSchema: EVENT_EXPORT_SCHEMA,
       reportingTimezone: deps.config.reportingTimezone,
-      sinceMs: pushSinceMs(cursor.lastPushAt, false),
+      sinceMs: 0,
       serverNowMs: now(),
     };
   };
@@ -182,15 +162,7 @@ export function createLiveFetch(
               requested! < 0)
           )
             return jsonResponse({ error: "invalid since timestamp" }, 400);
-          let sinceMs =
-            requested !== null &&
-            Number.isSafeInteger(requested) &&
-            requested >= 0
-              ? requested
-              : pushSinceMs(
-                  (deps.cursor ?? (() => loadCursor(deps.config)))().lastPushAt,
-                  false,
-                );
+          let sinceMs = requested ?? 0;
           const cursor = url.searchParams.get("cursor");
           const parts = cursor?.split(":");
           if (sinceParam === null && parts?.length === 3)
@@ -343,44 +315,28 @@ export async function startLiveServer(
   };
 }
 
-/**
- * `burn-report serve` — the live server alone, without the daemon's push
- * loop. Heartbeats once at startup so the phone learns the endpoint even if
- * no push has happened yet; the daemon remains the recommended resident mode.
- */
+/** Run until interrupted; binding failures fail the command. */
 export async function runServe(args: Map<string, string>): Promise<void> {
   const config = loadConfig();
   const options: { bind?: string; port?: number } = {};
-  const bindArg = args.get("bind");
-  if (bindArg) options.bind = bindArg;
-  const portArg = args.get("port");
-  if (portArg) options.port = Number(portArg);
-  const live = await startLiveServer(config, options);
-  const advertised = args.get("live-url") ?? live.url;
-  console.log(
-    `[serve] ${config.environmentSlug} live at ${live.url} (advertised: ${advertised})`,
-  );
-  try {
-    if (config.mode === "cloud") {
-      const { reporterApiFor } = await import("./backend.js");
-      await reporterApiFor(config).heartbeat({
-        reporterVersion: REPORTER_VERSION,
-        tokscaleVersion: null,
-        exportSchema: EVENT_EXPORT_SCHEMA,
-        reportingTimezone: config.reportingTimezone,
-        liveEndpoint: advertised,
-      });
-    }
-  } catch (err) {
-    console.warn(
-      `[serve] heartbeat failed (phone will learn the endpoint on the next push): ${(err as Error).message}`,
-    );
+  const bind = args.get("bind");
+  if (bind) options.bind = bind;
+  const port = args.get("port");
+  if (port) {
+    options.port = Number(port);
+    if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535)
+      throw new Error("--port must be an integer between 1 and 65535");
   }
-  await new Promise<never>(() => {
+  const live = await startLiveServer(config, options);
+  console.log(`[serve] ${config.environmentSlug} at ${live.url}`);
+  console.log("Add this URL on your phone's Machines tab. Keep this process running.");
+  await new Promise<void>((resolve) => {
     const shutdown = () => {
+      process.removeListener("SIGINT", shutdown);
+      process.removeListener("SIGTERM", shutdown);
       live.stop();
       console.log("\n[serve] stopped");
-      process.exit(0);
+      resolve();
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);

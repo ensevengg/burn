@@ -6,7 +6,7 @@
  * The exporter embeds tokscale-core (its crate version tracks the tokscale
  * pin, enforced by a drift-guard test), so a version mismatch means the
  * records were produced by a different parser than the pinned CLI — rejected
- * loudly rather than pushed with mixed parser provenance.
+ * loudly rather than served with mixed parser provenance.
  */
 import { platform } from "node:os";
 import { spawnRunner, TokscaleError, type Runner } from "./tokscale.js";

@@ -6,7 +6,7 @@
  * schema (the optional fields cover the small deltas: null/empty dedup_key,
  * missing timezone enrichment, numeric cost).
  */
-import { normalizeCostSource, type IngestEventInput } from "@burn/sync-api";
+import { normalizeCostSource, type MachineEventInput } from "@burn/sync-api";
 import { z } from "zod";
 
 export const eventExportRowSchema = z.object({
@@ -38,7 +38,7 @@ export const eventExportRowSchema = z.object({
   model_attribution_conflicted: z.boolean().optional(),
   /**
    * The exporter guarantees non-empty via the D2 fallback; null/empty is
-   * tolerated so an upstream stream without the fallback still pushes.
+   * tolerated so an upstream stream without the fallback still serves.
    */
   dedup_key: z.string().nullable().optional(),
   /** Enrichment; optional so an upstream stream without it still validates. */
@@ -109,7 +109,7 @@ function contentCmp(a: EventExportRow, b: EventExportRow): number {
  * D2 fallback dedup key for sources tokscale leaves without one — same recipe
  * as the exporter: `v1:<client>:<session_id>:<source_ts_ms>:<ordinal>`, where
  * ordinal is the content-sorted position within the session. Applied here too
- * so an upstream `tokscale events --jsonl` stream (null dedup_key) pushes
+ * so an upstream `tokscale events --jsonl` stream (null dedup_key) serves
  * without touching the exporter.
  */
 export function deriveDedupKeys(rows: EventExportRow[]): void {
@@ -131,7 +131,7 @@ export function deriveDedupKeys(rows: EventExportRow[]): void {
   }
 }
 
-export function exportRowToIngestInput(row: EventExportRow, tokscalePin: string): IngestEventInput {
+export function exportRowToMachineInput(row: EventExportRow, tokscalePin: string): MachineEventInput {
   const costSource = normalizeCostSource(row.cost_source);
   const conflicted = row.model_attribution_conflicted ?? false;
   return {
@@ -166,38 +166,15 @@ export function exportRowToIngestInput(row: EventExportRow, tokscalePin: string)
   };
 }
 
-export function exportRowsToIngestInputs(
+export function exportRowsToMachineInputs(
   rows: EventExportRow[],
   tokscalePin: string,
-): IngestEventInput[] {
+): MachineEventInput[] {
   deriveDedupKeys(rows);
   return rows.map((row) => {
     if (!row.dedup_key) {
       throw new Error("burn-events row without dedup_key after fallback derivation");
     }
-    return exportRowToIngestInput(row, tokscalePin);
+    return exportRowToMachineInput(row, tokscalePin);
   });
-}
-
-/**
- * Re-send window: a message completed just after the last scan is caught by
- * the next push's overlap. Re-upserts are server-side no-ops for unchanged
- * content (revision does not advance), so a generous window is cheap.
- */
-export const PUSH_OVERLAP_MS = 60 * 60_000;
-
-/** Push everything (`--full`) or since the last acknowledged batch, minus overlap. */
-export function pushSinceMs(lastPushAt: string, full: boolean): number {
-  if (full) return 0;
-  const last = Date.parse(lastPushAt);
-  const base = Number.isFinite(last) ? last : 0;
-  return Math.max(0, base - PUSH_OVERLAP_MS);
-}
-
-export function planBatches<T>(items: readonly T[], size = 500): T[][] {
-  const batches: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    batches.push(items.slice(i, i + size));
-  }
-  return batches;
 }

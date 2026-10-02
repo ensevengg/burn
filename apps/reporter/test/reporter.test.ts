@@ -1,13 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { platform } from "node:os";
 import { join } from "node:path";
-import { configSchema, loadConfig, saveConfig, configPath, setupSqlPath } from "../src/config.js";
-import { renderSetupSql } from "../src/setup-sql.js";
-import { generateToken, sha256Hex } from "../src/tokens.js";
+import { configSchema, loadConfig, saveConfig, configPath } from "../src/config.js";
 import { usageReportSchema } from "../src/tokscale.js";
-import { detectOsKind, tokscaleQuotaInputs } from "../src/commands.js";
+import { detectOsKind, tokscaleQuotaInputs, runInit } from "../src/commands.js";
 
 let dir: string;
 
@@ -21,16 +19,11 @@ afterEach(() => {
 });
 
 const baseConfig = {
-  mode: "cloud" as const,
-  supabaseUrl: "https://xyzcompany.supabase.co",
-  publishableKey: "sb_publishable_KEY_1234567890",
-  ingestToken: "ingest-token-0123456789abcdef",
   environmentSlug: "cachyos",
   environmentName: "CachyOS",
   hostGroup: "nerve",
   osKind: "linux" as const,
   reportingTimezone: "Asia/Kolkata",
-  intervalMinutes: 10,
   tokscalePin: "4.15.1",
 };
 
@@ -39,7 +32,7 @@ describe("config", () => {
     saveConfig(configSchema.parse(baseConfig));
     const loaded = loadConfig();
     expect(loaded.environmentSlug).toBe("cachyos");
-    expect(loaded.intervalMinutes).toBe(10);
+    expect(loaded.tokscalePin).toBe("4.15.1");
   });
 
   test("rejects a bad slug", () => {
@@ -49,30 +42,6 @@ describe("config", () => {
 
   test("loadConfig throws with guidance when missing", () => {
     expect(() => loadConfig()).toThrow(/burn-report init/);
-  });
-});
-
-describe("tokens", () => {
-  test("sha256Hex matches the SQL-side recipe", () => {
-    // burn_api uses encode(sha256(convert_to(t,'utf8')),'hex')
-    expect(sha256Hex("hello")).toBe("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
-  });
-
-  test("generateToken is url-safe and long enough", () => {
-    const token = generateToken();
-    expect(token.length).toBeGreaterThanOrEqual(24);
-    expect(token).toMatch(/^[A-Za-z0-9_-]+$/);
-  });
-});
-
-describe("setup sql", () => {
-  test("embeds token hashes and escapes quotes", () => {
-    const config = { ...baseConfig, environmentName: "Cachy's Box" };
-    const sql = renderSetupSql({ config, ingestToken: "ing-1234567890123456", readToken: "read-1234567890123456" });
-    expect(sql).toContain(sha256Hex("ing-1234567890123456"));
-    expect(sql).toContain(sha256Hex("read-1234567890123456"));
-    expect(sql).toContain("'Cachy''s Box'");
-    expect(sql).toContain("on conflict (slug)");
   });
 });
 
@@ -122,11 +91,20 @@ describe("init artifacts", () => {
     else process.env["WSL_DISTRO_NAME"] = previous;
   });
 
-  test("renderSetupSql is deterministic and hash-only", () => {
-    const config = configSchema.parse(baseConfig);
-    const a = renderSetupSql({ config, ingestToken: "t".repeat(30), readToken: "r".repeat(30) });
-    const b = renderSetupSql({ config, ingestToken: "t".repeat(30), readToken: "r".repeat(30) });
-    expect(a).toBe(b);
-    expect(a).not.toContain("t".repeat(30)); // plaintext never written
+  test("init requires only machine identity and creates no credentials or SQL", () => {
+    runInit(new Map([["slug", "test-box"], ["name", "Test Box"]]));
+    expect(loadConfig().environmentSlug).toBe("test-box");
+    expect(Object.keys(JSON.parse(readFileSync(configPath(), "utf8")))).toEqual([
+      "environmentSlug", "environmentName", "hostGroup", "osKind", "reportingTimezone", "tokscalePin",
+    ]);
+    expect(existsSync(join(dir, "setup-tokens.sql"))).toBe(false);
+  });
+
+  test("legacy reporter configs upgrade without reinitializing identity and discard credentials", () => {
+    writeFileSync(configPath(), JSON.stringify({ ...baseConfig, mode: "cloud", supabaseUrl: "https://legacy.invalid", publishableKey: "old-key", ingestToken: "old-token", intervalMinutes: 10 }));
+    writeFileSync(join(dir, "setup-tokens.sql"), "old setup");
+    expect(loadConfig()).toEqual(baseConfig);
+    expect(JSON.parse(readFileSync(configPath(), "utf8"))).toEqual(baseConfig);
+    expect(existsSync(join(dir, "setup-tokens.sql"))).toBe(false);
   });
 });

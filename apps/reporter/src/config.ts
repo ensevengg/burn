@@ -1,7 +1,7 @@
 /**
  * Reporter config (D7): lives at $BURN_CONFIG_DIR/config.json, defaulting to
- * XDG on Linux/WSL and the platform app-data dir on Windows. Contains only
- * scoped tokens — the Supabase secret key never goes here.
+ * XDG on Linux/WSL and the platform app-data dir on Windows. Stores machine
+ * identity and parser settings; tailnet membership authorizes phone access.
  */
 import {
   existsSync,
@@ -13,17 +13,11 @@ import {
 } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 import { TOKSCALE_PIN } from "@burn/sync-api";
 import { z } from "zod";
 
 export const configSchema = z
   .object({
-    mode: z.enum(["cloud", "direct"]).default("cloud"),
-    supabaseUrl: z.string().url().optional(),
-    publishableKey: z.string().min(10).optional(),
-    /** Per-environment ingest token; hashes live server-side only. */
-    ingestToken: z.string().min(24).optional(),
     environmentSlug: z
       .string()
       .regex(/^[a-z0-9][a-z0-9-]*$/, "slug must be kebab-case"),
@@ -33,16 +27,8 @@ export const configSchema = z
     osKind: z.enum(["windows", "wsl", "linux", "macos"]).default("linux"),
     /** Timezone evidence attached to rows; bucketing happens on the phone (D8). */
     reportingTimezone: z.string().default("Asia/Kolkata"),
-    /** Minutes between scheduled pushes. */
-    intervalMinutes: z.number().int().min(1).max(1440).default(10),
     tokscalePin: z.string().default(TOKSCALE_PIN),
-  })
-  .refine(
-    (c) =>
-      c.mode === "direct" ||
-      Boolean(c.supabaseUrl && c.publishableKey && c.ingestToken),
-    "Cloud mode requires URL, publishable key and ingest token",
-  );
+  });
 
 export type BurnConfig = z.infer<typeof configSchema>;
 
@@ -63,21 +49,6 @@ export function configDir(): string {
 
 // Paths resolve lazily so BURN_CONFIG_DIR is honored at call time, not import time.
 export const configPath = (): string => join(configDir(), "config.json");
-export function cursorScope(config: BurnConfig): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify([
-        config.supabaseUrl ?? "direct",
-        config.environmentSlug,
-        config.tokscalePin,
-        config.ingestToken ?? "direct",
-      ]),
-    )
-    .digest("hex")
-    .slice(0, 24);
-}
-export const cursorPath = (config: BurnConfig = loadConfig()): string =>
-  join(configDir(), `cursor-${cursorScope(config)}.json`);
 export function atomicJson(path: string, data: unknown): void {
   mkdirSync(configDir(), { recursive: true });
   const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -88,14 +59,14 @@ export function atomicJson(path: string, data: unknown): void {
     if (existsSync(temporary)) unlinkSync(temporary);
   }
 }
-export const setupSqlPath = (): string => join(configDir(), "setup-tokens.sql");
 
 export function loadConfig(): BurnConfig {
   const path = configPath();
   if (!existsSync(path)) {
     throw new Error(`No config at ${path}. Run: npx burn-report init`);
   }
-  const parsed = configSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
+  const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+  const parsed = configSchema.safeParse(raw);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     if (issue === undefined) throw new Error(`Invalid config at ${path}`);
@@ -103,35 +74,22 @@ export function loadConfig(): BurnConfig {
       `Invalid config at ${path}: ${issue.path.join(".")} — ${issue.message}`,
     );
   }
+  // Rewrite legacy configurations through the allowlisted schema so obsolete
+  // destination credentials and upload settings are removed from disk.
+  if (JSON.stringify(raw) !== JSON.stringify(parsed.data)) {
+    atomicJson(path, parsed.data);
+  }
+  removeLegacySetup();
   return parsed.data;
 }
 
 export function saveConfig(config: BurnConfig): void {
   mkdirSync(configDir(), { recursive: true });
   atomicJson(configPath(), configSchema.parse(config));
+  removeLegacySetup();
 }
 
-/** Local cursor: the last revision the server acknowledged for this environment. */
-export interface ReporterCursor {
-  lastRevision: number;
-  lastPushAt: string;
-}
-
-export function loadCursor(config: BurnConfig = loadConfig()): ReporterCursor {
-  const path = cursorPath(config);
-  if (!existsSync(path))
-    return { lastRevision: 0, lastPushAt: new Date(0).toISOString() };
-  return z
-    .object({
-      lastRevision: z.number().int().nonnegative().safe(),
-      lastPushAt: z.string().datetime({ offset: true }),
-    })
-    .parse(JSON.parse(readFileSync(path, "utf8")));
-}
-
-export function saveCursor(
-  cursor: ReporterCursor,
-  config: BurnConfig = loadConfig(),
-): void {
-  atomicJson(cursorPath(config), cursor);
+function removeLegacySetup(): void {
+  const oldSetup = join(configDir(), "setup-tokens.sql");
+  if (existsSync(oldSetup)) unlinkSync(oldSetup);
 }

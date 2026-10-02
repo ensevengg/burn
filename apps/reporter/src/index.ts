@@ -1,79 +1,51 @@
 #!/usr/bin/env bun
-import {
-  runDaemon,
-  runDoctor,
-  runInit,
-  runPush,
-  runUsage,
-} from "./commands.js";
+import { runDaemon, runDoctor, runInit, runUsage } from "./commands.js";
 import { runServe } from "./serve.js";
 
-function usage(): never {
-  console.log(`burn-report — push AI token usage from this machine to your own Supabase
+function usage(): void {
+  console.log(`burn-report — serve AI token usage to your phone over Tailscale
 
 Usage: npx burn-report <command> [flags]
 
-  init      Configure this machine: --url --key --slug --name
-            Direct-only: --direct --slug --name
-            [--os windows|wsl|linux|macos] [--host-group g] [--tz Asia/Kolkata] [--interval 10]
-  doctor    Verify config, tokscale pin, burn-events exporter, backend, clock
-  usage     Fetch vendor quotas (tokscale usage) and push snapshots
-  push      Push usage event rows since cursor (burn-events exporter);
-            --full re-sends everything (correction pass after a pin bump)
-  daemon    Resident mode: 30s sync-request poll + scheduled push + live server
-            [--no-live] [--port 8787] [--bind ip] [--live-url https://...]
-  serve     Live server only (Tailscale live-pull endpoint), no push loop
+  init      Configure this machine: --slug --name
+            [--os windows|wsl|linux|macos] [--host-group g] [--tz Asia/Kolkata]
+            [--tokscale-pin version]
+  doctor    Verify config, tokscale pin, burn-events exporter and Tailscale
+  usage     Print vendor quota JSON from tokscale for local diagnostics
+  daemon    Resident read-only machine backend [--port 8787] [--bind ip]
+  serve     Alias for daemon
   help      This text
 
-Docs: https://github.com/ensevengg/burn · AGENTS.md is the rulebook`);
-  process.exit(0);
+Add the server's printed URL on the phone's Machines tab.
+Docs: https://github.com/ensevengg/burn`);
 }
 
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "help";
 try {
+  const allowed = command === "init"
+    ? ["slug", "name", "os", "host-group", "tz", "tokscale-pin", "direct"]
+    : command === "daemon" || command === "serve" ? ["bind", "port"] : [];
   const args = new Map<string, string>();
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i]!;
-    if (!arg.startsWith("--")) continue;
+    if (!arg.startsWith("--") || !allowed.includes(arg.slice(2)))
+      throw new Error(`Unknown argument: ${arg} (try 'npx burn-report help')`);
     const name = arg.slice(2);
-    if (["full", "direct", "no-live"].includes(name)) args.set(name, "");
-    else {
-      const value = argv[i + 1];
-      if (!value || value.startsWith("--"))
-        throw new Error(`--${name} requires a value`);
-      args.set(name, value);
-      i++;
-    }
+    // Compatibility with previously documented machine-only init commands.
+    if (name === "direct") { args.set(name, ""); continue; }
+    const value = argv[++i];
+    if (!value || value.startsWith("--")) throw new Error(`--${name} requires a value`);
+    args.set(name, value);
   }
-
   switch (command) {
-    case "init":
-      runInit(args);
-      break;
-    case "doctor":
-      process.exitCode = await runDoctor();
-      break;
-    case "usage":
-      process.exitCode = await runUsage();
-      break;
-    case "push":
-      process.exitCode = await runPush(args);
-      break;
-    case "daemon":
-      await runDaemon(args);
-      break;
-    case "serve":
-      await runServe(args);
-      break;
-    case "help":
-    case "--help":
-    case "-h":
-      usage();
-      break;
-    default:
-      console.error(`Unknown command: ${command} (try 'npx burn-report help')`);
-      process.exitCode = 1;
+    case "init": runInit(args); break;
+    case "doctor": process.exitCode = await runDoctor(); break;
+    case "usage": process.exitCode = await runUsage(); break;
+    case "daemon": await runDaemon(args); break;
+    case "serve": await runServe(args); break;
+    case "help": case "--help": case "-h": usage(); break;
+    default: throw new Error(`Unknown command: ${command} (try 'npx burn-report help')`);
   }
 } catch (err) {
   console.error(`burn-report: ${(err as Error).message}`);

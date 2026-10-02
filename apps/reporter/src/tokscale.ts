@@ -10,7 +10,7 @@ import { z } from "zod";
 import {
   quotaAccountKey,
   quotaMetricLabel,
-  type IngestQuotaInput,
+  type MachineQuotaInput,
 } from "@burn/sync-api";
 
 export class TokscaleError extends Error {
@@ -62,14 +62,14 @@ export function currentUtcOffsetMinutes(): number {
 
 /**
  * tokscale usage rows → scoped ingest snapshots (D6: account-level; identical
- * from any machine sharing the subscription). Shared by push, `usage`, and
+ * from any machine sharing the subscription). Shared by `usage` and
  * the live server's /live/quotas.
  */
 export function tokscaleQuotaInputs(
   outputs: TokscaleUsageReport,
-): IngestQuotaInput[] {
+): MachineQuotaInput[] {
   const offset = currentUtcOffsetMinutes();
-  const inputs: IngestQuotaInput[] = [];
+  const inputs: MachineQuotaInput[] = [];
   for (const out of outputs) {
     const accountKey = quotaAccountKey(out.account?.id);
     for (const metric of out.metrics) {
@@ -207,7 +207,7 @@ export async function fetchUsage(pin: string): Promise<TokscaleUsageReport> {
   const { stdout } = await spawnRunner(runner, ["usage", "--json"], 120_000);
   const parsed = usageReportSchema.safeParse(extractJsonArray(stdout));
   if (!parsed.success) {
-    // D2: fail loudly on schema drift — never push unvalidated payloads.
+    // D2: fail loudly on schema drift — never serve unvalidated payloads.
     const issue = parsed.error.issues[0];
     if (issue !== undefined) {
       throw new TokscaleError(
