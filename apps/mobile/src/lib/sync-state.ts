@@ -1,5 +1,5 @@
 import type { SQLiteDatabase } from "expo-sqlite";
-export type MirrorChange = "events" | "quotas" | "machines";
+export type MirrorChange = "events" | "quotas" | "machines" | "systems";
 const generations = new WeakMap<SQLiteDatabase, number>();
 export const syncGeneration = (db: SQLiteDatabase): number => generations.get(db) ?? 0;
 export const advanceSyncGeneration = (db: SQLiteDatabase): void => {

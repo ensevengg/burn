@@ -91,8 +91,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (changedDb !== db) return;
     void queryClient.invalidateQueries({
       predicate: (query) => kind === "events"
-        ? query.queryKey[0] !== "quotas" && query.queryKey[0] !== "machines"
-        : query.queryKey[0] === kind,
+        ? query.queryKey[0] !== "quotas" && query.queryKey[0] !== "machines" && query.queryKey[0] !== "systems"
+        : query.queryKey[0] === kind || (kind === "machines" && query.queryKey[0] === "systems"),
     });
   }), [db, queryClient]);
 
@@ -102,7 +102,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     try {
       const statuses = await pullDirectFromMachines(db, options);
       if (epoch !== lifecycle.current) return;
-      const failed = statuses.filter((s) => s.state !== "live" || s.quotaError).length;
+      const failed = statuses.filter((s) => s.state !== "live" || s.quotaError || s.metricsError).length;
       const hasMore = statuses.some((s) => s.hasMore);
       if (hasMore && NativeAppState.currentState === "active") {
         if (backfillTimer.current) clearTimeout(backfillTimer.current);

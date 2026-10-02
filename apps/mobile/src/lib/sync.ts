@@ -1,4 +1,5 @@
 /** Bundled demo seeding uses the same local mirror as machine sync. */
+import { machineMetricId } from "@burn/sync-api";
 import { invalidateEventCache } from "../data/repository";
 import { kvSet, wipeForReseed, type SQLiteDatabase } from "./db";
 import { withWriteLock } from "./writelock";
@@ -109,6 +110,13 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
       );
     }
 
+    for (const metric of dataset.metrics) {
+      const id = envId[metric.environmentSlug]!;
+      await db.runAsync(`insert into machine_metrics
+        (id,environment_id,captured_at_ms,cpu_load_pct,cpu_temp_c,ram_used_pct,ram_temp_c,gpu_util_pct,gpu_temp_c)
+        values (?,?,?,?,?,?,?,?,?)`, [machineMetricId(id, metric.capturedAtMs), id, metric.capturedAtMs,
+          metric.cpuLoadPct, metric.cpuTempC, metric.ramUsedPct, metric.ramTempC, metric.gpuUtilPct, metric.gpuTempC]);
+    }
     await kvSet(db, "mode", "demo");
   });
   // Post-commit eviction, still inside the seed's write lock — same contract

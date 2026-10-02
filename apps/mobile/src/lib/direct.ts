@@ -1,4 +1,4 @@
-import { mergePeerEvents, mergeQuota } from "./mirror-writes";
+import { mergePeerEvents, mergeQuota, mergeMetrics } from "./mirror-writes";
 /** Machines are the backend (ADR 0003). Each registry endpoint supplies
  * validated event pages and independent quotas. The phone stores per-machine
  * scan-start cursors, atomically commits page continuation, and periodically
@@ -37,6 +37,8 @@ export interface DirectPullStatus {
   error: string | null;
   elapsedMs: number;
   quotaError?: string | null;
+  metricsError?: string | null;
+  pulledMetrics?: number;
   scanMs?: number | null;
   hasMore?: boolean;
 }
@@ -44,6 +46,7 @@ export interface DirectPullStatus {
 export interface DirectPullOptions {
   pingTimeoutMs?: number;
   quotaTimeoutMs?: number;
+  metricsTimeoutMs?: number;
   full?: boolean;
   environmentId?: string;
   eventsTimeoutMs?: number;
@@ -244,6 +247,7 @@ export async function removeDirectMachine(
         "delete from quota_snapshots where environment_id = ?",
         [environmentId],
       );
+      await db.runAsync("delete from machine_metrics where environment_id = ?", [environmentId]);
       await db.runAsync("delete from environments where id = ?", [
         environmentId,
       ]);
@@ -447,7 +451,30 @@ async function pullDirectUnlocked(
             timeout.cancel();
           }
         })();
-        // Observe both channels even if one fails; quotas publish independently.
+        const metricsTask = (async () => {
+          if (!api.metrics || ping.osKind === "wsl") return { count: 0, error: null };
+          const timeout = withTimeout(probeSignal, options.metricsTimeoutMs ?? 10_000);
+          try {
+            const page = await api.metrics(Math.max(0, now() - 86_400_000), timeout.signal);
+            const count = await withWriteLock(async () => {
+              assertActive();
+              let changed = 0;
+              await db.withTransactionAsync(async () => {
+                changed = await mergeMetrics(db, machine.id, page.metrics, now(), assertActive);
+                assertActive();
+              });
+              return changed;
+            });
+            if (count) publishMirrorChange(db, "systems");
+            return { count, error: null };
+          } catch (err) {
+            assertActive();
+            // Pre-Systems reporters remain usable until they are upgraded.
+            if (err instanceof LiveError && err.status === 404) return { count: 0, error: null };
+            return { count: 0, error: (err as Error).message };
+          } finally { timeout.cancel(); }
+        })();
+        // Channels publish independently, including health when event scans fail.
         const eventTask = (async () => {
           const stored = options.full
             ? null
@@ -621,11 +648,14 @@ async function pullDirectUnlocked(
           }
           return { pulled, scanMs, hasMore: true };
         })();
-        const [events, quotas] = await Promise.allSettled([
+        const [events, quotas, metrics] = await Promise.allSettled([
           eventTask,
           quotaTask,
+          metricsTask,
         ]);
         assertActive();
+        const metricResult = metrics.status === "fulfilled"
+          ? metrics.value : { count: 0, error: (metrics.reason as Error).message };
         const quotaResult =
           quotas.status === "fulfilled"
             ? quotas.value
@@ -638,6 +668,8 @@ async function pullDirectUnlocked(
             ...failure,
             pulledQuotas: quotaResult.count,
             quotaError: quotaResult.error,
+            pulledMetrics: metricResult.count,
+            metricsError: metricResult.error,
             clockSkewMs,
             elapsedMs: now() - started,
           };
@@ -645,7 +677,7 @@ async function pullDirectUnlocked(
         await persistDirectError(
           db,
           machine.id,
-          quotaResult.error,
+          quotaResult.error ?? metricResult.error,
           assertActive,
         );
         return {
@@ -653,6 +685,8 @@ async function pullDirectUnlocked(
           pulledEvents: events.value.pulled,
           pulledQuotas: quotaResult.count,
           quotaError: quotaResult.error,
+          pulledMetrics: metricResult.count,
+          metricsError: metricResult.error,
           scanMs: events.value.scanMs,
           hasMore: events.value.hasMore,
           clockSkewMs,

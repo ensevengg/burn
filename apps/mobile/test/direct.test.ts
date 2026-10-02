@@ -897,3 +897,74 @@ test("a queued targeted refresh is cancelled by reset before it can contact its 
     fx.native.close();
   }
 });
+
+test("health publishes before a blocked event scan, remains idempotent, and removes with its machine", async () => {
+  const { querySystems } = await import("../src/data/repository");
+  const { subscribeMirrorChanges } = await import("../src/lib/sync-state");
+  const fx = mirrorFixture();
+  const now = Date.now();
+  const metric = { capturedAtMs: now, cpuLoadPct: 12, cpuTempC: null, ramUsedPct: 50,
+    ramTempC: 43, gpuUtilPct: 75, gpuTempC: 60 };
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const api: LiveApi = { ping: async () => ping(), quotas: async () => ({ generatedAt: new Date(now).toISOString(), quotas: [] }),
+    metrics: async () => ({ generatedAt: new Date(now).toISOString(), metrics: [metric] }),
+    events: async () => { await blocked; throw new Error("usage scan failed"); } };
+  const { id } = await addDirectMachine(fx.db, "http://win", { apiFor: () => api });
+  let healthPublished!: () => void;
+  const published = new Promise<void>((resolve) => { healthPublished = resolve; });
+  const unsubscribe = subscribeMirrorChanges((db, kind) => { if (db === fx.db && kind === "systems") healthPublished(); });
+  const pending = pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => now });
+  await published;
+  expect((await querySystems(fx.db))[0]!.metrics[0]!.ramUsedPct).toBe(50);
+  release();
+  const status = (await pending)[0]!;
+  expect(status.error).toContain("usage scan failed");
+  expect(status.pulledMetrics).toBe(1);
+  expect((await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => now }))[0]!.pulledMetrics).toBe(0);
+  await removeDirectMachine(fx.db, id);
+  expect(fx.native.query("select count(*) as count from machine_metrics").get()).toEqual({ count: 0 });
+  unsubscribe();
+  fx.native.close();
+});
+
+test("old reporters without health remain usable and invalid health never reaches SQLite", async () => {
+  const fx = mirrorFixture();
+  const api: LiveApi = { ping: async () => ping(), events: async () => ({ sinceMs: 0, generatedAt: new Date().toISOString(), events: [] }),
+    quotas: async () => ({ generatedAt: new Date().toISOString(), quotas: [] }) };
+  await addDirectMachine(fx.db, "http://win", { apiFor: () => api });
+  expect((await pullDirectFromMachines(fx.db, { apiFor: () => api }))[0]!.metricsError).toBeNull();
+  api.metrics = async () => ({ generatedAt: new Date().toISOString(), metrics: [{ capturedAtMs: 1, cpuLoadPct: 2,
+    cpuTempC: null, ramUsedPct: 150, ramTempC: null, gpuUtilPct: null, gpuTempC: null }] });
+  expect((await pullDirectFromMachines(fx.db, { apiFor: () => api }))[0]!.metricsError).toContain("0–100");
+  expect(fx.native.query("select count(*) as count from machine_metrics").get()).toEqual({ count: 0 });
+  fx.native.close();
+});
+
+test("health downloaded after reset cannot repopulate the mirror", async () => {
+  const { advanceSyncGeneration } = await import("../src/lib/sync-state");
+  const { cancelDirectPull } = await import("../src/lib/direct");
+  const fx = mirrorFixture();
+  const now = Date.now();
+  let release!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const api: LiveApi = { ping: async () => ping(),
+    events: async () => ({ generatedAt: new Date(now).toISOString(), sinceMs: 0, events: [] }),
+    quotas: async () => ({ generatedAt: new Date(now).toISOString(), quotas: [] }),
+    metrics: async () => { entered(); await blocked; return { generatedAt: new Date(now).toISOString(), metrics: [
+      { capturedAtMs: now, cpuLoadPct: 12, cpuTempC: null, ramUsedPct: 50, ramTempC: null, gpuUtilPct: null, gpuTempC: null },
+    ] }; } };
+  await addDirectMachine(fx.db, "http://win", { apiFor: () => api });
+  const pending = pullDirectFromMachines(fx.db, { apiFor: () => api });
+  const outcome = pending.catch((err: Error) => err);
+  await started;
+  advanceSyncGeneration(fx.db);
+  cancelDirectPull(fx.db);
+  release();
+  expect(await outcome).toBeInstanceOf(Error);
+  expect((await outcome as Error).message).toContain("cancelled");
+  expect(fx.native.query("select count(*) as count from machine_metrics").get()).toEqual({ count: 0 });
+  fx.native.close();
+});

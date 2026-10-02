@@ -1,5 +1,6 @@
 import {
   liveEventId,
+  machineMetricId,
   quotaMirrorKey,
   type MachineEventInput,
   type MachineQuotaInput,
@@ -158,4 +159,36 @@ export async function mergeQuota(
       fetchedAt,
     ],
   );
+}
+
+/** Caller holds the mirror write lock and transaction. Keep 24 hours locally;
+ * overlapping peer histories do not create duplicate samples. */
+export async function mergeMetrics(
+  db: SQLiteDatabase,
+  environmentId: string,
+  metrics: import("@burn/sync-api").MachineMetricInput[],
+  now: number,
+  assertActive: () => void,
+): Promise<number> {
+  const columns = ["id", "environment_id", "captured_at_ms", "cpu_load_pct", "cpu_temp_c",
+    "ram_used_pct", "ram_temp_c", "gpu_util_pct", "gpu_temp_c"];
+  const content = columns.slice(3);
+  let changed = 0;
+  for (let start = 0; start < metrics.length; start += 32) {
+    assertActive();
+    const chunk = metrics.slice(start, start + 32);
+    const result = await db.runAsync(
+      `insert into machine_metrics (${columns.join(",")}) values
+       ${chunk.map(() => `(${columns.map(() => "?").join(",")})`).join(",")}
+       on conflict(id) do update set ${content.map((c) => `${c}=excluded.${c}`).join(",")}
+       where (${content.join(",")}) is not (${content.map((c) => `excluded.${c}`).join(",")})`,
+      chunk.flatMap((m) => [machineMetricId(environmentId, m.capturedAtMs), environmentId,
+        m.capturedAtMs, m.cpuLoadPct, m.cpuTempC, m.ramUsedPct, m.ramTempC, m.gpuUtilPct, m.gpuTempC]),
+    );
+    changed += result.changes;
+  }
+  assertActive();
+  const removed = await db.runAsync("delete from machine_metrics where environment_id=? and captured_at_ms<?",
+    [environmentId, now - 86_400_000]);
+  return changed + removed.changes;
 }

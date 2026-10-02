@@ -82,6 +82,18 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           error text,
           fetched_at text not null
         );
+        create table if not exists machine_metrics (
+          id text primary key,
+          environment_id text not null,
+          captured_at_ms integer not null,
+          cpu_load_pct real not null,
+          cpu_temp_c real,
+          ram_used_pct real not null,
+          ram_temp_c real,
+          gpu_util_pct real,
+          gpu_temp_c real
+        );
+        create index if not exists machine_metrics_env_time_idx on machine_metrics (environment_id, captured_at_ms);
         create table if not exists kv (key text primary key, value text not null);
         create table if not exists direct_machines (
           id text primary key,
@@ -148,6 +160,7 @@ export function resetDb(db: SQLite.SQLiteDatabase): Promise<void> {
 export async function wipeForReseed(db: SQLite.SQLiteDatabase): Promise<void> {
   await db.withTransactionAsync(async () => {
     await db.runAsync("delete from usage_events");
+    await db.runAsync("delete from machine_metrics");
     await db.runAsync("delete from environments");
     await db.runAsync("delete from quota_snapshots");
     await db.runAsync("delete from direct_machines");
