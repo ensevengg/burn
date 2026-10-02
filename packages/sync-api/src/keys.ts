@@ -170,3 +170,8 @@ export function quotaMirrorKey(
 ): string {
   return JSON.stringify([environmentId, provider, account, metric, status]);
 }
+
+/** machine_metrics: one sample per environment and source capture instant. */
+export function machineMetricId(environmentId: string, capturedAtMs: number): string {
+  return sha256HexUtf8(`${environmentId}|${capturedAtMs}`);
+}

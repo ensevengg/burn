@@ -46,3 +46,14 @@ export interface MachineQuotaInput {
   sourceOffsetMinutes: number | null;
 }
 
+
+/** One physical-machine sample. Unsupported sensors are explicitly null. */
+export interface MachineMetricInput {
+  capturedAtMs: number;
+  cpuLoadPct: number;
+  cpuTempC: number | null;
+  ramUsedPct: number;
+  ramTempC: number | null;
+  gpuUtilPct: number | null;
+  gpuTempC: number | null;
+}

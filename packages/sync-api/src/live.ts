@@ -13,7 +13,7 @@ import {
   choice,
   identity,
 } from "./validation";
-import type { MachineEventInput, MachineQuotaInput } from "./payloads";
+import type { MachineEventInput, MachineQuotaInput, MachineMetricInput } from "./payloads";
 import type { OsKind } from "./types";
 
 /** Read-only machine transport over the user's tailnet. Tailscale membership
@@ -59,6 +59,11 @@ export interface LiveQuotasPage {
   quotas: MachineQuotaInput[];
 }
 
+export interface LiveMetricsPage {
+  generatedAt: string;
+  metrics: MachineMetricInput[];
+}
+
 export interface LivePageRequest {
   limit?: number;
   cursor?: string;
@@ -75,10 +80,11 @@ export interface LiveApi {
     page?: LivePageRequest,
   ): Promise<LiveEventsPage>;
   quotas(signal?: AbortSignal): Promise<LiveQuotasPage>;
+  metrics?(sinceMs: number, signal?: AbortSignal): Promise<LiveMetricsPage>;
 }
 
 type LiveTransport = {
-  [K in keyof LiveApi]: (...args: Parameters<LiveApi[K]>) => Promise<unknown>;
+  [K in keyof LiveApi]: (...args: Parameters<NonNullable<LiveApi[K]>>) => Promise<unknown>;
 };
 const validatedApis = new WeakSet<LiveApi>();
 /** One schema gate per transport response, including injected adapters. An
@@ -92,6 +98,10 @@ export function validateLiveApi(transport: LiveTransport): LiveApi {
     quotas: async (...args) =>
       parseLiveQuotasPage(await transport.quotas(...args)),
   };
+  if (transport.metrics) {
+    const metrics = transport.metrics;
+    api.metrics = async (...args) => parseLiveMetricsPage(await metrics(...args));
+  }
   validatedApis.add(api);
   return api;
 }
@@ -199,6 +209,7 @@ export function httpLiveApiFor(
       );
     },
     quotas: async (signal) => call("/live/quotas", signal),
+    metrics: async (sinceMs, signal) => call(`/live/metrics?since=${Math.floor(sinceMs)}`, signal),
   });
 }
 
@@ -343,4 +354,41 @@ export function parseLivePing(raw: unknown): LivePing {
     sinceMs: orNullNumber(p.sinceMs),
     serverNowMs: integer(p.serverNowMs, "serverNowMs"),
   };
+}
+
+function percent(value: unknown, where: string): number {
+  const number = expectNumber(value, where);
+  if (number < 0 || number > 100) throw new LiveError(`${where}: expected 0–100`);
+  return number;
+}
+
+function nullablePercent(value: unknown, where: string): number | null {
+  return value === null || value === undefined ? null : percent(value, where);
+}
+
+function nullableTemperature(value: unknown, where: string): number | null {
+  if (value === null || value === undefined) return null;
+  const number = expectNumber(value, where);
+  if (number < -50 || number > 200) throw new LiveError(`${where}: invalid temperature`);
+  return number;
+}
+
+/** Validate peer-provided vitals before they reach the phone mirror. */
+export function parseLiveMetricsPage(raw: unknown): LiveMetricsPage {
+  const page = expectObject(raw, "metrics page");
+  if (!Array.isArray(page.metrics)) throw new LiveError("metrics: expected an array");
+  const metrics = page.metrics.map((row, index) => {
+    const metric = expectObject(row, `metrics[${index}]`);
+    const where = (field: string): string => `metrics[${index}].${field}`;
+    return {
+      capturedAtMs: integer(metric.capturedAtMs, where("capturedAtMs")),
+      cpuLoadPct: percent(metric.cpuLoadPct, where("cpuLoadPct")),
+      cpuTempC: nullableTemperature(metric.cpuTempC, where("cpuTempC")),
+      ramUsedPct: percent(metric.ramUsedPct, where("ramUsedPct")),
+      ramTempC: nullableTemperature(metric.ramTempC, where("ramTempC")),
+      gpuUtilPct: nullablePercent(metric.gpuUtilPct, where("gpuUtilPct")),
+      gpuTempC: nullableTemperature(metric.gpuTempC, where("gpuTempC")),
+    } satisfies MachineMetricInput;
+  });
+  return { generatedAt: timestamp(page.generatedAt, "generatedAt"), metrics };
 }
