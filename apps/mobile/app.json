@@ -28,7 +28,8 @@
     },
     "owner": "ensevengg",
     "plugins": [
-      "./plugins/with-tailnet-http"
+      "./plugins/with-tailnet-http",
+      "./plugins/with-workspace-bundle"
     ]
   }
 }
