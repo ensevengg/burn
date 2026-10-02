@@ -26,6 +26,9 @@
         "projectId": "81ce3728-e9d0-4ad1-8d7e-bdacc817b30c"
       }
     },
-    "owner": "ensevengg"
+    "owner": "ensevengg",
+    "plugins": [
+      "./plugins/with-tailnet-http"
+    ]
   }
 }
