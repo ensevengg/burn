@@ -59,7 +59,7 @@ function errorText(err: unknown): string {
 
 /**
  * Pure request handler — Bun.serve-independent so tests exercise it without
- * sockets. `GET /ping`, `GET /live/events`, `GET /live/quotas`; anything else
+ * sockets. `GET /ping`, `GET /live/events`, `GET /live/quotas`, `GET /live/metrics`; anything else
  * is a 404/405.
  */
 export function createLiveFetch(

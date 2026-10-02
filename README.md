@@ -2,7 +2,7 @@
 
 > Token burn rate for AI devs — see every token you burn across every machine, from your phone.
 
-**burn** tracks AI coding-agent usage, cache hit rates, cost and vendor limits across Windows, WSL, Linux and macOS. It wraps [tokscale](https://github.com/junhoyeo/tokscale) for parsing and pricing, and reads your machines directly over **Tailscale**. The Android app renders from a local SQLite mirror, including when machines are offline. No hosted database, accounts or telemetry.
+**burn** tracks AI coding-agent usage, cache hit rates, cost and vendor limits and physical-machine RAM/GPU health across Windows, WSL, Linux and macOS. It wraps [tokscale](https://github.com/junhoyeo/tokscale) for parsing and pricing, and reads your machines directly over **Tailscale**. The Android app renders from a local SQLite mirror, including when machines are offline. No hosted database, accounts or telemetry.
 
 ```
 machine: tokscale + burn-events → burn-report daemon ← Tailscale → phone: Expo + SQLite
@@ -30,9 +30,11 @@ To explore without machines, start the app and choose **Explore with demo data**
 
 ## Sync behavior
 
-Opening the app or pulling to refresh probes registered machines. Validated usage pages and vendor quotas merge independently, preserving successful quotas when a vendor check fails. Interrupted history backfills resume while the app is foregrounded. Content hashes, compressed pages and no-op writes reduce repeated transfers.
+Opening the app or pulling to refresh probes registered machines. Validated usage pages, vendor quotas and system-health samples merge independently, preserving successful quotas when a vendor check fails. Interrupted history backfills resume while the app is foregrounded. Content hashes, compressed pages and no-op writes reduce repeated transfers.
 
 Per-machine cursors checkpoint completed scan starts with a conservative overlap. Full-history reconciliation on a foreground/refresh pull after 24 hours catches late records and parser/pricing corrections. **Machines → Reconcile full history** runs it immediately. Offline machines retain cached history and show contact/error diagnostics.
+
+The **Systems** tab shows RAM/GPU usage and available temperatures with trailing 24-hour sparklines. Resident reporters sample physical hardware every 30 seconds and on request; unsupported sensors stay unavailable. WSL uses its Windows host’s hardware and does not create a second physical system. Reporters keep a process-local 24-hour health history; the phone persists received samples and shows stale/unavailable readings when a machine cannot answer.
 
 History lives in the source files on your machines and the phone mirror. A fresh phone needs each source machine to come online to rebuild its history. Removing a machine or disconnecting clears local cached data only, after confirmation.
 
@@ -46,7 +48,7 @@ See [transfer behavior and upgrade details](docs/connection-transfer-fixes.md) a
 
 | Path | Purpose |
 |---|---|
-| `apps/mobile` | Expo Android app, dashboards, limits, machines, sessions/workspaces and settings. |
+| `apps/mobile` | Expo Android app, dashboards, limits, Systems, machines, sessions/workspaces and settings. |
 | `apps/reporter` | Read-only machine backend and setup/diagnostic CLI. |
 | `crates/burn-events` | Pinned Rust exporter of priced tokscale UnifiedMessage records as JSONL. |
 | `packages/sync-api` | Machine transport, shared types, wire validation and idempotent mirror keys. |
@@ -57,6 +59,7 @@ See [transfer behavior and upgrade details](docs/connection-transfer-fixes.md) a
 ```bash
 bun run typecheck
 bun run test
+bun run --cwd apps/mobile android  # local Android build; requires JDK + Android SDK
 ```
 
 [AGENTS.md](AGENTS.md) records engineering rules and current decisions. The original planning interview and architecture review remain historical records; [ADR 0003](docs/adr/0003-tailscale-only-backend.md) supersedes their cloud architecture.
