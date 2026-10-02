@@ -1,7 +1,7 @@
 /**
  * Charts: the tokscale-style smooth gradient area chart, used everywhere —
- * single-series totals, stacked model/agent breakdowns, and the cache-hit-rate
- * strip. The Y-axis gutter is pinned OUTSIDE the horizontal scroll (user
+ * single-series totals and stacked model/agent breakdowns. The Y-axis gutter
+ * is pinned OUTSIDE the horizontal scroll (user
  * direction: the axis must not slide away) — only the plot and its day labels
  * scroll, with the newest bucket pinned to the right edge. react-native-svg
  * only; the victory-native/Skia swap (D9) keeps this file's boundary.
@@ -199,56 +199,6 @@ export function AreaChart({
       {legendKeys !== undefined && legendKeys.length > 1 && colorFor !== undefined && (
         <Legend stackKeys={legendKeys} colorFor={colorFor} />
       )}
-    </View>
-  );
-}
-
-/** Cache-hit-rate strip: same smooth area shape, fixed 0–100% domain, pinned axis. */
-export function HitRateStrip({ points }: { points: ChartPoint[] }) {
-  const { C } = useTheme();
-  const gradientId = useId();
-  const width = Math.max(340, points.length * 44);
-  const plotWidth = width - GUTTER - 4;
-  const plotHeight = 110 - 26;
-  const plotTop = 8;
-  const plotBottom = plotTop + plotHeight;
-  if (points.length === 0) return null;
-
-  const coords = points.map((p, i) => ({
-    x: GUTTER + (i + 0.5) * (plotWidth / Math.max(1, points.length)),
-    y: plotBottom - Math.min(1, Math.max(0, p.value)) * plotHeight,
-  }));
-  const labelEvery = Math.ceil(points.length / 6);
-
-  return (
-    <View>
-      <View style={{ flexDirection: "row" }}>
-        <View style={{ width: GUTTER, height: 110 }}>
-          <Text style={[styles.yTick, { color: C.muted, top: plotTop - 7 }]}>100%</Text>
-          <Text style={[styles.yTick, { color: C.muted, top: plotBottom - 7 }]}>0%</Text>
-        </View>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          <Svg width={width} height={110} viewBox={`0 0 ${width} 110`}>
-            <Defs>
-              <LinearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-                <Stop offset="0" stopColor={C.text} stopOpacity="0.25" />
-                <Stop offset="1" stopColor={C.text} stopOpacity="0.02" />
-              </LinearGradient>
-            </Defs>
-            <Line x1={0} x2={width} y1={plotTop} y2={plotTop} stroke={C.border} strokeDasharray="3 4" />
-            <Line x1={0} x2={width} y1={plotBottom} y2={plotBottom} stroke={C.border} />
-            <Path d={areaFrom(coords, plotBottom)} fill={`url(#${gradientId})`} />
-            <Path d={smoothPath(coords)} fill="none" stroke={C.text} strokeWidth={2} strokeLinecap="round" />
-            {points.map((p, i) =>
-              i % labelEvery === 0 ? (
-                <SvgText key={`${p.label}-${i}`} x={coords[i]!.x} y={110 - 6} fontSize={FONT} fill={C.muted} textAnchor="middle">
-                  {p.label}
-                </SvgText>
-              ) : null,
-            )}
-          </Svg>
-        </ScrollView>
-      </View>
     </View>
   );
 }

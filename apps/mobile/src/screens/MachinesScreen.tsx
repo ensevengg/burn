@@ -10,6 +10,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { reporterIssue } from "../lib/system-health";
 import { useMachinesQuery } from "../data/queries";
 import { formatRelative } from "../lib/format";
 import { humanize } from "../lib/labels";
@@ -137,9 +138,9 @@ export function MachinesScreen() {
               Environments
             </SectionTitle>
             {machines.data?.map((machine) => {
-              const healthy =
-                machine.lastError === null && machine.lastHeartbeatAt !== null;
               const live = liveBySlug.get(machine.slug);
+              const issue = reporterIssue(machine, live);
+              const healthy = issue === null;
               return (
                 <Card key={machine.id}>
                   <View style={styles.header}>
@@ -187,12 +188,12 @@ export function MachinesScreen() {
                     {`tokscale ${machine.tokscaleVersion ?? "?"} · reporter ${machine.reporterVersion ?? "?"}`}
                   </Text>
                   {live !== undefined && <LiveLine status={live} />}
-                  {machine.lastError !== null && (
+                  {issue !== null && (
                     <Text
                       style={{ color: C.err, marginTop: 6 }}
                       numberOfLines={3}
                     >
-                      {machine.lastError}
+                      {issue}
                     </Text>
                   )}
                   {mode === "direct" && (

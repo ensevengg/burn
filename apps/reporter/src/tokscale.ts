@@ -106,6 +106,8 @@ export interface Runner {
   prefix: string[];
 }
 
+const cachedVersions = new Map<string, string>();
+const versionProbes = new Map<string, Promise<string | null>>();
 const cachedRunners = new Map<string, Runner>();
 const runnerInFlight = new Map<string, Promise<Runner>>();
 
@@ -180,14 +182,27 @@ async function findRunner(pin: string): Promise<Runner> {
   );
 }
 
-export async function tokscaleVersion(pin: string): Promise<string | null> {
-  try {
-    const runner = await resolveRunner(pin);
-    const { stdout } = await spawnRunner(runner, ["--version"], 60_000);
-    return stdout.trim() || null;
-  } catch {
-    return null;
-  }
+export function tokscaleVersion(pin: string): Promise<string | null> {
+  const cached = cachedVersions.get(pin);
+  if (cached !== undefined) return Promise.resolve(cached);
+  const inFlight = versionProbes.get(pin);
+  if (inFlight !== undefined) return inFlight;
+  const pending = (async () => {
+    try {
+      const runner = await resolveRunner(pin);
+      const { stdout } = await spawnRunner(runner, ["--version"], 60_000);
+      const version = stdout.trim() || null;
+      if (version !== null) cachedVersions.set(pin, version);
+      return version;
+    } catch {
+      return null;
+    }
+  })();
+  versionProbes.set(pin, pending);
+  void pending.finally(() => {
+    if (versionProbes.get(pin) === pending) versionProbes.delete(pin);
+  });
+  return pending;
 }
 
 function extractJsonArray(text: string): unknown {

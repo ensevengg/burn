@@ -4,6 +4,9 @@ import type { BurnConfig } from "./config";
 import { parseEventsJsonl, exportRowsToMachineInputs } from "./events";
 import {
   exporterVersion,
+  exporterCapabilities,
+  assertExporterCapabilities,
+  exporterFingerprint,
   assertExporterMatchesPin,
   fetchEventsJsonl,
 } from "./exporter";
@@ -22,6 +25,7 @@ interface SnapshotDeps {
   scan?: (sinceMs: number) => Promise<string>;
   check?: () => Promise<string | null>;
   ttlMs?: number;
+  fingerprint?: () => Promise<string | null>;
 }
 
 /** A normalized full snapshot covers every requested window. One scan promise
@@ -30,6 +34,8 @@ export class MachineSnapshots {
   private latest: MachineSnapshot | null = null;
   private pending: Promise<MachineSnapshot> | null = null;
   private checkedAt = -Infinity;
+  private sourceFingerprint: string | null = null;
+  private refreshedAt = -Infinity;
   private readonly history = new Map<
     string,
     { snapshot: MachineSnapshot; touchedAt: number }
@@ -55,24 +61,36 @@ export class MachineSnapshots {
     if (
       !force &&
       this.latest &&
-      this.now() >= Date.parse(this.latest.generatedAt) &&
-      this.now() - Date.parse(this.latest.generatedAt) <
+      this.now() >= this.refreshedAt &&
+      this.now() - this.refreshedAt <
         (this.deps.ttlMs ?? 30_000)
     )
       return Promise.resolve(this.latest);
-    const pending = this.scan().finally(() => {
+    const pending = this.scan(force).finally(() => {
       if (this.pending === pending) this.pending = null;
     });
     this.pending = pending;
     return pending;
   }
-  private async scan(): Promise<MachineSnapshot> {
+  private async scan(force: boolean): Promise<MachineSnapshot> {
     if (this.now() < this.checkedAt || this.now() - this.checkedAt >= 300_000) {
       const version = await (this.deps.check ?? exporterVersion)();
       if (version === null)
         throw new Error("burn-events exporter not found on this machine");
       assertExporterMatchesPin(version, this.pin);
+      if (!this.deps.check)
+        assertExporterCapabilities(await exporterCapabilities(), this.pin);
       this.checkedAt = this.now();
+    }
+    // Keep main's source fingerprint fast path behind the resumable snapshot
+    // cache. Injected scans opt in explicitly so fixtures never probe a binary.
+    const fingerprint = this.deps.fingerprint
+      ? await this.deps.fingerprint()
+      : this.deps.scan ? null : await exporterFingerprint();
+    if (!force && fingerprint !== null && fingerprint === this.sourceFingerprint && this.latest && this.now() >= this.latest.startedAtMs) {
+      this.refreshedAt = this.now();
+      this.history.set(this.latest.id, { snapshot: this.latest, touchedAt: this.now() });
+      return this.latest;
     }
     const startedAtMs = this.now();
     const rows = parseEventsJsonl(
@@ -96,6 +114,8 @@ export class MachineSnapshots {
       scanMs: this.now() - startedAtMs,
       events,
     };
+    this.refreshedAt = this.now();
+    this.sourceFingerprint = fingerprint;
     this.latest = snapshot;
     this.history.set(snapshot.id, { snapshot, touchedAt: this.now() });
     while (this.history.size > 3) {

@@ -18,16 +18,20 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::io::{BufWriter, Write};
-use std::time::Instant;
+use std::path::PathBuf;
+use std::time::{Instant, UNIX_EPOCH};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokscale_core::pricing::PricingService;
-use tokscale_core::scanner::ScannerSettings;
-use tokscale_core::{LocalParseOptions, UnifiedMessage, WorkspaceLabeler, paths};
+use tokscale_core::scanner::{scan_all_clients_with_scanner_settings, ScannerSettings};
+use tokscale_core::{paths, LocalParseOptions, UnifiedMessage, WorkspaceLabeler};
 
 const USAGE: &str = "burn-events — emit tokscale UnifiedMessage records as JSONL (burn D2 seam)
 
 Usage: burn-events [--since-ms <epoch-ms>]
+       burn-events --fingerprint
+       burn-events --capabilities
        burn-events --version
 
 stdout: one JSON object per line. stderr: scan summary.";
@@ -38,6 +42,21 @@ struct ExportRow<'a> {
     msg: &'a UnifiedMessage,
     source_offset_minutes: i32,
     source_timezone: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Capabilities<'a> {
+    protocol: u8,
+    tokscale_version: &'a str,
+    capabilities: [&'a str; 1],
+}
+
+fn capabilities() -> Capabilities<'static> {
+    Capabilities {
+        protocol: 2,
+        tokscale_version: env!("CARGO_PKG_VERSION"),
+        capabilities: ["fingerprint-v1"],
+    }
 }
 
 /// AGENTS.md (D2): for sources tokscale leaves without a dedup_key, derive
@@ -63,7 +82,13 @@ fn derive_missing_dedup_keys(messages: &mut [UnifiedMessage]) {
         for (ord, i) in sorted.into_iter().enumerate() {
             let key = {
                 let m = &messages[i];
-                format!("v1:{}:{}:{}:{}", m.client, m.session_id, m.timestamp, ord + 1)
+                format!(
+                    "v1:{}:{}:{}:{}",
+                    m.client,
+                    m.session_id,
+                    m.timestamp,
+                    ord + 1
+                )
             };
             messages[i].dedup_key = Some(key);
         }
@@ -92,6 +117,7 @@ fn content_cmp(a: &UnifiedMessage, b: &UnifiedMessage) -> Ordering {
 
 fn main() {
     let mut since_ms: Option<i64> = None;
+    let mut fingerprint = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -99,10 +125,18 @@ fn main() {
                 println!("burn-events {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
+            "--capabilities" => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&capabilities()).expect("serialize capabilities")
+                );
+                return;
+            }
             "-h" | "--help" => {
                 eprintln!("{USAGE}");
                 return;
             }
+            "--fingerprint" => fingerprint = true,
             "--since-ms" => match args.next().and_then(|v| v.parse::<i64>().ok()) {
                 Some(value) => since_ms = Some(value),
                 None => {
@@ -113,6 +147,19 @@ fn main() {
             other => {
                 eprintln!("unknown argument: {other}\n{USAGE}");
                 std::process::exit(2);
+            }
+        }
+    }
+
+    if fingerprint {
+        match source_fingerprint() {
+            Ok(value) => {
+                println!("{value}");
+                return;
+            }
+            Err(err) => {
+                eprintln!("[burn-events] fingerprint failed: {err}");
+                std::process::exit(1);
             }
         }
     }
@@ -196,6 +243,78 @@ async fn run(since_ms: Option<i64>) -> Result<(), String> {
 
 /// Scanner settings live on the `scanner` key of tokscale's settings.json;
 /// unreadable or absent config degrades to defaults, exactly like the CLI.
+fn source_fingerprint() -> Result<String, String> {
+    let home = tokscale_core::get_home_dir_string(&None)?;
+    let settings = load_scanner_settings();
+    let scan = scan_all_clients_with_scanner_settings(&home, &[], true, &settings);
+    let mut sources: Vec<PathBuf> = scan.files.iter().flatten().cloned().collect();
+    sources.extend(scan.opencode_dbs);
+    sources.extend(scan.copilot_desktop_db);
+    sources.extend(scan.synthetic_db);
+    sources.extend(scan.kilo_db);
+    sources.extend(scan.hermes_db);
+    sources.extend(scan.goose_db);
+    sources.extend(scan.zed_db);
+    sources.extend(scan.kiro_db);
+    sources.extend(scan.crush_dbs.into_iter().map(|source| source.db_path));
+    sources.extend(scan.zcode_db);
+    sources.extend(scan.micode_dbs);
+    sources.extend(scan.opencode_json_dir);
+    sources.extend(scan.devin_dbs);
+    sources.extend(scan.copilot_vscode_sessions);
+
+    // Scanner behavior and pricing affect normalized rows even when transcript
+    // files are unchanged. Their cache/config files are therefore sources too.
+    let config_dir = paths::get_config_dir();
+    sources.push(config_dir.join("settings.json"));
+    sources.push(config_dir.join("pricing-litellm.json"));
+    fingerprint_paths(&sources)
+}
+
+fn fingerprint_paths(paths: &[PathBuf]) -> Result<String, String> {
+    let mut expanded = Vec::with_capacity(paths.len() * 2);
+    for path in paths {
+        expanded.push(path.clone());
+        // Active SQLite changes can live only in the WAL; hashing the main DB
+        // metadata alone would incorrectly classify those rows as unchanged.
+        let wal = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
+        if wal.exists() {
+            expanded.push(wal);
+        }
+    }
+    expanded.sort_unstable();
+    expanded.dedup();
+
+    let mut hash = Sha256::new();
+    // A parser pin or timezone change can alter normalized output with no
+    // transcript metadata change. Keep those inputs in the generation so a
+    // phone never suppresses the required correction scan.
+    hash.update(b"burn-source-fingerprint-v1");
+    hash.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hash.update(
+        iana_time_zone::get_timezone()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    for path in expanded {
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let modified_ns = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        hash.update(path.to_string_lossy().as_bytes());
+        hash.update([0]);
+        hash.update(metadata.len().to_le_bytes());
+        hash.update(modified_ns.to_le_bytes());
+        hash.update([u8::from(metadata.is_dir())]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 fn load_scanner_settings() -> ScannerSettings {
     let path = paths::get_config_dir().join("settings.json");
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -210,4 +329,38 @@ fn load_scanner_settings() -> ScannerSettings {
         .map(serde_json::from_value::<ScannerSettings>)
         .unwrap_or_else(|| Ok(ScannerSettings::default()))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{capabilities, fingerprint_paths};
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn fingerprint_changes_when_a_source_grows() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("burn-events-fingerprint-{nonce}"));
+        std::fs::write(&path, b"one").unwrap();
+        let first = fingerprint_paths(std::slice::from_ref(&path)).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"-two").unwrap();
+        file.sync_all().unwrap();
+        let second = fingerprint_paths(std::slice::from_ref(&path)).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn advertises_the_fingerprint_fast_path() {
+        let value = serde_json::to_value(capabilities()).unwrap();
+        assert_eq!(value["protocol"], 2);
+        assert_eq!(value["capabilities"][0], "fingerprint-v1");
+    }
 }

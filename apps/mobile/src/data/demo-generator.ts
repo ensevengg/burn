@@ -2,6 +2,7 @@
  * Deterministic demo dataset (seed 42): three environments, 30 days of
  * Codex/Z.ai/OpenCode usage with realistic token/cache/cost shapes. Pure TS —
  * consumed by the app's demo mode (in-memory, dates relative to now) and by
+ * the mobile mirror seed writer.
  */
 
 export interface DemoEvent {
@@ -33,6 +34,7 @@ export interface DemoEvent {
   modelAttributionConflicted: boolean;
   parserVersion: string;
   dedupKey: string;
+  revision: number;
 }
 
 export interface DemoEnvironment {
@@ -68,6 +70,17 @@ export interface DemoDataset {
   /** USD per million tokens, per unique model — powers cache savings. */
   prices: Record<string, { input: number; output: number; cacheRead: number }>;
   metrics: DemoMachineMetric[];
+}
+
+export interface DemoMachineMetric {
+  environmentSlug: string;
+  capturedAtMs: number;
+  cpuLoadPct: number;
+  cpuTempC: number | null;
+  ramUsedPct: number;
+  ramTempC: number | null;
+  gpuUtilPct: number | null;
+  gpuTempC: number | null;
 }
 
 const DAY = 86_400_000;
@@ -152,6 +165,7 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
   const rand = mulberry32(42);
   const events: DemoEvent[] = [];
   const todayUtcMidnight = Math.floor(now / DAY) * DAY;
+  const revisions: Record<string, number> = { cachyos: 1, windows: 1, wsl: 1 };
   // 120 days with a growth curve: older days are sparser so the 30d/90d/1y
   // windows are visibly different in the app.
   const HISTORY_DAYS = 120;
@@ -193,6 +207,7 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
               cacheWrite * model.cacheWrite) /
             million;
           const isTurnStart = m > 0 && m % 6 === 0;
+          const revision = revisions[env.slug]!;
 
           events.push({
             eventId: `${env.slug}|${model.client}|v1:${model.client}:${sessionId}:${cursorMs}:${m}`,
@@ -224,6 +239,7 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
             modelAttributionConflicted: false,
             parserVersion: "tokscale-4.15.1",
             dedupKey: `v1:${model.client}:${sessionId}:${cursorMs}:${m}`,
+            revision,
           });
         }
       }
@@ -273,15 +289,4 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
   }
 
   return { now, environments: ENVIRONMENTS, events, quotas, prices, metrics };
-}
-
-export interface DemoMachineMetric {
-  environmentSlug: string;
-  capturedAtMs: number;
-  cpuLoadPct: number;
-  cpuTempC: number | null;
-  ramUsedPct: number;
-  ramTempC: number | null;
-  gpuUtilPct: number | null;
-  gpuTempC: number | null;
 }

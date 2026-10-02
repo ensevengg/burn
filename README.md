@@ -30,7 +30,7 @@ To explore without machines, start the app and choose **Explore with demo data**
 
 ## Sync behavior
 
-Opening the app or pulling to refresh probes registered machines. Validated usage pages, vendor quotas and system-health samples merge independently, preserving successful quotas when a vendor check fails. Interrupted history backfills resume while the app is foregrounded. Content hashes, compressed pages and no-op writes reduce repeated transfers.
+Opening the app or pulling to refresh probes registered machines. Validated usage pages, vendor quotas and system-health samples merge independently, preserving successful quotas when a vendor check fails. Interrupted history backfills resume while the app is foregrounded. Source fingerprints, content hashes, compressed pages and no-op writes reduce repeated scans and transfers.
 
 Per-machine cursors checkpoint completed scan starts with a conservative overlap. Full-history reconciliation on a foreground/refresh pull after 24 hours catches late records and parser/pricing corrections. **Machines → Reconcile full history** runs it immediately. Offline machines retain cached history and show contact/error diagnostics.
 
@@ -40,7 +40,7 @@ History lives in the source files on your machines and the phone mirror. A fresh
 
 ## Upgrading
 
-Restart reporters after updating this branch. Existing configs retain identity and parser pins; loading them removes obsolete upload settings and credentials. The phone preserves cached history, preferences and registered URLs. Saved legacy endpoint URLs become Tailscale registrations automatically; add a reporter URL manually if none was saved. The upgrade performs one corrective history reconciliation. Old scheduled `push` jobs should be replaced by a resident `daemon`; the `push` command has been removed.
+Restart reporters after updating this branch. Check `burn-events --capabilities` for `fingerprint-v1`; rebuild with `cargo install --path crates/burn-events` if it is missing (the tokscale pin remains 4.15.1). Existing configs retain identity and parser pins; loading them removes obsolete upload settings and credentials. The phone preserves cached history, preferences and registered URLs. Saved legacy endpoint URLs become Tailscale registrations automatically; add a reporter URL manually if none was saved. The upgrade performs one corrective history reconciliation. Old scheduled `push` jobs should be replaced by a resident `daemon`; the `push` command has been removed.
 
 See [transfer behavior and upgrade details](docs/connection-transfer-fixes.md) and [the backend decision](docs/adr/0003-tailscale-only-backend.md).
 

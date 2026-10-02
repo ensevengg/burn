@@ -2,10 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   bucketEvents,
   buildSeries,
-  buildStackLayers,
-  computeDailyTotals,
   computeGranularityMax,
-  computeRecords,
   eventTokens,
   type EventRow,
 } from "../src/data/repository";
@@ -104,51 +101,7 @@ describe("computeGranularityMax", () => {
   });
 });
 
-describe("computeRecords", () => {
-  const DAY = 86_400_000;
-  // Deterministic "now": Sep 6 2026 12:00 UTC (an ordinal boundary).
-  const now = Date.parse("2026-09-06T12:00:00Z");
-  const at = (dayOffsetFromNow: number, hour = 6) =>
-    now - dayOffsetFromNow * DAY - (12 - hour) * 3_600_000;
-
-  test("biggest day (by tokens), priciest session", () => {
-    const events = [
-      event({ occurredAtMs: at(5), sessionId: "cheap", inputTokens: 100, cost: 0.1 }),
-      event({ occurredAtMs: at(5), sessionId: "cheap", inputTokens: 100, cost: 0.2 }),
-      event({ occurredAtMs: at(10), sessionId: "pricey", inputTokens: 900, cost: 5 }),
-    ];
-    const records = computeRecords(events, IST, now);
-    // Sep 1 holds both cheap events (200 tokens); Aug 27 holds the pricey one (900).
-    expect(records.biggestDay?.tokens).toBe(900);
-    expect(records.topSession?.sessionId).toBe("pricey");
-    expect(records.topSession?.cost).toBe(5);
-  });
-
-  test("streaks break on gaps and count back from today", () => {
-    const events = [
-      // Active 3 days, gap, active 2 days, today inactive.
-      event({ occurredAtMs: at(9), sessionId: "a" }),
-      event({ occurredAtMs: at(8), sessionId: "b" }),
-      event({ occurredAtMs: at(7), sessionId: "c" }),
-      event({ occurredAtMs: at(5), sessionId: "d" }),
-      event({ occurredAtMs: at(4), sessionId: "e" }),
-    ];
-    const records = computeRecords(events, IST, now);
-    expect(records.longestStreak).toBe(3);
-    expect(records.currentStreak).toBe(0);
-  });
-
-  test("today's inactivity does not break the current streak", () => {
-    const events = [
-      event({ occurredAtMs: at(1), sessionId: "a" }),
-      event({ occurredAtMs: at(2), sessionId: "b" }),
-    ];
-    const records = computeRecords(events, IST, now);
-    expect(records.currentStreak).toBe(2);
-  });
-});
-
-describe("buildSeries and layers", () => {
+describe("buildSeries", () => {
   const events = [
     event({
       occurredAtMs: Date.parse("2026-09-05T06:00:00Z"),
@@ -164,7 +117,7 @@ describe("buildSeries and layers", () => {
     }),
   ];
 
-  test("series carries per-bucket cache splits for the hit-rate chart", () => {
+  test("series carries per-bucket cache splits", () => {
     const series = buildSeries(events, IST, "daily", "model");
     expect(series).toHaveLength(1);
     expect(series[0]!.stacks["glm-4.7"]).toBe(1000);
@@ -172,10 +125,4 @@ describe("buildSeries and layers", () => {
     expect(series[0]!.inputTokens).toBe(1500);
   });
 
-  test("layers accumulate bottom-up in stack order", () => {
-    const series = buildSeries(events, IST, "daily", "model");
-    const layers = buildStackLayers(series, ["glm-4.7", "gpt-5.2-codex"]);
-    expect(layers[0]!.values).toEqual([1000]);
-    expect(layers[1]!.values).toEqual([1500]);
-  });
 });

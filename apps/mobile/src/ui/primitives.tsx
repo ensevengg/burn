@@ -128,12 +128,10 @@ export function Segmented<T extends string>({
   );
 }
 
-export function MeterBar({ usedPercent, tone }: { usedPercent: number; tone?: string }) {
+export function MeterBar({ percent, tone }: { percent: number; tone?: string }) {
   const { C } = useTheme();
-  const width = Math.max(0, Math.min(100, usedPercent));
-  // Monochrome to match the dual-tone theme (user feedback); red only as the
-  // single "you're about to hit the wall" signal.
-  const color = tone ?? (width > 85 ? C.err : C.text);
+  const width = Math.max(0, Math.min(100, percent));
+  const color = tone ?? C.text;
   return (
     <View style={[styles.meterTrack, { backgroundColor: C.panelAlt }]}>
       <View style={{ width: `${width}%`, backgroundColor: color, height: "100%", borderRadius: 999 }} />

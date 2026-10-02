@@ -2,7 +2,7 @@ import { TOKSCALE_PIN } from "@burn/sync-api";
 import { platform } from "node:os";
 import { configSchema, loadConfig, saveConfig, configPath, type BurnConfig } from "./config.js";
 import { fetchUsage, tokscaleVersion } from "./tokscale.js";
-import { exporterVersion } from "./exporter.js";
+import { exporterVersion, exporterCapabilities } from "./exporter.js";
 import { runServe, tailscaleIp } from "./serve.js";
 
 export { REPORTER_VERSION, tokscaleQuotaInputs, currentUtcOffsetMinutes } from "./tokscale.js";
@@ -42,12 +42,13 @@ export async function runDoctor(): Promise<number> {
   try { config = loadConfig(); }
   catch (err) { console.error(`FAIL config: ${(err as Error).message}`); return 1; }
   printConfigured(config);
-  const [tokscale, exporter, address] = await Promise.all([
-    tokscaleVersion(config.tokscalePin), exporterVersion(), tailscaleIp(),
+  const [tokscale, exporter, capabilities, address] = await Promise.all([
+    tokscaleVersion(config.tokscalePin), exporterVersion(), exporterCapabilities(), tailscaleIp(),
   ]);
+  const supportsFingerprint = capabilities?.tokscaleVersion === config.tokscalePin && capabilities.capabilities.includes("fingerprint-v1");
   const checks = [
     { name: "tokscale", ok: tokscale !== null, detail: tokscale ? `reachable at pin ${config.tokscalePin}` : `npx tokscale@${config.tokscalePin} failed` },
-    { name: "burn-events", ok: exporter === config.tokscalePin, detail: exporter === null ? "exporter not found — install the pinned burn-events binary (or set BURN_EVENTS_BIN)" : exporter === config.tokscalePin ? `matches pin ${config.tokscalePin}` : `version ${exporter} differs from pin ${config.tokscalePin} — rebuild the exporter` },
+    { name: "burn-events", ok: exporter === config.tokscalePin && supportsFingerprint, detail: exporter === null ? "exporter not found — install the pinned burn-events binary (or set BURN_EVENTS_BIN)" : exporter === config.tokscalePin && supportsFingerprint ? `matches pin ${config.tokscalePin}; fingerprint cache supported` : exporter === config.tokscalePin ? "fingerprint-v1 capability is missing — rebuild: cargo install --path crates/burn-events" : `version ${exporter} differs from pin ${config.tokscalePin} — rebuild the exporter` },
     { name: "Tailscale", ok: address !== null, detail: address ?? "no tailnet IPv4 address — start Tailscale before serving this machine" },
   ];
   for (const check of checks) console.log(`${check.ok ? "ok" : "FAIL"} ${check.name}: ${check.detail}`);

@@ -376,3 +376,51 @@ test("health serves source samples even when usage scanning fails; WSL does not 
   expect(parseLiveMetricsPage(await (await wsl(new Request("http://machine/live/metrics"))).json()).metrics).toEqual([]);
   expect(calls).toBe(1);
 });
+
+test("source fingerprints retain main's warm cache across TTLs without changing pageable snapshots", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  let time = 1000;
+  let scans = 0;
+  let fingerprint = "same";
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    now: () => time, check: async () => CONFIG.tokscalePin,
+    fingerprint: async () => fingerprint,
+    scan: async () => { scans++; return JSON.stringify(EXPORTER_ROW_WITH_KEY); },
+  });
+  const original = await snapshots.get();
+  time += 31_000;
+  const [first, second] = await Promise.all([snapshots.get(), snapshots.get()]);
+  expect(scans).toBe(1);
+  expect(first).toBe(original);
+  expect(second).toBe(original);
+  expect(snapshots.pageSnapshot(original.id)).toBe(original);
+  await snapshots.get(true);
+  expect(scans).toBe(2);
+  fingerprint = "changed";
+  time += 31_000;
+  await snapshots.get();
+  expect(scans).toBe(3);
+});
+
+test("a missing source fingerprint keeps scanning and a clock rollback renews scan boundaries", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  let time = 100_000;
+  let scans = 0;
+  let fingerprint: string | null = null;
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    now: () => time, check: async () => CONFIG.tokscalePin,
+    fingerprint: async () => fingerprint,
+    scan: async () => { scans++; return JSON.stringify(EXPORTER_ROW_WITH_KEY); },
+  });
+  await snapshots.get();
+  time += 31_000;
+  await snapshots.get();
+  expect(scans).toBe(2);
+  fingerprint = "stable";
+  time += 31_000;
+  await snapshots.get();
+  time = 1000;
+  const replay = await snapshots.get();
+  expect(scans).toBe(4);
+  expect(replay.startedAtMs).toBe(1000);
+});

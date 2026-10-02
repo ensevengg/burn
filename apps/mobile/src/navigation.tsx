@@ -41,7 +41,9 @@ function TabIcon({ name, color, focused, bg }: { name: string; color: string; fo
     case "systems":
       return (
         <Svg width={24} height={24} viewBox="0 0 24 24">
-          <Path {...common} d="M4 20V10M10 20V4M16 20v-8M22 20H2" />
+          <Rect {...common} x={2.5} y={4} width={19} height={14} rx={2} />
+          <Path {...common} d="M5.5 11h3l1.5-3 3 6 1.5-3h4" />
+          <Path {...common} d="M9 21h6M12 18v3" />
         </Svg>
       );
     case "explore":

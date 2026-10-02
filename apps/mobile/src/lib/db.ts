@@ -124,6 +124,11 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
       } catch {
         /* column already exists */
       }
+      try {
+        await db.execAsync("alter table machine_metrics add column ram_temp_c real");
+      } catch {
+        /* column already exists */
+      }
       return db;
     })();
   }

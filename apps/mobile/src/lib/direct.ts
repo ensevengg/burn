@@ -39,6 +39,7 @@ export interface DirectPullStatus {
   quotaError?: string | null;
   metricsError?: string | null;
   pulledMetrics?: number;
+  initialSyncComplete?: boolean;
   scanMs?: number | null;
   hasMore?: boolean;
 }
@@ -396,6 +397,7 @@ async function pullDirectUnlocked(
           };
         }
         const clockSkewMs = Math.abs(ping.serverNowMs - now());
+        base.initialSyncComplete = (await kvGetNumber(db, cursorKey(machine.id))) !== null;
 
         await withWriteLock(async () => {
           assertActive();
@@ -689,6 +691,7 @@ async function pullDirectUnlocked(
           metricsError: metricResult.error,
           scanMs: events.value.scanMs,
           hasMore: events.value.hasMore,
+          initialSyncComplete: base.initialSyncComplete || !events.value.hasMore,
           clockSkewMs,
           elapsedMs: now() - started,
         };

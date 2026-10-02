@@ -7,7 +7,7 @@ Current architecture: [ADR 0003 — Tailscale-only backend](adr/0003-tailscale-o
 - `init --slug ... --name ...` saves machine identity, host grouping, OS, timezone and parser pin. Loading an older config atomically rewrites it through the machine-only schema and deletes generated setup SQL. `init --direct` remains accepted for compatibility.
 - `daemon` and `serve` expose the same read-only endpoints: `/ping`, `/live/events`, `/live/quotas`, `/live/metrics`. Bind to Tailscale IPv4 by default; loopback fallback warns that the phone cannot reach it. Binding failures fail the command. Keep the process running for phone refreshes.
 - `doctor` verifies configuration, tokscale/exporter pins and a Tailscale address. `usage` prints locally collected quota JSON. Upload commands/options are rejected; replace old scheduled push jobs with a resident daemon.
-- One normalized full event snapshot, shared in-flight scan, 30-second result TTL and five-minute exporter pin check. The Bun server idle timeout is 150 seconds; exporter timeout is 90 seconds.
+- One normalized full event snapshot, shared in-flight scan, 30-second result TTL and five-minute exporter pin/capability check. Source fingerprints reuse unchanged snapshots across TTL expiry without altering the pageable snapshot metadata; forced reconciliation, changed sources or clock rollback scan again. The Bun server idle timeout is 150 seconds; exporter timeout is 90 seconds.
 - Pages contain at most 1,000 rows and roughly 4MB decoded event content. Bounded encoded-page caching avoids repeated serialization; gzip negotiation and ETags avoid redundant transfer. Snapshot generations stay pageable briefly; expired cursors return HTTP 410.
 - Physical machine vitals sample every 30 seconds and on request; `/live/metrics?since=` serves process-local 24-hour history. CPU/RAM load uses OS counters, Linux temperatures use hwmon, and GPU readings use NVIDIA or Linux DRM sensors. Missing sensors stay null. WSL does not duplicate its Windows host. The phone persists received history.
 - A separate 45-second quota cache preserves source collection time. A source scan may complete and populate the cache after a client disconnects. No provider parser is implemented in burn.
@@ -29,7 +29,7 @@ Current architecture: [ADR 0003 — Tailscale-only backend](adr/0003-tailscale-o
 
 ## Upgrade
 
-Restart resident reporters. Their configs retain identity/pin and lose obsolete destination credentials. No exporter rebuild is needed: the pin remains 4.15.1.
+Restart resident reporters. Their configs retain identity/pin and lose obsolete destination credentials. The pin remains 4.15.1; retain main’s exporter fingerprint capability. If `burn-events --capabilities` lacks `fingerprint-v1`, rebuild with `cargo install --path crates/burn-events` before running the reporter.
 
 The phone's legacy cloud mode upgrades locally to direct mode, retaining cached history/preferences. Saved machine endpoint URLs become direct registrations; existing registrations take precedence. A machine without a saved URL stays visible through its cached history and needs its reporter URL added manually. One corrective full reconciliation runs after upgrading, then normal per-machine cursors resume.
 
@@ -37,9 +37,11 @@ Demo mode is retained. Entering real machine mode from demo clears demo history/
 
 ## Validation
 
-Strict typecheck and all **107 tests pass**. Coverage includes real HTTP/SQLite transfer of 27,001 synthetic rows across four resumable passes, one exporter scan, then zero event writes on unchanged refresh; late historical corrections after an incremental hash; paging/gzip/ETags/cache TTLs and a 12-second cold scan; independent quota freshness; queued cancellation/registration races; legacy config cleanup; atomic phone upgrade rollback and destructive confirmation callbacks.
+The current main has been reconciled with this branch, preserving its All-history views, combined model totals, remaining quota display, labels and initial-sync diagnostics.
 
-The signed arm64 Android release build succeeds (1,060 modules, APK about 31MiB). On-device validation on the USB-connected OnePlus 10R / Android 15 passed dashboard, Systems, Explore, Machines and Settings navigation, live RAM/GPU reads, quota refresh, and destructive-dialog cancellation. Tailscale was disconnected initially and was reconnected using its existing account.
+Strict typecheck and all **112 tests pass**. Coverage includes real HTTP/SQLite transfer of 27,001 synthetic rows across four resumable passes, one exporter scan, then zero event writes on unchanged refresh; late historical corrections after an incremental hash; paging/gzip/ETags/cache TTLs and a 12-second cold scan; independent quota freshness; queued cancellation/registration races; legacy config cleanup; atomic phone upgrade rollback and destructive confirmation callbacks.
+
+The signed arm64 Android release build succeeds (APK about 31MiB). On-device validation on the USB-connected OnePlus 10R / Android 15 passed dashboard, Systems, Explore, Machines and Settings navigation, live RAM/GPU reads, quota refresh, and destructive-dialog cancellation. Tailscale was disconnected initially and was reconnected using its existing account. The build reconciled with current main was installed in place again; All-history controls, live Systems readings and saved machine registrations remained usable, with no AndroidRuntime or ReactNativeJS errors during the smoke check.
 
 An in-place package/signature-compatible upgrade preserved all three machine IDs/URLs/names/registration times and every one of the 42,141 pre-upgrade usage rows; SQLite integrity checked clean. CachyOS and HP refreshed successfully, including all five HP quota rows after accepting Copilot’s valid calendar reset date. Lenovo Windows was offline and retained cached history/its connection. One observed warm-source refresh took 2.8s for CachyOS and 2.6s for HP; these are individual runs, not latency guarantees. Existing machines served the older unpaged protocol; the new paged protocol’s large-history/cancellation checks run over real HTTP/SQLite in host tests. Broader Android timing and outage benchmarks remain pending.
 
