@@ -1,5 +1,7 @@
 # ADR 0002 — Direct mode: machines as the backend, Supabase demoted to backup
 
+> Historical decision, superseded on 2026-10-02 by [ADR 0003](0003-tailscale-only-backend.md). The cloud path described below has been removed.
+
 Status: **implemented** on `feat/tailscale-live-pull` (commits `655fe34`, `f1491a6`) · Refines D3/D4 · Builds on [ADR 0001](0001-tailscale-direct-pull.md) · 2026-09-07
 
 ## Context

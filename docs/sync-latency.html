@@ -114,6 +114,7 @@
   </style>
 </head>
 <body>
+  <p style="padding:16px">Historical cloud-sync analysis. Superseded by <a href="adr/0003-tailscale-only-backend.md">ADR 0003: Tailscale-only backend</a> on 2026-10-02.</p>
 <main>
   <h1><code>burn</code> — sync latency deep dive</h1>
   <p class="subtitle">Where fetch time goes on the machine → Supabase → phone path, and a ranked list of optimizations. Grounded in a read of the full pipeline: reporter/daemon (<code>apps/reporter/src</code>), the exporter (<code>crates/burn-events</code>), the wire layer (<code>packages/sync-api/src/supabase.ts</code>), the RPCs (<code>supabase/migrations/0002_api.sql</code>, <code>0005</code>), and the phone's pull path (<code>apps/mobile/src/lib</code>). No code was changed for this document.</p>

@@ -1,7 +1,7 @@
 # Connection and data-transfer audit
 
-Historical pre-fix audit. Implementation, regression evidence and remaining work are recorded in [connection-transfer-fixes.md](connection-transfer-fixes.md).
-Verified 2026-09-30 against the current working tree. Application code was not changed. Existing edits to direct first-backfill behavior, its tests, ADR 0002 and the root package file were included and preserved. Detailed cloud findings are in [cloud-transfer-audit.md](cloud-transfer-audit.md).
+Historical pre-fix audit; its cloud architecture was removed by [ADR 0003](adr/0003-tailscale-only-backend.md). Implementation, regression evidence and remaining work are recorded in [connection-transfer-fixes.md](connection-transfer-fixes.md).
+Verified 2026-09-30 against the current working tree. Application code was not changed. Existing edits to direct first-backfill behavior, its tests, ADR 0002 and the root package file were included and preserved. Cloud-specific implementation and audit material was retired with ADR 0003.
 
 ## Verdict
 
