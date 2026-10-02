@@ -84,3 +84,10 @@ test("machine timestamp gates reject impossible dates and timezone-free instants
     expect(() => parseLiveQuotasPage({ generatedAt: invalid, quotas: [] })).toThrow();
   expect(parseLiveQuotasPage({ generatedAt: "2024-02-29T00:00:00+05:30", quotas: [] }).generatedAt).toBe("2024-02-29T00:00:00+05:30");
 });
+
+test("vendor quota calendar reset dates survive validation without inventing a reset time", () => {
+  const quota = { provider: "Copilot", accountKey: "a", metric: "premium", resetsAt: "2026-11-01" };
+  expect(parseLiveQuotasPage({ generatedAt, quotas: [quota] }).quotas[0]!.resetsAt).toBe("2026-11-01");
+  for (const invalid of ["2026-02-29", "2026-04-31", "2026-13-01", "2026-01-00", "tomorrow"])
+    expect(() => parseLiveQuotasPage({ generatedAt, quotas: [{ ...quota, resetsAt: invalid }] })).toThrow();
+});

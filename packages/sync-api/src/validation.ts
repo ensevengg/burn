@@ -94,3 +94,15 @@ export function nullableObject(
 ): Record<string, unknown> | null {
   return value === null || value === undefined ? null : object(value, where);
 }
+
+/** Tokscale quota resets may be an instant or a provider calendar date.
+ * Preserve date-only evidence; never invent a timezone or time of day. */
+export function nullableResetTime(value: unknown, where: string): string | null {
+  if (value === null || value === undefined) return null;
+  const result = string(value, where);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(result)) {
+    timestamp(`${result}T00:00:00Z`, where);
+    return result;
+  }
+  return timestamp(result, where);
+}

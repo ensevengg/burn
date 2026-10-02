@@ -38,6 +38,7 @@ export interface MachineQuotaInput {
   usedPercent: number | null;
   remainingPercent: number | null;
   remainingLabel: string | null;
+  /** Source instant or calendar date; date-only providers supply no reset clock. */
   resetsAt: string | null;
   creditStatus: Record<string, unknown> | null;
   spendControl: Record<string, unknown> | null;
