@@ -1,3 +1,4 @@
+import { SystemMetricHistory } from "./system-metrics";
 import { gzipSync } from "node:zlib";
 import { MachineSnapshots, QuotaSnapshots, snapshotsFor } from "./snapshots";
 /** Read-only machine backend bound to the tailnet (or loopback for local
@@ -15,6 +16,7 @@ import {
 
 export interface LiveDeps {
   config: BurnConfig;
+  metrics?: SystemMetricHistory;
   now?: () => number;
   exporterScan?: (sinceMs: number) => Promise<string>;
   exporterCheck?: () => Promise<string | null>;
@@ -65,6 +67,7 @@ export function createLiveFetch(
 ): (req: Request) => Promise<Response> {
   const now = deps.now ?? Date.now;
   const shared = snapshotsFor(deps.config);
+  const metrics = deps.metrics ?? new SystemMetricHistory(undefined, now);
   const snapshots =
     deps.exporterScan || deps.exporterCheck || deps.now
       ? new MachineSnapshots(deps.config.tokscalePin, {
@@ -125,7 +128,7 @@ export function createLiveFetch(
   const pingPayload = () => {
     return {
       protocol: 1 as const,
-      capabilities: ["paged-events", "content-hash"],
+      capabilities: ["paged-events", "content-hash", "machine-metrics"],
       ready: snapshots.peek() !== null,
       scanAgeMs: snapshots.peek()
         ? now() - Date.parse(snapshots.peek()!.generatedAt)
@@ -266,6 +269,20 @@ export function createLiveFetch(
           );
         }
       }
+      case "/live/metrics": {
+        const since = new URL(req.url).searchParams.get("since");
+        const sinceMs = since === null ? 0 : Number(since);
+        if ((since !== null && !since.trim()) || !Number.isSafeInteger(sinceMs) || sinceMs < 0)
+          return jsonResponse({ error: "invalid since timestamp" }, 400);
+        try {
+          return respond(req, {
+            generatedAt: new Date(now()).toISOString(),
+            metrics: deps.config.osKind === "wsl" ? [] : await metrics.since(sinceMs),
+          });
+        } catch (err) {
+          return jsonResponse({ error: errorText(err) }, 500);
+        }
+      }
       case "/live/quotas": {
         try {
           return respond(req, await quotas.get());
@@ -300,18 +317,25 @@ export async function startLiveServer(
       "[live] tailscale not detected — binding 127.0.0.1 (phone cannot reach this)",
     );
   }
+  const metrics = options.deps?.metrics ?? new SystemMetricHistory();
+  const sample = () => { void metrics.sample().catch((err) => console.warn(`[systems] ${errorText(err)}`)); };
   const server = Bun.serve({
     hostname,
     port,
     idleTimeout: 150,
-    fetch: createLiveFetch({ config, ...options.deps }),
+    fetch: createLiveFetch({ config, ...options.deps, metrics }),
   });
+  const sampler = config.osKind === "wsl" ? null : setInterval(sample, 30_000);
+  if (sampler) sample();
   const boundPort = server.port ?? port;
   return {
     hostname,
     port: boundPort,
     url: `http://${hostname}:${boundPort}`,
-    stop: () => server.stop(true),
+    stop: () => {
+      if (sampler) clearInterval(sampler);
+      server.stop(true);
+    },
   };
 }
 

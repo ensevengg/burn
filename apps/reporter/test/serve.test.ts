@@ -360,3 +360,19 @@ test("encoded page cache bypasses repeated row serialization and preserves negot
     spy.mockRestore();
   }
 });
+
+test("health serves source samples even when usage scanning fails; WSL does not invent physical vitals", async () => {
+  const { SystemMetricHistory } = await import("../src/system-metrics");
+  const { parseLiveMetricsPage } = await import("@burn/sync-api");
+  const sample = { capturedAtMs: 1000, cpuLoadPct: 1, cpuTempC: null, ramUsedPct: 50,
+    ramTempC: null, gpuUtilPct: null, gpuTempC: null };
+  let calls = 0;
+  const metrics = new SystemMetricHistory(async () => { calls++; return sample; }, () => 1000);
+  const fetch = createLiveFetch(deps({ metrics, exporterScan: async () => { throw new Error("scan failed"); } }));
+  const page = parseLiveMetricsPage(await (await fetch(new Request("http://machine/live/metrics?since=0"))).json());
+  expect(page.metrics).toEqual([sample]);
+  expect((await fetch(new Request("http://machine/live/metrics?since=-1"))).status).toBe(400);
+  const wsl = createLiveFetch(deps({ config: { ...CONFIG, osKind: "wsl" }, metrics }));
+  expect(parseLiveMetricsPage(await (await wsl(new Request("http://machine/live/metrics"))).json()).metrics).toEqual([]);
+  expect(calls).toBe(1);
+});
