@@ -8,7 +8,6 @@ import { mirrorFixture } from "./mirror-fixture";
 
 test("27k-row direct history transfers through real HTTP into SQLite, resumes across passes and then returns unchanged", async () => {
   const config = configSchema.parse({
-    mode: "direct",
     environmentSlug: "integration",
     environmentName: "Integration",
   });
@@ -33,10 +32,6 @@ test("27k-row direct history transfers through real HTTP into SQLite, resumes ac
     port: 0,
     deps: {
       now: () => started,
-      cursor: () => ({
-        lastRevision: 0,
-        lastPushAt: new Date(0).toISOString(),
-      }),
       exporterCheck: async () => config.tokscalePin,
       exporterScan: async () => {
         scans++;
@@ -55,7 +50,6 @@ test("27k-row direct history transfers through real HTTP into SQLite, resumes ac
     let changed = 0;
     while (true) {
       const statuses = await pullDirectFromMachines(fx.db, {
-        authoritative: true,
       });
       expect(statuses[0]!.state).toBe("live");
       changed += statuses[0]!.pulledEvents;
@@ -79,7 +73,7 @@ test("27k-row direct history transfers through real HTTP into SQLite, resumes ac
       write.sql.includes("insert into usage_events"),
     ).length;
     expect(
-      (await pullDirectFromMachines(fx.db, { authoritative: true }))[0]!
+      (await pullDirectFromMachines(fx.db, {}))[0]!
         .pulledEvents,
     ).toBe(0);
     expect(
@@ -97,7 +91,6 @@ test("27k-row direct history transfers through real HTTP into SQLite, resumes ac
 test("automatic full reconciliation downloads late historical rows even after an incremental hash acknowledgement", async () => {
   let clock = Date.parse("2026-10-01T00:00:00Z");
   const config = configSchema.parse({
-    mode: "direct",
     environmentSlug: "reconcile",
     environmentName: "Reconcile",
   });
@@ -115,10 +108,6 @@ test("automatic full reconciliation downloads late historical rows even after an
     port: 0,
     deps: {
       now: () => clock,
-      cursor: () => ({
-        lastRevision: 0,
-        lastPushAt: new Date(0).toISOString(),
-      }),
       exporterCheck: async () => config.tokscalePin,
       exporterScan: async () =>
         history.map((r) => JSON.stringify(r)).join("\n"),
@@ -129,7 +118,6 @@ test("automatic full reconciliation downloads late historical rows even after an
   try {
     await addDirectMachine(fx.db, server.url, { now: () => clock });
     await pullDirectFromMachines(fx.db, {
-      authoritative: true,
       now: () => clock,
     });
     clock += 60_000;
@@ -140,7 +128,6 @@ test("automatic full reconciliation downloads late historical rows even after an
     expect(
       (
         await pullDirectFromMachines(fx.db, {
-          authoritative: true,
           now: () => clock,
         })
       )[0]!.pulledEvents,
@@ -149,7 +136,6 @@ test("automatic full reconciliation downloads late historical rows even after an
     expect(
       (
         await pullDirectFromMachines(fx.db, {
-          authoritative: true,
           now: () => clock,
         })
       )[0]!.pulledEvents,

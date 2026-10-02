@@ -1,16 +1,8 @@
 import { mergePeerEvents, mergeQuota } from "./mirror-writes";
-/**
- * Direct mode (ADR 0002): the machines themselves are the backend. The phone
- * keeps a registry of tailnet endpoints, and `pullDirectFromMachines` probes
- * each one and merges its event tail + quotas into the mirror.
- *
- * Relationship to the cloud path: same write lock, same generation-based
- * cancellation, same event identity (`liveEventId`), same revision-0 +
- * revision-0 identity. Primary direct callers allow machine corrections to
- * replace old cloud rows; opportunistic cloud-live callers retain the positive
- * revision guard. Both paths converge on the same event ids. Per-machine time cursors live in kv (`direct_since_v3_<envId>`),
- * never in the cloud watermark.
- */
+/** Machines are the backend (ADR 0003). Each registry endpoint supplies
+ * validated event pages and independent quotas. The phone stores per-machine
+ * scan-start cursors, atomically commits page continuation, and periodically
+ * reconciles full history to pick up old parser/pricing corrections. */
 import {
   LIVE_OVERLAP_MS,
   httpLiveApiFor,
@@ -21,8 +13,8 @@ import {
 import type { SQLiteDatabase } from "expo-sqlite";
 import { invalidateEventCache } from "../data/repository";
 import { withWriteLock } from "./writelock";
-import { cloudGeneration, publishMirrorChange } from "./sync-state";
-import { describeFailure, withTimeout } from "./live";
+import { syncGeneration, publishMirrorChange } from "./sync-state";
+import { describeFailure, withTimeout } from "./transport";
 
 export interface DirectMachine {
   id: string;
@@ -53,7 +45,6 @@ export interface DirectPullOptions {
   pingTimeoutMs?: number;
   quotaTimeoutMs?: number;
   full?: boolean;
-  authoritative?: boolean;
   environmentId?: string;
   eventsTimeoutMs?: number;
   maxPages?: number;
@@ -135,9 +126,8 @@ export async function listDirectMachines(
 
 /**
  * Validate an endpoint with /ping and register it. The environment id reuses
- * an existing cloud environment row with the same slug when one exists, so
- * running both modes for one machine attributes events to a single machine
- * card instead of duplicating it.
+ * an existing environment row with the same slug when one exists, preserving
+ * cached history across upgrades and endpoint changes.
  */
 export async function addDirectMachine(
   db: SQLiteDatabase,
@@ -148,9 +138,9 @@ export async function addDirectMachine(
     now?: () => number;
   } = {},
 ): Promise<{ id: string; slug: string; displayName: string }> {
-  const generation = cloudGeneration(db);
+  const generation = syncGeneration(db);
   const assertActive = () => {
-    if (cloudGeneration(db) !== generation)
+    if (syncGeneration(db) !== generation)
       throw new LiveError("add machine cancelled");
   };
   const base = rawUrl.trim().replace(/\/+$/, "");
@@ -209,8 +199,8 @@ export async function addDirectMachine(
       await db.runAsync(
         `insert into environments
            (id, slug, display_name, host_group, os_kind, reporter_version, tokscale_version,
-            export_schema, reporting_timezone, last_heartbeat_at, last_success_at, last_error, latest_revision, live_endpoint)
-         values (?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, 0, ?)
+            export_schema, reporting_timezone, last_heartbeat_at, last_success_at, last_error, live_endpoint)
+         values (?, ?, ?, ?, ?, ?, ?, ?, ?, null, null, null, ?)
          on conflict (id) do update set
            display_name = excluded.display_name, host_group = excluded.host_group,
            os_kind = excluded.os_kind, reporter_version = excluded.reporter_version,
@@ -278,8 +268,8 @@ export async function removeDirectMachine(
 
 /**
  * Probe every registered machine and merge its tail. Same concurrency and
- * cancellation contract as the cloud-path live pull: concurrent calls
- * share the pending result, and reset/disconnect aborts before any commit.
+ * cancellation contract as all mirror writers: compatible calls share the
+ * pending result, and reset/disconnect aborts before any commit.
  */
 export function pullDirectFromMachines(
   db: SQLiteDatabase,
@@ -287,15 +277,14 @@ export function pullDirectFromMachines(
 ): Promise<DirectPullStatus[]> {
   if (options.signal?.aborted)
     return Promise.reject(new LiveError("direct pull cancelled"));
-  const generation = cloudGeneration(db);
+  const generation = syncGeneration(db);
   const epoch = cancellationEpochs.get(db) ?? 0;
   const existing = inFlight.get(db);
   if (existing) {
     const running = inFlightOptions.get(db)!;
     if (
       running.environmentId === options.environmentId &&
-      Boolean(running.full) === Boolean(options.full) &&
-      Boolean(running.authoritative) === Boolean(options.authoritative)
+      Boolean(running.full) === Boolean(options.full)
     )
       return existing;
     // A different target/full replay must run after the current pass. Even an
@@ -304,7 +293,7 @@ export function pullDirectFromMachines(
       .catch(() => {})
       .then(() => {
         if (
-          cloudGeneration(db) !== generation ||
+          syncGeneration(db) !== generation ||
           (cancellationEpochs.get(db) ?? 0) !== epoch ||
           options.signal?.aborted
         )
@@ -321,7 +310,7 @@ export function pullDirectFromMachines(
     else callerSignal.addEventListener("abort", relayCaller, { once: true });
   }
   const assertActive = (): void => {
-    if (cloudGeneration(db) !== generation || internal.signal.aborted)
+    if (syncGeneration(db) !== generation || internal.signal.aborted)
       throw new LiveError("direct pull cancelled");
   };
   const pending = pullDirectUnlocked(db, options, internal.signal, assertActive)
@@ -578,7 +567,6 @@ async function pullDirectUnlocked(
                   machine.slug,
                   page.events,
                   assertActive,
-                  options.authoritative,
                 );
                 if (done) {
                   await kvSetString(

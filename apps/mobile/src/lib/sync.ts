@@ -1,19 +1,7 @@
-/**
- * Sync engine. Cloud mode: revision-keyed delta pull (D5) applied in one
- * SQLite transaction per page, watermark advanced only after commit. Demo
- * mode: the bundled generator writes the same mirror schema locally.
- */
-import { pullCloud, type SyncResult } from "./sync-cloud";
-import {
-  cloudGeneration,
-  advanceCloudGeneration,
-  publishMirrorChange,
-} from "./sync-state";
+/** Bundled demo seeding uses the same local mirror as machine sync. */
 import { invalidateEventCache } from "../data/repository";
-import { createBurnBackend } from "@burn/sync-api";
 import { kvSet, wipeForReseed, type SQLiteDatabase } from "./db";
 import { withWriteLock } from "./writelock";
-import { loadConnection } from "./settings";
 import { generateDemoDataset, MODELS } from "../data/demo-generator";
 
 /** Demo data is generator-controlled, so literal interpolation is safe here. */
@@ -39,8 +27,8 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
       envId[env.slug] = id;
       await db.runAsync(
         `insert or replace into environments
-           (id, slug, display_name, host_group, os_kind, tokscale_version, export_schema, reporting_timezone, last_heartbeat_at, last_success_at, latest_revision)
-         values (?, ?, ?, ?, ?, '4.15.1', 1, ?, ?, ?, 1)`,
+           (id, slug, display_name, host_group, os_kind, tokscale_version, export_schema, reporting_timezone, last_heartbeat_at, last_success_at)
+         values (?, ?, ?, ?, ?, '4.15.1', 1, ?, ?, ?)`,
         [
           id,
           env.slug,
@@ -61,7 +49,7 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
       const chunk = dataset.events.slice(i, i + chunkSize);
       const rows = chunk.map((e) => {
         const env = envId[e.environmentSlug] ?? e.environmentSlug;
-        return `(${sqlStr(e.eventId)}, ${sqlStr(env)}, ${sqlStr(e.client)}, ${sqlStr(e.providerId)}, ${sqlStr(e.modelId)}, ${sqlStr(e.sessionId)}, ${sqlStr(e.sessionTitle)}, ${sqlStr(e.workspaceKey)}, ${sqlStr(e.workspaceLabel)}, ${sqlStr(e.agent)}, ${e.occurredAtMs}, ${e.sourceOffsetMinutes}, ${sqlStr(e.sourceTimezone)}, ${sqlStr(e.sourceLocalDate)}, ${e.inputTokens}, ${e.outputTokens}, ${e.cacheReadTokens}, ${e.cacheWriteTokens}, ${e.reasoningTokens}, ${e.messageCount}, ${e.isTurnStart ? 1 : 0}, ${e.durationMs}, ${sqlNum(e.cost)}, ${sqlStr(e.costSource)}, ${e.costIsComplete ? 1 : 0}, ${e.modelAttributionConflicted ? 1 : 0}, ${sqlStr(e.parserVersion)}, ${e.revision})`;
+        return `(${sqlStr(e.eventId)}, ${sqlStr(env)}, ${sqlStr(e.client)}, ${sqlStr(e.providerId)}, ${sqlStr(e.modelId)}, ${sqlStr(e.sessionId)}, ${sqlStr(e.sessionTitle)}, ${sqlStr(e.workspaceKey)}, ${sqlStr(e.workspaceLabel)}, ${sqlStr(e.agent)}, ${e.occurredAtMs}, ${e.sourceOffsetMinutes}, ${sqlStr(e.sourceTimezone)}, ${sqlStr(e.sourceLocalDate)}, ${e.inputTokens}, ${e.outputTokens}, ${e.cacheReadTokens}, ${e.cacheWriteTokens}, ${e.reasoningTokens}, ${e.messageCount}, ${e.isTurnStart ? 1 : 0}, ${e.durationMs}, ${sqlNum(e.cost)}, ${sqlStr(e.costSource)}, ${e.costIsComplete ? 1 : 0}, ${e.modelAttributionConflicted ? 1 : 0}, ${sqlStr(e.parserVersion)})`;
       });
       await db.execAsync(
         `insert or replace into usage_events
@@ -69,7 +57,7 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
             workspace_key, workspace_label, agent, occurred_at_ms, source_offset_minutes, source_timezone,
             source_local_date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
             reasoning_tokens, message_count, is_turn_start, duration_ms, cost, cost_source,
-            cost_is_complete, model_attribution_conflicted, parser_version, revision)
+            cost_is_complete, model_attribution_conflicted, parser_version)
          values ${rows.join(",")};`,
       );
     }
@@ -126,66 +114,4 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
   // Post-commit eviction, still inside the seed's write lock — same contract
   // as resetDb and removeEnvironmentLocal.
   invalidateEventCache(db);
-}
-
-export { type SyncResult } from "./sync-cloud";
-
-const inFlight = new WeakMap<SQLiteDatabase, Promise<SyncResult>>();
-const controllers = new WeakMap<SQLiteDatabase, AbortController>();
-export function syncFromCloud(db: SQLiteDatabase): Promise<SyncResult> {
-  const existing = inFlight.get(db);
-  if (existing) return existing;
-  const generation = cloudGeneration(db);
-  const controller = new AbortController();
-  controllers.set(db, controller);
-  const assertActive = () => {
-    if (cloudGeneration(db) !== generation || controller.signal.aborted)
-      throw new Error("Sync cancelled");
-  };
-  const pending = (async () => {
-    const connection = await loadConnection();
-    assertActive();
-    if (connection === null) throw new Error("Not connected to a backend");
-    return pullCloud(
-      db,
-      createBurnBackend(connection).phone(connection.readToken),
-      assertActive,
-      (kind) => {
-        if (kind === "events") invalidateEventCache(db);
-        publishMirrorChange(db, kind);
-      },
-      controller.signal,
-    );
-  })();
-  inFlight.set(db, pending);
-  void pending
-    .finally(() => {
-      if (inFlight.get(db) === pending) {
-        inFlight.delete(db);
-        controllers.delete(db);
-      }
-    })
-    .catch(() => {});
-  return pending;
-}
-
-/** Called before a reset/backend change; old network responses cannot commit. */
-export function cancelCloudSync(db: SQLiteDatabase): void {
-  advanceCloudGeneration(db);
-  controllers.get(db)?.abort();
-  controllers.delete(db);
-  inFlight.delete(db);
-  invalidateEventCache(db);
-}
-
-export async function requestMachineSync(
-  db: SQLiteDatabase,
-  environmentId: string | null,
-): Promise<void> {
-  const generation = cloudGeneration(db);
-  const connection = await loadConnection();
-  if (cloudGeneration(db) !== generation) throw new Error("Sync cancelled");
-  if (connection === null) throw new Error("Not connected to a backend");
-  const phone = createBurnBackend(connection).phone(connection.readToken);
-  await phone.requestSync(environmentId ?? undefined);
 }

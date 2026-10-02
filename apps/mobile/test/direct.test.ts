@@ -3,7 +3,7 @@ import {
   LIVE_OVERLAP_MS,
   liveEventId,
   LiveUnreachableError,
-  type IngestEventInput,
+  type MachineEventInput,
   type LiveApi,
   type LiveEventsPage,
   type LivePing,
@@ -18,7 +18,7 @@ import {
   type DirectPullOptions,
 } from "../src/lib/direct";
 
-function ingestRow(over: Partial<IngestEventInput> = {}): IngestEventInput {
+function ingestRow(over: Partial<MachineEventInput> = {}): MachineEventInput {
   return {
     client: "codex",
     providerId: "openai",
@@ -112,24 +112,23 @@ function directApiFor(
   };
 }
 
-async function seedCloudEnvironment(
+async function seedEnvironment(
   fx: { db: import("expo-sqlite").SQLiteDatabase },
   slug: string,
   id: string,
 ) {
   await fx.db.runAsync(
-    `insert into environments (id, slug, display_name, os_kind, reporting_timezone, latest_revision)
-     values (?, ?, ?, 'windows', 'Asia/Kolkata', 3)`,
+    `insert into environments (id, slug, display_name, os_kind, reporting_timezone)
+     values (?, ?, ?, 'windows', 'Asia/Kolkata')`,
     [id, slug, slug],
   );
 }
 
-async function seedServerEvent(
+async function seedCachedEvent(
   fx: { db: import("expo-sqlite").SQLiteDatabase },
   envId: string,
   slug: string,
-  row: IngestEventInput,
-  revision: number,
+  row: MachineEventInput,
 ) {
   await fx.db.runAsync(
     `insert or replace into usage_events
@@ -137,8 +136,8 @@ async function seedServerEvent(
       workspace_key, workspace_label, agent, occurred_at_ms, source_offset_minutes, source_timezone,
       source_local_date, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
       reasoning_tokens, message_count, is_turn_start, duration_ms, cost, cost_source,
-      cost_is_complete, model_attribution_conflicted, parser_version, revision)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      cost_is_complete, model_attribution_conflicted, parser_version)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       liveEventId(slug, row.client, row.dedupKey),
       envId,
@@ -167,7 +166,6 @@ async function seedServerEvent(
       row.costIsComplete ? 1 : 0,
       row.modelAttributionConflicted ? 1 : 0,
       row.parserVersion,
-      revision,
     ],
   );
 }
@@ -199,14 +197,14 @@ describe("direct mode registry", () => {
     expect(env!.live_endpoint).toBe("http://win:8787");
   });
 
-  test("adding reuses an existing cloud environment id with the same slug", async () => {
+  test("adding reuses an existing cached environment id with the same slug", async () => {
     const fx = mirrorFixture();
-    await seedCloudEnvironment(fx, "win", "cloud-uuid-win");
+    await seedEnvironment(fx, "win", "existing-uuid-win");
     const api = directApiFor({ "http://win:8787": { ping: ping() } });
     const added = await addDirectMachine(fx.db, "http://win:8787", {
       apiFor: api,
     });
-    expect(added.id).toBe("cloud-uuid-win");
+    expect(added.id).toBe("existing-uuid-win");
   });
 
   test("an unreachable endpoint is refused at add time", async () => {
@@ -222,7 +220,7 @@ describe("direct mode registry", () => {
 });
 
 describe("direct pull", () => {
-  test("first pull takes full history, commits revision 0, and sets the cursor", async () => {
+  test("first pull takes full history and atomically sets the cursor", async () => {
     const fx = mirrorFixture();
     const seen: FakeEntry = {
       seenSince: [],
@@ -247,16 +245,13 @@ describe("direct pull", () => {
       pulledEvents: 1,
       error: null,
     });
-    // Direct mode must explicitly request epoch zero. A null cursor makes the
-    // live HTTP client omit `?since=`, which the reporter correctly treats as
-    // cloud-live mode and narrows to its own push cursor/overlap window.
+    // A new phone starts with full machine history.
     expect(seen.seenSince[0]).toBe(0); // first pull: full history
     const row = await fx.db.getFirstAsync<Record<string, unknown>>(
       "select * from usage_events where event_id = ?",
       [liveEventId("win", "codex", "v1:codex:s1:1725599000000:1")],
     );
     expect(row).not.toBeNull();
-    expect(row!.revision).toBe(0);
     expect(row!.environment_id).toBe(directEnvId("win"));
     const cursor = await fx.db.getFirstAsync<{ value: string }>(
       "select value from kv where key = 'direct_since_v3_" +
@@ -389,14 +384,14 @@ describe("direct pull", () => {
     expect(rows.map((r) => r.row_key)).toContain("other-env|codex|acc|5h");
   });
 
-  test("direct merge never overwrites cloud-authoritative rows", async () => {
+  test("direct merge always applies machine corrections to cached rows", async () => {
     const fx = mirrorFixture();
     await addDirectMachine(fx.db, "http://win:8787", {
       apiFor: directApiFor({ "http://win:8787": { seenSince: [] } }),
       now: () => 1_000,
     });
     const shared = ingestRow({ inputTokens: 777 });
-    await seedServerEvent(fx, directEnvId("win"), "win", shared, 6);
+    await seedCachedEvent(fx, directEnvId("win"), "win", shared);
     const statuses = await pullDirectFromMachines(fx.db, {
       apiFor: directApiFor({
         "http://win:8787": {
@@ -415,8 +410,7 @@ describe("direct pull", () => {
       "select * from usage_events where event_id = ?",
       [liveEventId("win", "codex", "v1:codex:s1:1725599000000:1")],
     );
-    expect(row!.revision).toBe(6);
-    expect(row!.input_tokens).toBe(777);
+    expect(row!.input_tokens).toBe(12345);
   });
 
   test("remove cascades registry, env, events, quotas, and cursor", async () => {
@@ -709,7 +703,7 @@ test("an expired partial snapshot restarts safely without duplicating committed 
   ).toEqual({ n: 2 });
 });
 
-test("primary direct mode reconciles positive cloud revisions while opportunistic live stays guarded", async () => {
+test("machine corrections replace cached content and unchanged refreshes are no-ops", async () => {
   const fx = mirrorFixture();
   const row = ingestRow();
   const api: LiveApi = {
@@ -722,19 +716,17 @@ test("primary direct mode reconciles positive cloud revisions while opportunisti
     }),
   };
   await addDirectMachine(fx.db, "http://win", { apiFor: () => api });
-  await seedServerEvent(fx, directEnvId("win"), "win", row, 9);
+  await seedCachedEvent(fx, directEnvId("win"), "win", row);
   await pullDirectFromMachines(fx.db, {
     apiFor: () => api,
-    authoritative: true,
   });
   expect(
-    await fx.db.getFirstAsync("select input_tokens,revision from usage_events"),
-  ).toEqual({ input_tokens: 123, revision: 0 });
+    await fx.db.getFirstAsync("select input_tokens from usage_events"),
+  ).toEqual({ input_tokens: 123 });
   expect(
     (
       await pullDirectFromMachines(fx.db, {
         apiFor: () => api,
-        authoritative: true,
       })
     )[0]!.pulledEvents,
   ).toBe(0);
@@ -774,7 +766,7 @@ test("machine clock rollback forces full reconciliation and resets the scan chec
 
 test("an add-machine ping released after reset cannot recreate the registry", async () => {
   const fx = mirrorFixture();
-  const { advanceCloudGeneration } = await import("../src/lib/sync-state");
+  const { advanceSyncGeneration } = await import("../src/lib/sync-state");
   let release!: () => void;
   const gate = new Promise<void>((r) => {
     release = r;
@@ -793,7 +785,7 @@ test("an add-machine ping released after reset cannot recreate the registry", as
   };
   const pending = addDirectMachine(fx.db, "http://win", { apiFor: () => api });
   const result = pending.catch((err: Error) => err);
-  advanceCloudGeneration(fx.db);
+  advanceSyncGeneration(fx.db);
   release();
   try {
     expect(await result).toBeInstanceOf(Error);
@@ -856,7 +848,7 @@ test("refreshes for different machines queue instead of silently dropping the se
 
 test("a queued targeted refresh is cancelled by reset before it can contact its machine", async () => {
   const { cancelDirectPull } = await import("../src/lib/direct");
-  const { advanceCloudGeneration } = await import("../src/lib/sync-state");
+  const { advanceSyncGeneration } = await import("../src/lib/sync-state");
   const fx = mirrorFixture();
   let release!: () => void;
   let entered!: () => void;
@@ -893,7 +885,7 @@ test("a queued targeted refresh is cancelled by reset before it can contact its 
   await started;
   const second = pullDirectFromMachines(fx.db, { environmentId: b.id, apiFor });
   const secondError = second.catch((e: Error) => e);
-  advanceCloudGeneration(fx.db);
+  advanceSyncGeneration(fx.db);
   cancelDirectPull(fx.db);
   release();
   try {

@@ -1,5 +1,5 @@
 /**
- * Local mirror of the server schema in expo-sqlite (WAL). All screens render
+ * Local mirror of machine data in expo-sqlite (WAL). All screens render
  * from here first — nothing blocks on the network (engineering convention).
  * Day/month/year bucketing happens at render time from UTC instants (D8);
  * no pre-bucketed day keys are ever stored.
@@ -31,7 +31,6 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           last_heartbeat_at text,
           last_success_at text,
           last_error text,
-          latest_revision integer not null default 0,
           live_endpoint text
         );
         create table if not exists usage_events (
@@ -61,8 +60,7 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           cost_source text not null default 'unknown',
           cost_is_complete integer not null default 0,
           model_attribution_conflicted integer not null default 0,
-          parser_version text not null default 'unknown',
-          revision integer not null default 0
+          parser_version text not null default 'unknown'
         );
         create index if not exists usage_events_occurred_idx on usage_events (occurred_at_ms);
         create index if not exists usage_events_session_idx on usage_events (environment_id, session_id);
@@ -108,7 +106,7 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
       } catch {
         /* column already exists */
       }
-      // Same parity for the live-pull advertisement (D1 v2, ADR 0001).
+      // Older installs retain their machine endpoint for upgrade registration.
       try {
         await db.execAsync("alter table environments add column live_endpoint text");
       } catch {

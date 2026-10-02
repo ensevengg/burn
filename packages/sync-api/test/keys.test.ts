@@ -44,7 +44,7 @@ describe("sha256HexUtf8", () => {
 });
 
 describe("liveEventId", () => {
-  test("mirrors the server recipe: slug | '|' | client | '|' | dedup_key", () => {
+  test("uses the stable identity recipe: slug | '|' | client | '|' | dedup_key", () => {
     const slug = "lenovo-windows";
     const client = "codex";
     const dedupKey = "v1:codex:abc123:1725600000000:1";
@@ -53,7 +53,7 @@ describe("liveEventId", () => {
     );
   });
 
-  test("empty client normalizes to 'unknown' exactly like the server's nullif", () => {
+  test("empty client normalizes to 'unknown' for compatibility with existing event ids", () => {
     const slug = "cachyos";
     const dedupKey = "v1:opencode:s:1:1";
     expect(liveEventId(slug, "", dedupKey)).toBe(liveEventId(slug, "unknown", dedupKey));

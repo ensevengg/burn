@@ -5,7 +5,7 @@
  * interleave their BEGIN/COMMIT/ROLLBACK statements, the loser's cleanup
  * ROLLBACK tears down the winner's transaction, and the winner then fails
  * with "cannot rollback - no transaction is active". Every mirror writer
- * (cloud sync pages, demo seed, resets, machine removal) holds this lock for
+ * (machine sync pages, demo seed, resets, machine removal) holds this lock for
  * its whole body; callers must never nest it.
  */
 let writeQueue: Promise<unknown> = Promise.resolve();

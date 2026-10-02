@@ -1,55 +1,26 @@
 import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
+  createContext, useCallback, useContext, useEffect, useMemo, useRef,
+  useState, type ReactNode,
 } from "react";
 import { AppState as NativeAppState } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { openDb, resetDb, kvSet, type SQLiteDatabase } from "./db";
+import { getMode, getReportingTimezone, setReportingTimezone, type AppMode } from "./settings";
+import { seedDemoData } from "./sync";
 import {
-  clearConnection,
-  getMode,
-  getReportingTimezone,
-  loadConnection,
-  saveConnection,
-  setReportingTimezone,
-  type AppMode,
-  type ConnectionConfig,
-} from "./settings";
-import {
-  seedDemoData,
-  syncFromCloud,
-  requestMachineSync,
-  cancelCloudSync,
-} from "./sync";
-import {
-  pullDirectFromMachines,
-  cancelDirectPull,
-  addDirectMachine,
-  removeDirectMachine,
-  type DirectPullStatus,
+  pullDirectFromMachines, cancelDirectPull, addDirectMachine,
+  removeDirectMachine, type DirectPullStatus, type DirectPullOptions,
 } from "./direct";
-import { pullLiveFromMachines, type LivePullStatus } from "./live";
 import { removeEnvironmentLocal } from "../data/repository";
-import { subscribeMirrorChanges } from "./sync-state";
-import { followMachineUpdates } from "./refresh";
-import { createBurnBackend } from "@burn/sync-api";
+import { advanceSyncGeneration, subscribeMirrorChanges } from "./sync-state";
 
 interface AppState {
   db: SQLiteDatabase | null;
   mode: AppMode;
   reportingTimezone: string;
   enterDemo: () => Promise<void>;
-  connect: (config: ConnectionConfig) => Promise<void>;
   connectDirect: () => Promise<void>;
-  addDirectMachine: (
-    url: string,
-  ) => Promise<{ slug: string; displayName: string }>;
+  addDirectMachine: (url: string) => Promise<{ slug: string; displayName: string }>;
   disconnect: () => Promise<void>;
   sync: () => Promise<void>;
   requestSync: (environmentId: string | null) => Promise<void>;
@@ -59,24 +30,15 @@ interface AppState {
   fullSync: (environmentId: string) => Promise<void>;
 }
 
-/**
- * Pull progress lives in its own context: lastSync ticks on every successful
- * minute-cycle even when nothing changed, and without the split that would
- * re-render every useApp() consumer app-wide.
- */
+/** Progress is separate from app state so updates do not rerender all screens. */
 interface SyncStatus {
   lastSync: Date | null;
   syncError: string | null;
-  /** Backfill progress is informational, not a failure — rendered apart from errors. */
   syncNotice: string | null;
-  /** True while the first pull after a machine-refresh request is running. */
   refreshingMachines: boolean;
-  /** True for the whole bounded follow-up window, not just the first pull. */
   checkingMachines: boolean;
-  /** Per-machine result of the last Tailscale probe (live pull or direct mode). */
-  liveMachines: LivePullStatus[] | DirectPullStatus[];
+  liveMachines: DirectPullStatus[];
 }
-
 const AppContext = createContext<AppState | null>(null);
 const SyncStatusContext = createContext<SyncStatus | null>(null);
 
@@ -86,77 +48,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [mode, setMode] = useState<AppMode>("unconfigured");
   const [reportingTimezone, setTzState] = useState("Asia/Kolkata");
   const [status, setStatus] = useState<SyncStatus>({
-    lastSync: null,
-    syncError: null,
-    syncNotice: null,
-    refreshingMachines: false,
-    checkingMachines: false,
-    liveMachines: [],
+    lastSync: null, syncError: null, syncNotice: null,
+    refreshingMachines: false, checkingMachines: false, liveMachines: [],
   });
-  const followup = useRef<{
-    controller: AbortController;
-    target: string | null;
-    promise: Promise<void>;
-  } | null>(null);
-  const live = useRef<AbortController | null>(null);
   const lifecycle = useRef(0);
+  const refreshCount = useRef(0);
   const backfillTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const continueSync = useRef<() => Promise<void>>(async () => {});
-
   const patchStatus = useCallback((patch: Partial<SyncStatus>) => {
     setStatus((current) => ({ ...current, ...patch }));
   }, []);
 
   const stop = useCallback(() => {
     lifecycle.current++;
+    refreshCount.current = 0;
     if (backfillTimer.current) clearTimeout(backfillTimer.current);
     backfillTimer.current = null;
-    followup.current?.controller.abort();
-    followup.current = null;
-    live.current?.abort();
-    live.current = null;
-    patchStatus({
-      refreshingMachines: false,
-      checkingMachines: false,
-      liveMachines: [],
-    });
+    patchStatus({ refreshingMachines: false, checkingMachines: false, liveMachines: [] });
     if (db) {
+      advanceSyncGeneration(db);
       cancelDirectPull(db);
-      cancelCloudSync(db);
     }
   }, [db, patchStatus]);
-
-  /**
-   * Tailscale live probe (D1 v2, cloud mode). Explicit gestures and
-   * app-foreground only — never the minute timer: each probe triggers a
-   * machine-side exporter scan. Writes serialize on the mirror lock;
-   * cancellation rides the same generation counter as the cloud path.
-   * Direct mode probes through sync()/requestSync instead — there, probing
-   * IS the sync.
-   */
-  const pullLive = useCallback(
-    (signal?: AbortSignal) => {
-      if (db === null || mode !== "cloud") return;
-      if (live.current && !live.current.signal.aborted) return;
-      const controller = new AbortController();
-      const relay = () => controller.abort();
-      signal?.addEventListener("abort", relay, { once: true });
-      live.current = controller;
-      void pullLiveFromMachines(db, { signal: controller.signal })
-        .then((statuses) => {
-          if (!controller.signal.aborted)
-            patchStatus({ liveMachines: statuses });
-        })
-        .catch(() => {
-          /* cancelled — a reset owns the surface now */
-        })
-        .finally(() => {
-          signal?.removeEventListener("abort", relay);
-          if (live.current === controller) live.current = null;
-        });
-    },
-    [db, mode, patchStatus],
-  );
 
   useEffect(() => {
     let active = true;
@@ -168,128 +81,92 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setDb(opened);
       setTzState(tz);
       setMode(currentMode);
-    })().catch((err) => {
-      if (active) patchStatus({ syncError: (err as Error).message });
+    })().catch((err: Error) => {
+      if (active) patchStatus({ syncError: err.message });
     });
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, [patchStatus]);
 
-  useEffect(
-    () =>
-      subscribeMirrorChanges((changedDb, kind) => {
-        if (changedDb !== db) return;
-        // Quota-only refreshes must not restart all historical aggregations.
-        void queryClient.invalidateQueries({
-          predicate: (query) =>
-            kind === "events"
-              ? query.queryKey[0] !== "quotas" &&
-                query.queryKey[0] !== "machines"
-              : query.queryKey[0] === kind,
-        });
-      }),
-    [db, queryClient],
-  );
+  useEffect(() => subscribeMirrorChanges((changedDb, kind) => {
+    if (changedDb !== db) return;
+    void queryClient.invalidateQueries({
+      predicate: (query) => kind === "events"
+        ? query.queryKey[0] !== "quotas" && query.queryKey[0] !== "machines"
+        : query.queryKey[0] === kind,
+    });
+  }), [db, queryClient]);
 
-  const sync = useCallback(
-    async (environmentId?: string) => {
-      if (db === null || (mode !== "cloud" && mode !== "direct")) return;
-      const epoch = lifecycle.current;
-      try {
-        if (mode === "direct") {
-          const statuses = await pullDirectFromMachines(db, {
-            authoritative: true,
-            ...(environmentId ? { environmentId } : {}),
-          });
-          if (epoch !== lifecycle.current) return;
-          const failed = statuses.filter(
-            (s) => s.state !== "live" || s.quotaError,
-          ).length;
-          const hasMore = statuses.some((s) => s.hasMore);
-          if (hasMore && NativeAppState.currentState === "active") {
-            if (backfillTimer.current) clearTimeout(backfillTimer.current);
-            backfillTimer.current = setTimeout(() => {
-              backfillTimer.current = null;
-              void continueSync.current();
-            }, 1000);
-          }
-          patchStatus({
-            lastSync: new Date(),
-            syncError: null,
-            syncNotice:
-              failed > 0
-                ? `${failed} machine${failed === 1 ? "" : "s"} could not refresh fully. Showing cached data.`
-                : hasMore
-                  ? "Loading machine history in the background."
-                  : null,
-            liveMachines: statuses,
-          });
-          return;
-        }
-        const result = await syncFromCloud(db);
-        if (epoch !== lifecycle.current) return;
-        if (result.hasMore && NativeAppState.currentState === "active") {
-          if (backfillTimer.current) clearTimeout(backfillTimer.current);
-          backfillTimer.current = setTimeout(() => {
-            backfillTimer.current = null;
-            void continueSync.current();
-          }, 1000);
-        }
-        patchStatus({
-          lastSync: new Date(),
-          syncError: result.quotaError ?? null,
-          syncNotice: result.hasMore
-            ? "Loading history in the background."
-            : null,
-        });
-      } catch (err) {
-        if (epoch === lifecycle.current)
-          patchStatus({ syncError: (err as Error).message, syncNotice: null });
+  const pull = useCallback(async (options: DirectPullOptions = {}) => {
+    if (!db || mode !== "direct") return;
+    const epoch = lifecycle.current;
+    try {
+      const statuses = await pullDirectFromMachines(db, options);
+      if (epoch !== lifecycle.current) return;
+      const failed = statuses.filter((s) => s.state !== "live" || s.quotaError).length;
+      const hasMore = statuses.some((s) => s.hasMore);
+      if (hasMore && NativeAppState.currentState === "active") {
+        if (backfillTimer.current) clearTimeout(backfillTimer.current);
+        backfillTimer.current = setTimeout(() => {
+          backfillTimer.current = null;
+          void continueSync.current();
+        }, 1000);
       }
-    },
-    [db, mode, patchStatus],
-  );
+      setStatus((current) => ({
+        ...current,
+        lastSync: statuses.some((s) => s.state === "live") ? new Date() : current.lastSync,
+        syncError: failed ? `${failed} machine${failed === 1 ? "" : "s"} could not refresh fully. Showing cached data.` : null,
+        syncNotice: hasMore ? "Loading machine history in the background." : null,
+        liveMachines: options.environmentId
+          ? [...current.liveMachines.filter((s) => s.environmentId !== options.environmentId), ...statuses]
+          : statuses,
+      }));
+    } catch (err) {
+      if (epoch === lifecycle.current) patchStatus({ syncError: (err as Error).message, syncNotice: null });
+    }
+  }, [db, mode, patchStatus]);
+  const sync = useCallback(() => pull(), [pull]);
   continueSync.current = sync;
 
   useEffect(() => {
-    if (mode !== "cloud" && mode !== "direct") return;
+    if (mode !== "direct") return;
     void sync();
     const subscription = NativeAppState.addEventListener("change", (state) => {
-      if (state === "active") {
-        void sync();
-        if (mode === "cloud") pullLive();
-      }
+      if (state === "active") void sync();
     });
-    const timer = setInterval(() => {
-      // Cloud: deliberately no live probe on the timer (per-minute exporter
-      // scans on the machine are not worth it; the mirror is fresh to the
-      // last push). Direct probes run on foreground, gestures and bounded backfill.
-      if (mode === "cloud" && NativeAppState.currentState === "active")
-        void sync();
-    }, 60_000);
-    return () => {
-      subscription.remove();
-      clearInterval(timer);
-      stop();
-    };
-  }, [mode, sync, stop, pullLive]);
+    return () => { subscription.remove(); stop(); };
+  }, [mode, sync, stop]);
+
+  const refresh = useCallback(async (environmentId: string | null, full = false) => {
+    if (!db || mode !== "direct") return;
+    const epoch = lifecycle.current;
+    refreshCount.current++;
+    patchStatus({ refreshingMachines: true, checkingMachines: true });
+    try {
+      await pull({ ...(environmentId ? { environmentId } : {}), ...(full ? { full: true } : {}) });
+    } finally {
+      if (epoch === lifecycle.current && --refreshCount.current === 0)
+        patchStatus({ refreshingMachines: false, checkingMachines: false });
+    }
+  }, [db, mode, pull, patchStatus]);
 
   const value = useMemo<AppState>(() => {
-    const invalidate = () => {
-      void queryClient.invalidateQueries();
-    };
+    const invalidate = () => { void queryClient.invalidateQueries(); };
     const prepareReset = async () => {
       stop();
       await queryClient.cancelQueries();
       queryClient.removeQueries();
       patchStatus({ lastSync: null, syncError: null, syncNotice: null });
     };
+    const clearData = async () => {
+      if (!db) return;
+      await prepareReset();
+      setMode("unconfigured");
+      await resetDb(db);
+      await kvSet(db, "mode", "unconfigured");
+      invalidate();
+    };
     return {
-      db,
-      mode,
-      reportingTimezone,
-      sync,
+      db, mode, reportingTimezone, sync,
       async enterDemo() {
         if (!db) return;
         await prepareReset();
@@ -298,116 +175,34 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setMode("demo");
         invalidate();
       },
-      async connect(config) {
-        if (!db) return;
-        await prepareReset();
-        setMode("unconfigured");
-        await resetDb(db);
-        await saveConnection(db, config);
-        // Mount cached screens immediately; the cloud effect backfills in the background.
-        setMode("cloud");
-        invalidate();
-      },
       async connectDirect() {
         if (!db) return;
         await prepareReset();
         setMode("unconfigured");
-        // Keep any previously registered machines and their history: the
-        // registry is the backend here, and wiping it would orphan the mirror.
-        // Bundled demo rows and demo prices must never become real history.
         if (mode === "demo") await resetDb(db);
+        await kvSet(db, "machine_backend_v1", "1");
         await kvSet(db, "mode", "direct");
         setMode("direct");
         invalidate();
       },
       async addDirectMachine(url) {
         if (!db) throw new Error("App not started");
+        const epoch = lifecycle.current;
         const added = await addDirectMachine(db, url);
+        if (epoch !== lifecycle.current) throw new Error("add machine cancelled");
         invalidate();
-        // First data lands immediately; statuses feed the Machines card.
-        void sync(added.id);
+        void pull({ environmentId: added.id });
         return added;
       },
-      async disconnect() {
-        if (!db) return;
-        await prepareReset();
-        setMode("unconfigured");
-        await clearConnection(db);
-        await resetDb(db);
-        invalidate();
-      },
-      async requestSync(environmentId) {
-        if (!db || mode === "unconfigured" || mode === "demo") return;
-        if (mode === "direct") {
-          patchStatus({ refreshingMachines: true });
-          try {
-            await sync(environmentId ?? undefined);
-          } finally {
-            patchStatus({ refreshingMachines: false });
-          }
-          return;
-        }
-        const existing = followup.current;
-        if (
-          existing &&
-          (existing.target === null || existing.target === environmentId)
-        )
-          return existing.promise;
-        existing?.controller.abort();
-        const controller = new AbortController();
-        const epoch = lifecycle.current;
-        const pending = (async () => {
-          patchStatus({ refreshingMachines: true, checkingMachines: true });
-          pullLive(controller.signal);
-          try {
-            await requestMachineSync(db, environmentId);
-            if (controller.signal.aborted || epoch !== lifecycle.current)
-              return;
-            // The spinner covers the first pull; the follow-up keeps checking
-            // in the background via checkingMachines.
-            await followMachineUpdates(controller.signal, sync, {
-              onSettle: () => patchStatus({ refreshingMachines: false }),
-            });
-          } catch (err) {
-            if (!controller.signal.aborted && epoch === lifecycle.current)
-              patchStatus({
-                syncError: (err as Error).message,
-                syncNotice: null,
-              });
-          } finally {
-            if (followup.current?.controller === controller) {
-              followup.current = null;
-              patchStatus({
-                refreshingMachines: false,
-                checkingMachines: false,
-              });
-            }
-          }
-        })();
-        followup.current = {
-          controller,
-          target: environmentId,
-          promise: pending,
-        };
-        return pending;
-      },
+      disconnect: clearData,
+      clearData,
+      requestSync: (environmentId) => refresh(environmentId),
+      fullSync: (environmentId) => refresh(environmentId, true),
       async removeMachine(environmentId) {
         if (!db) return;
         stop();
-        if (mode === "direct") {
-          await removeDirectMachine(db, environmentId);
-          patchStatus({ liveMachines: [] });
-          invalidate();
-          return;
-        }
-        if (mode === "cloud") {
-          const connection = await loadConnection();
-          if (!connection) throw new Error("Not connected to a backend");
-          await createBurnBackend(connection)
-            .phone(connection.readToken)
-            .removeEnvironment(environmentId);
-        }
-        await removeEnvironmentLocal(db, environmentId);
+        if (mode === "direct") await removeDirectMachine(db, environmentId);
+        else await removeEnvironmentLocal(db, environmentId);
         invalidate();
       },
       async setReportingTimezone(tz) {
@@ -416,72 +211,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setTzState(tz);
         invalidate();
       },
-      async fullSync(environmentId) {
-        if (!db || mode !== "direct") return;
-        if (backfillTimer.current) clearTimeout(backfillTimer.current);
-        backfillTimer.current = null;
-        cancelDirectPull(db);
-        const epoch = lifecycle.current;
-        patchStatus({ refreshingMachines: true });
-        try {
-          const statuses = await pullDirectFromMachines(db, {
-            full: true,
-            authoritative: true,
-            environmentId,
-          });
-          if (epoch === lifecycle.current) {
-            patchStatus({
-              liveMachines: statuses,
-              lastSync: new Date(),
-              syncError: null,
-              syncNotice: statuses.some((s) => s.hasMore)
-                ? "Loading machine history in the background."
-                : null,
-            });
-            if (
-              statuses.some((s) => s.hasMore) &&
-              NativeAppState.currentState === "active"
-            )
-              backfillTimer.current = setTimeout(() => {
-                backfillTimer.current = null;
-                void continueSync.current();
-              }, 1000);
-          }
-        } catch (err) {
-          if (epoch === lifecycle.current)
-            patchStatus({ syncError: (err as Error).message });
-        } finally {
-          if (epoch === lifecycle.current)
-            patchStatus({ refreshingMachines: false });
-        }
-      },
-      async clearData() {
-        if (!db) return;
-        await prepareReset();
-        setMode("unconfigured");
-        await resetDb(db);
-        await kvSet(db, "mode", "unconfigured");
-        invalidate();
-      },
     };
-  }, [
-    db,
-    mode,
-    reportingTimezone,
-    sync,
-    stop,
-    pullLive,
-    queryClient,
-    patchStatus,
-  ]);
+  }, [db, mode, reportingTimezone, sync, stop, pull, refresh, queryClient, patchStatus]);
 
-  return (
-    <AppContext.Provider value={value}>
-      <SyncStatusContext.Provider value={status}>
-        {children}
-      </SyncStatusContext.Provider>
-    </AppContext.Provider>
-  );
+  return <AppContext.Provider value={value}>
+    <SyncStatusContext.Provider value={status}>{children}</SyncStatusContext.Provider>
+  </AppContext.Provider>;
 }
 
 export function useApp(): AppState {
@@ -489,7 +224,6 @@ export function useApp(): AppState {
   if (!state) throw new Error("useApp outside AppProvider");
   return state;
 }
-
 export function useSyncStatus(): SyncStatus {
   const state = useContext(SyncStatusContext);
   if (!state) throw new Error("useSyncStatus outside AppProvider");

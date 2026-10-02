@@ -5,14 +5,8 @@ import {
   quotaAccountKey,
   quotaMetricLabel,
 } from "../src/keys";
-import {
-  parseEventRow,
-  parseEnvironmentRow,
-  parseQuotaRow,
-} from "../src/supabase";
-
 describe("keys", () => {
-  test("event identity is server-side sha256 of slug|client|dedup_key", () => {
+  test("event identity is stable sha256 of slug|client|dedup_key", () => {
     expect(eventIdentityDescription()).toBe(
       "sha256(environment_slug | client | dedup_key)",
     );
@@ -33,84 +27,5 @@ describe("keys", () => {
     expect(normalizeCostSource("providerReported")).toBe("provider_reported");
     expect(normalizeCostSource("estimated")).toBe("estimated");
     expect(normalizeCostSource(undefined)).toBe("unknown");
-  });
-});
-
-describe("wire parsing", () => {
-  test("environment row maps snake_case to domain", () => {
-    const env = parseEnvironmentRow({
-      id: "11111111-1111-1111-1111-111111111111",
-      slug: "cachyos",
-      display_name: "CachyOS",
-      host_group: "nerve",
-      os_kind: "linux",
-      latest_revision: 42,
-      last_heartbeat_at: "2026-09-05T10:00:00+00:00",
-    });
-    expect(env.slug).toBe("cachyos");
-    expect(env.latestRevision).toBe(42);
-    expect(env.hostGroup).toBe("nerve");
-  });
-
-  test("event row maps timestamps to epoch ms and cost to decimal string", () => {
-    const ev = parseEventRow({
-      event_id: "abc",
-      environment_id: "e1",
-      client: "codex",
-      provider_id: "openai",
-      model_id: "gpt-5.2-codex",
-      session_id: "s1",
-      occurred_at: "2026-09-05T10:00:00+00:00",
-      input_tokens: 10,
-      output_tokens: 0,
-      cache_read_tokens: 0,
-      cache_write_tokens: 0,
-      reasoning_tokens: 0,
-      parser_version: "pin",
-      cost: 0.012345,
-      revision: 7,
-    });
-    expect(ev.occurredAtMs).toBe(Date.parse("2026-09-05T10:00:00+00:00"));
-    expect(ev.cost).toBe("0.012345");
-    expect(ev.revision).toBe(7);
-  });
-
-  test("event row tolerates missing nullable fields", () => {
-    const ev = parseEventRow({
-      event_id: "abc",
-      environment_id: "e1",
-      client: "zcode",
-      provider_id: "zai",
-      model_id: "glm-4.7",
-      session_id: "s2",
-      occurred_at: "2026-09-05T10:00:00+00:00",
-      duration_ms: null,
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_read_tokens: 0,
-      cache_write_tokens: 0,
-      reasoning_tokens: 0,
-      cost: "0.000000",
-      parser_version: "pin",
-      revision: 1,
-    });
-    expect(ev.durationMs).toBeNull();
-    expect(ev.workspaceLabel).toBeNull();
-    expect(ev.costIsComplete).toBe(false);
-  });
-
-  test("quota row accepts PostgREST decimal percent strings", () => {
-    const q = parseQuotaRow({
-      provider: "Codex",
-      account_key: "acct",
-      metric: "session_5h",
-      used_percent: "81.4",
-      remaining_percent: null,
-      status: "ok",
-      fetched_at: "2026-09-05T10:00:00+00:00",
-    });
-    expect(q.usedPercent).toBeCloseTo(81.4);
-    expect(q.remainingPercent).toBeNull();
-    expect(q.status).toBe("ok");
   });
 });

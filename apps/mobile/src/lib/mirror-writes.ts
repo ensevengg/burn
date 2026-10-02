@@ -1,8 +1,8 @@
 import {
   liveEventId,
   quotaMirrorKey,
-  type IngestEventInput,
-  type IngestQuotaInput,
+  type MachineEventInput,
+  type MachineQuotaInput,
   type UsageEvent,
 } from "@burn/sync-api";
 import type { SQLiteDatabase } from "expo-sqlite";
@@ -35,18 +35,16 @@ const columns = [
   "cost_is_complete",
   "model_attribution_conflicted",
   "parser_version",
-  "revision",
 ];
-const contentColumns = columns.slice(1, -1);
+const contentColumns = columns.slice(1);
 /** Caller owns transaction and write lock. Changed count excludes overlap
- * duplicates and peer rows blocked by cloud authority. */
+ * duplicates. Machine corrections replace existing content in place. */
 export async function mergePeerEvents(
   db: SQLiteDatabase,
   environmentId: string,
   slug: string,
-  events: IngestEventInput[],
+  events: MachineEventInput[],
   assertActive: () => void,
-  authoritative = false,
 ): Promise<number> {
   return writeEvents(
     db,
@@ -54,21 +52,9 @@ export async function mergePeerEvents(
       ...event,
       eventId: liveEventId(slug, event.client, event.dedupKey),
       environmentId,
-      revision: 0,
     })),
     assertActive,
-    authoritative ? "direct" : "live",
   );
-}
-
-/** Cloud and peer writers share the column/binding contract. Caller owns the
- * transaction and lock; cloud revisions remain authoritative in cloud mode. */
-export async function mergeCloudEvents(
-  db: SQLiteDatabase,
-  events: UsageEvent[],
-  assertActive: () => void,
-): Promise<number> {
-  return writeEvents(db, events, assertActive, "cloud");
 }
 
 function eventBindings(e: UsageEvent) {
@@ -100,7 +86,6 @@ function eventBindings(e: UsageEvent) {
     e.costIsComplete ? 1 : 0,
     e.modelAttributionConflicted ? 1 : 0,
     e.parserVersion,
-    e.revision,
   ];
 }
 
@@ -108,25 +93,19 @@ async function writeEvents(
   db: SQLiteDatabase,
   events: UsageEvent[],
   assertActive: () => void,
-  mode: "cloud" | "direct" | "live",
 ): Promise<number> {
   let changed = 0;
-  // 32 × 28 bindings stays below the classic 999-parameter SQLite limit.
+  // 32 × 27 bindings stays below the classic 999-parameter SQLite limit.
   for (let i = 0; i < events.length; i += 32) {
     assertActive();
     const chunk = events.slice(i, i + 32);
-    const conflict =
-      mode === "cloud"
-        ? ""
-        : `
-      on conflict(event_id) do update set ${columns
-        .slice(1)
+    const conflict = `
+      on conflict(event_id) do update set ${contentColumns
         .map((c) => `${c}=excluded.${c}`)
         .join(",")}
-      where (${mode === "direct" ? "1" : "usage_events.revision=0"})
-        and (${contentColumns.join(",")}) is not (${contentColumns.map((c) => `excluded.${c}`).join(",")})`;
+      where (${contentColumns.join(",")}) is not (${contentColumns.map((c) => `excluded.${c}`).join(",")})`;
     const result = await db.runAsync(
-      `insert ${mode === "cloud" ? "or replace " : ""}into usage_events (${columns.join(",")})
+      `insert into usage_events (${columns.join(",")})
       values ${chunk.map(() => `(${Array(columns.length).fill("?").join(",")})`).join(",")}${conflict}`,
       chunk.flatMap(eventBindings),
     );
@@ -141,7 +120,7 @@ async function writeEvents(
 export async function mergeQuota(
   db: SQLiteDatabase,
   environmentId: string | null,
-  q: IngestQuotaInput,
+  q: MachineQuotaInput,
   fetchedAt: string,
 ): Promise<void> {
   await db.runAsync(

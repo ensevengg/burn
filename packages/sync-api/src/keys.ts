@@ -1,46 +1,25 @@
 import type { CostSource } from "./types";
 
-/**
- * Upsert key definitions (engineering convention: dedup keys live HERE, not at
- * call sites).
+/** Idempotent mirror keys (keep definitions here, not at call sites).
  *
- * usage_events.event_id = sha256( environment_slug | client | dedup_key )
- *   - computed server-side by burn_api.ingest_events; the reporter never
- *     invents IDs.
- *   - `dedup_key` must be stable across rescans of the same source message.
- *     Tokscale's UnifiedMessage.dedup_key is authoritative. For sources where
- *     tokscale has none, the exporter (D2) derives one deterministically from
- *     session identity + source-local timestamp + message ordinal, versioned:
- *     `v1:<client>:<session_id>:<source_ts_ms>:<ordinal>`.
- *   - Identity columns never change after insert; content corrections
- *     (pricing/parser fixes) upsert in place and advance the environment
- *     revision, which propagates to phones via the revision watermark.
+ * usage_events.event_id = sha256(environment_slug | client | dedup_key).
+ * Tokscale's dedup key is authoritative. Where absent, the D2 exporter derives
+ * v1:<client>:<session_id>:<source_ts_ms>:<ordinal>. Parser/pricing corrections
+ * replace content under the same event id during full reconciliation.
  *
- * quota_snapshots: history is append-only with retry identity =
- *   (environment_id, provider, account_key, metric, status, fetched_at).
- *   Collection time is preserved across retries. Freshness selection happens
- *   at read time per (provider, account_key, metric); the phone mirror keeps
- *   one latest row per environment/provider/account/metric/status.
+ * quota_snapshots = environment/provider/account/metric/status. Preserve the
+ * source collection time; newer samples replace older samples, and success
+ * and error channels remain separate. UI freshness is account-level.
  *
- * environments: natural key = slug (one reporter installation each; `windows`
- * and `wsl` are distinct slugs sharing a host_group).
+ * environments and direct_machines: natural key = slug. WSL and Windows use
+ * distinct slugs and may share a host_group.
  */
 
 export function eventIdentityDescription(): string {
   return "sha256(environment_slug | client | dedup_key)";
 }
 
-/* ── live-pull event identity (docs/adr/0001) ────────────────────────────────
- * The phone imports a machine's not-yet-pushed events straight into its
- * mirror. Server rows carry revision >= 1; live rows are written with
- * revision 0, so a later server row for the same event_id always wins the
- * upsert — but only if the phone computes the SAME event_id the server will.
- * The recipe below mirrors burn_ingest_events byte-for-byte:
- *   sha256(convert_to(slug || '|' || coalesce(nullif(client,''),'unknown')
- *                     || '|' || dedup_key, 'utf8'))
- * Verified against node:crypto in keys.test.ts.
- */
-
+/** Stable SHA-256 identity, verified against node:crypto in keys.test.ts. */
 const K = new Uint32Array([
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -151,11 +130,7 @@ export function sha256HexUtf8(input: string): string {
   return [h0, h1, h2, h3, h4, h5, h6, h7].map((x) => x.toString(16).padStart(8, "0")).join("");
 }
 
-/**
- * The phone-side mirror of burn_ingest_events' event_id — identical inputs
- * MUST yield the id the server will assign, so a live row collides with (and
- * later yields to) its server twin instead of duplicating it.
- */
+/** Stable per-message identity across machines scans and application upgrades. */
 export function liveEventId(environmentSlug: string, client: string, dedupKey: string): string {
   const normalizedClient = client.length > 0 ? client : "unknown";
   return sha256HexUtf8(`${environmentSlug}|${normalizedClient}|${dedupKey}`);

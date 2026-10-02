@@ -37,10 +37,9 @@ export function DashboardScreen() {
   const dailyMax = useGranularityMaxQuery("daily", metric);
   const quotas = useQuotasQuery();
   const machines = useMachinesQuery();
-  // Cloud pull-to-refresh is covered by the machine-refresh spinner (which
-  // settles after the first pull); demo mode has no machines to ask, so the
+  // Machine refresh drives its own spinner; demo mode has no machines, so the
   // gesture itself drives the spinner — heartbeat refetches must not blip it.
-  const refreshing = (mode === "cloud" || mode === "direct") ? refreshingMachines : demoRefreshing;
+  const refreshing = (mode === "direct") ? refreshingMachines : demoRefreshing;
 
   const totals = overview.data?.totals;
   const headlineValue =
@@ -50,9 +49,9 @@ export function DashboardScreen() {
         ? formatCost(totals.cost)
         : formatTokens(eventTokens(totals));
 
-  // Pull-to-refresh = request an eager push from every online machine (D1) + pull delta.
+  // Pull-to-refresh reads every registered machine over the tailnet.
   const onRefresh = () => {
-    if (mode === "cloud" || mode === "direct") {
+    if (mode === "direct") {
       void requestSync(null);
       return;
     }
@@ -68,8 +67,8 @@ export function DashboardScreen() {
       >
         <View style={styles.header}>
           <Text style={[type.title, { color: C.text }]}>Overview</Text>
-          <Chip tone={mode === "demo" ? "yellow" : (mode === "cloud" || mode === "direct") ? "green" : "muted"}>
-            {mode === "demo" ? "demo data" : mode === "cloud" ? "live" : mode === "direct" ? "direct" : "not connected"}
+          <Chip tone={mode === "demo" ? "yellow" : (mode === "direct") ? "green" : "muted"}>
+            {mode === "demo" ? "demo data" : mode === "direct" ? "direct" : "not connected"}
           </Chip>
         </View>
 

@@ -44,7 +44,6 @@ export interface EnvironmentRow {
   lastHeartbeatAt: string | null;
   lastSuccessAt: string | null;
   lastError: string | null;
-  latestRevision: number;
 }
 
 export interface Totals {
@@ -310,7 +309,7 @@ export function computeGranularityMax(
 
 /**
  * Cache savings: what the cache-read discount saved vs paying uncached input
- * prices. Null when no price reference is loaded (cloud pricing payload is a
+ * prices. Null when no price reference is loaded (machine pricing payload is a
  * spec'd follow-up — AGENTS.md).
  */
 export function computeCacheSavings(
@@ -748,7 +747,7 @@ export interface WindowOverview {
   sessions: number;
   series: SeriesBucket[];
   byClient: ClientShare[];
-  /** Null when no model price reference exists (cloud pricing payload pending). */
+  /** Null when no model price reference exists (machine pricing payload pending). */
   cacheSavings: number | null;
 }
 
@@ -836,7 +835,7 @@ export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
 export async function queryEnvironments(db: SQLiteDatabase): Promise<EnvironmentRow[]> {
   const rows = await db.getAllAsync<Record<string, unknown>>(
     `select id, slug, display_name, host_group, os_kind, tokscale_version, reporter_version,
-            last_heartbeat_at, last_success_at, last_error, latest_revision
+            last_heartbeat_at, last_success_at, last_error
        from environments order by slug`,
   );
   return rows.map((r) => ({
@@ -850,6 +849,5 @@ export async function queryEnvironments(db: SQLiteDatabase): Promise<Environment
     lastHeartbeatAt: (r["last_heartbeat_at"] as string | null) ?? null,
     lastSuccessAt: (r["last_success_at"] as string | null) ?? null,
     lastError: (r["last_error"] as string | null) ?? null,
-    latestRevision: Number(r["latest_revision"] ?? 0),
   }));
 }
