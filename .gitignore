@@ -4,10 +4,12 @@ reference/
 # Node / Expo
 node_modules/
 .expo/
+apps/mobile/android/
+apps/mobile/ios/
 dist/
 *.tsbuildinfo
 
-# Secrets — Supabase keys must never be committed
+# Secrets and local configuration
 .env
 .env.*
 *.local.json
