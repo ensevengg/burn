@@ -13,25 +13,12 @@ import {
   choice,
   identity,
 } from "./validation";
-import type { IngestEventInput, IngestQuotaInput } from "./backend";
+import type { MachineEventInput, MachineQuotaInput } from "./payloads";
 import type { OsKind } from "./types";
 
-/**
- * Tailscale live-pull contract (D1 v2, docs/adr/0001-tailscale-direct-pull).
- *
- * A machine running `burn-report daemon` exposes a read-only HTTP endpoint on
- * its tailnet address. Membership in the tailnet IS the authentication — no
- * tokens cross this boundary (D7 untouched; the phone's only secret remains
- * the Supabase read token).
- *
- * The machine serves exactly what its next `push` would send: the same
- * IngestEventInput rows built by the reporter's push path (dedup fallback
- * derived, cost already a decimal string), filtered to events since its own
- * push cursor minus the overlap window. The phone merges those into its
- * mirror with revision 0, so the eventual server row (revision >= 1) wins
- * the upsert by event_id and the mirror converges — the live path can never
- * fork history.
- */
+/** Read-only machine transport over the user's tailnet. Tailscale membership
+ * authorizes access. Every response is schema-validated before phone writes;
+ * the phone owns scan-start cursors, paged continuation and reconciliation. */
 
 export interface LivePing {
   capabilities?: string[];
@@ -48,7 +35,7 @@ export interface LivePing {
   tokscaleVersion: string | null;
   exportSchema: number | null;
   reportingTimezone: string | null;
-  /** Events older than this are already in Supabase (cursor minus overlap). */
+  /** Earliest available event window; machine backends expose full history. */
   sinceMs: number | null;
   /** Machine clock (epoch ms) — lets the phone flag gross clock skew. */
   serverNowMs: number;
@@ -64,12 +51,12 @@ export interface LiveEventsPage {
   notModified?: boolean;
   sinceMs: number | null;
   generatedAt: string;
-  events: IngestEventInput[];
+  events: MachineEventInput[];
 }
 
 export interface LiveQuotasPage {
   generatedAt: string;
-  quotas: IngestQuotaInput[];
+  quotas: MachineQuotaInput[];
 }
 
 export interface LivePageRequest {
@@ -81,12 +68,7 @@ export interface LivePageRequest {
 
 export interface LiveApi {
   ping(signal?: AbortSignal): Promise<LivePing>;
-  /**
-   * Events since the given epoch ms, or the machine's own push cursor minus
-   * overlap when null. Direct mode (ADR 0002) always passes the phone's
-   * per-machine cursor; the cloud-mode live pull passes null and takes the
-   * machine's tail.
-   */
+  /** Events since epoch ms; null starts at full history. */
   events(
     sinceMs: number | null,
     signal?: AbortSignal,
@@ -114,7 +96,7 @@ export function validateLiveApi(transport: LiveTransport): LiveApi {
   return api;
 }
 
-/** Re-send window shared by push, live pull, and direct mode: a message
+/** Re-send window: a message
  * completed just after a scan is caught by the next pull's overlap. */
 export const LIVE_OVERLAP_MS = 60 * 60_000;
 
@@ -221,9 +203,9 @@ export function httpLiveApiFor(
 }
 
 /**
- * Structural validation for a /live/events payload. The machine is a peer,
- * not the server — the phone checks shape before anything touches the mirror.
- * Rows arrive in the reporter's IngestEventInput form; anything malformed is
+ * Structural validation for a /live/events payload. The phone checks shape
+ * before anything touches the mirror.
+ * Rows arrive in the reporter's MachineEventInput form; anything malformed is
  * rejected wholesale (the caller discards the page), never coerced.
  */
 export function parseLiveEventsPage(raw: unknown): LiveEventsPage {
@@ -267,7 +249,7 @@ export function parseLiveEventsPage(raw: unknown): LiveEventsPage {
       ),
       parserVersion: identity(e.parserVersion, where("parserVersion")),
       dedupKey: identity(e.dedupKey, where("dedupKey")),
-    } satisfies IngestEventInput;
+    } satisfies MachineEventInput;
   });
   return {
     ...(page.slug === undefined ? {} : { slug: identity(page.slug, "slug") }),
@@ -303,7 +285,7 @@ export function parseLiveQuotasPage(raw: unknown): LiveQuotasPage {
   const page = expectObject(raw, "quotas page");
   if (!Array.isArray(page.quotas))
     throw new LiveError("quotas: expected an array");
-  const quotas: IngestQuotaInput[] = page.quotas.map((row, index) => {
+  const quotas: MachineQuotaInput[] = page.quotas.map((row, index) => {
     const where = (field: string): string => `quotas[${index}].${field}`;
     const q = expectObject(row, `quotas[${index}]`);
     return {

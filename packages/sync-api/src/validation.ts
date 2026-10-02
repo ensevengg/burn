@@ -1,4 +1,4 @@
-/** Runtime wire gates shared by cloud and peer transports. Missing optional
+/** Runtime wire gates shared by machine transports. Missing optional
  * fields remain compatible; malformed supplied fields never become zero/null. */
 export function object(value: unknown, where: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
