@@ -1018,3 +1018,46 @@ test("health downloaded after reset cannot repopulate the mirror", async () => {
     expect(totals.cost).toBeCloseTo(0.000369, 9);
     fx.native.close();
   });
+
+test("unchanged reconciliation pages neither evict caches nor refetch event screens", async () => {
+  const { subscribeMirrorChanges } = await import("../src/lib/sync-state");
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let late = ingestRow({ dedupKey: "late", occurredAtMs: 1 });
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since, signal, request) => {
+      return {
+        slug: "win",
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        snapshotId: `snapshot-${clock}`,
+        events: request?.cursor ? [late] : [ingestRow({ dedupKey: "recent", occurredAtMs: 2 })],
+        nextCursor: request?.cursor ? null : "older",
+      };
+    },
+  };
+  await addDirectMachine(fx.db, "http://win", { apiFor: () => api });
+  let published = 0;
+  const unsubscribe = subscribeMirrorChanges((db, kind) => {
+    if (db === fx.db && kind === "events") published++;
+  });
+  try {
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(published).toBe(2);
+    clock += 86_400_001;
+    published = 0;
+    const unchanged = await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(unchanged[0]!.pulledEvents).toBe(0);
+    expect(published).toBe(0);
+    clock += 86_400_001;
+    late = { ...late, cost: "0.000999" };
+    expect((await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock }))[0]!.pulledEvents).toBe(1);
+    expect(published).toBe(1);
+  } finally {
+    unsubscribe();
+    fx.native.close();
+  }
+});

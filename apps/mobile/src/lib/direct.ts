@@ -587,10 +587,11 @@ async function pullDirectUnlocked(
             const done = !page.nextCursor;
             if (page.nextCursor && seenCursors.has(page.nextCursor))
               throw new LiveError("Repeated event page cursor");
+            let changed = 0;
             await withWriteLock(async () => {
               assertActive();
               await db.withTransactionAsync(async () => {
-                pulled += await mergePeerEvents(
+                changed = await mergePeerEvents(
                   db,
                   machine.id,
                   machine.slug,
@@ -631,9 +632,12 @@ async function pullDirectUnlocked(
                 }
                 assertActive();
               });
-              if (page.events.length) invalidateEventCache(db);
+              // Reconciliation and overlap pages are mostly unchanged; only
+              // committed changes may evict caches and refetch event screens.
+              if (changed) invalidateEventCache(db);
             });
-            if (page.events.length) publishMirrorChange(db, "events");
+            pulled += changed;
+            if (changed) publishMirrorChange(db, "events");
             if (done) {
               await withWriteLock(async () => {
                 assertActive();
