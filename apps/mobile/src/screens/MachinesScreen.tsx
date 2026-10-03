@@ -197,18 +197,36 @@ export function MachinesScreen() {
                     </Text>
                   )}
                   {mode === "direct" && (
-                    <Pressable
-                      accessibilityRole="button"
-                      onPress={() => void fullSync(machine.id)}
-                      style={[
-                        styles.requestButton,
-                        { backgroundColor: C.panelAlt, borderColor: C.border },
-                      ]}
-                    >
-                      <Text style={{ color: C.text, fontWeight: "600" }}>
-                        Reconcile full history
-                      </Text>
-                    </Pressable>
+                    // Refresh reads only what changed; reconcile forces a
+                    // machine rescan and re-downloads every row.
+                    <View style={styles.actions}>
+                      {([
+                        ["Refresh", () => requestSync(machine.id)],
+                        ["Reconcile history", () => fullSync(machine.id)],
+                      ] as const).map(([label, action]) => (
+                        <Pressable
+                          key={label}
+                          accessibilityRole="button"
+                          accessibilityLabel={`${label} ${machine.displayName}`}
+                          accessibilityState={{ disabled: refreshingMachines }}
+                          disabled={refreshingMachines}
+                          onPress={() => void action()}
+                          style={[
+                            styles.requestButton,
+                            styles.action,
+                            {
+                              backgroundColor: C.panelAlt,
+                              borderColor: C.border,
+                              opacity: refreshingMachines ? 0.35 : 1,
+                            },
+                          ]}
+                        >
+                          <Text style={{ color: C.text, fontWeight: "600" }}>
+                            {label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
                   )}
                 </Card>
               );
@@ -413,4 +431,6 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     marginTop: spacing.m,
   },
+  actions: { flexDirection: "row", gap: spacing.s },
+  action: { flex: 1 },
 });
