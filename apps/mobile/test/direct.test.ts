@@ -1152,3 +1152,29 @@ test("a regular refresh queued behind a continuation still refreshes quotas", as
   expect(quotaCalls).toBe(2);
   fx.native.close();
 });
+
+test("health refreshes request only samples from the newest stored capture onward", async () => {
+  const fx = mirrorFixture();
+  const now = Date.parse("2026-10-01T12:00:00Z");
+  let serverNowMs = now;
+  const seen: number[] = [];
+  const sample = (capturedAtMs: number) => ({ capturedAtMs, cpuLoadPct: 5, cpuTempC: null,
+    ramUsedPct: 40, ramTempC: null, gpuUtilPct: null, gpuTempC: null });
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs }),
+    quotas: async () => ({ generatedAt: new Date(now).toISOString(), quotas: [] }),
+    events: async () => ({ sinceMs: 0, generatedAt: new Date(now).toISOString(), events: [] }),
+    metrics: async (since) => {
+      seen.push(since);
+      return { generatedAt: new Date(now).toISOString(), metrics: [sample(now - 60_000), sample(now - 30_000)] };
+    },
+  };
+  await addDirectMachine(fx.db, "http://win", { apiFor: () => api });
+  const options = { apiFor: () => api, now: () => now };
+  await pullDirectFromMachines(fx.db, options);
+  await pullDirectFromMachines(fx.db, options);
+  serverNowMs = now - 3_600_000;
+  await pullDirectFromMachines(fx.db, options);
+  expect(seen).toEqual([now - 86_400_000, now - 30_000, now - 86_400_000]);
+  fx.native.close();
+});

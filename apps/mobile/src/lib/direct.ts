@@ -495,7 +495,21 @@ async function pullDirectUnlocked(
           if (!api.metrics || ping.osKind === "wsl") return { count: 0, error: null };
           const timeout = withTimeout(probeSignal, options.metricsTimeoutMs ?? 10_000);
           try {
-            const page = await api.metrics(Math.max(0, now() - 86_400_000), timeout.signal);
+            // Samples are immutable per capture instant, so request only the
+            // newest stored sample onward. A machine clock rollback reloads the day.
+            const windowStart = Math.max(0, now() - 86_400_000);
+            const newest =
+              (
+                await db.getFirstAsync<{ at: number | null }>(
+                  "select max(captured_at_ms) as at from machine_metrics where environment_id=?",
+                  [machine.id],
+                )
+              )?.at ?? null;
+            const since =
+              newest !== null && newest > windowStart && newest <= ping.serverNowMs
+                ? newest
+                : windowStart;
+            const page = await api.metrics(since, timeout.signal);
             const count = await withWriteLock(async () => {
               assertActive();
               let changed = 0;
