@@ -307,6 +307,62 @@ test("snapshot pages, cache TTL, conditional GETs and quota TTL work over real H
   }
 });
 
+test("newest-first pages cover the window once and their cursors keep that order", async () => {
+  const { startLiveServer } = await import("../src/serve");
+  const { httpLiveApiFor } = await import("@burn/sync-api");
+  const rows = Array.from({ length: 2501 }, (_, i) => ({
+    ...EXPORTER_ROW_WITH_KEY,
+    timestamp: EXPORTER_ROW_WITH_KEY.timestamp + i,
+    dedup_key: `row-${i}`,
+  }));
+  const server = await startLiveServer(CONFIG, {
+    bind: "127.0.0.1",
+    port: 0,
+    deps: deps({
+      now: Date.now,
+      exporterScan: async () => rows.map((r) => JSON.stringify(r)).join("\n"),
+    }),
+  });
+  try {
+    const api = httpLiveApiFor(server.url);
+    const first = await api.events(0, undefined, { limit: 1000, order: "desc" });
+    expect(first.events[0]!.dedupKey).toBe("row-2500");
+    expect(first.events[999]!.dedupKey).toBe("row-1501");
+    expect(first.nextCursor).toEndWith(":desc");
+    // The cursor, not a conflicting order parameter, decides continuation.
+    const second = (await (
+      await fetch(
+        `${server.url}/live/events?since=0&limit=1000&order=asc&cursor=${first.nextCursor}`,
+      )
+    ).json()) as { events: { dedupKey: string }[]; nextCursor: string };
+    expect(second.events[0]!.dedupKey).toBe("row-1500");
+    const third = await api.events(0, undefined, {
+      limit: 1000,
+      cursor: second.nextCursor,
+    });
+    expect(third.events.map((e) => e.dedupKey).at(-1)).toBe("row-0");
+    expect(third.nextCursor).toBeNull();
+    expect(
+      new Set(
+        [...first.events, ...second.events, ...third.events].map((e) => e.dedupKey),
+      ).size,
+    ).toBe(2501);
+    const tail = await api.events(rows[2000]!.timestamp, undefined, {
+      limit: 1000,
+      order: "desc",
+    });
+    expect(tail.events.map((e) => e.dedupKey)).toEqual(
+      rows.slice(2000).reverse().map((r) => r.dedup_key),
+    );
+    expect(tail.nextCursor).toBeNull();
+    expect(
+      (await fetch(`${server.url}/live/events?since=0&limit=10&order=newest`)).status,
+    ).toBe(400);
+  } finally {
+    server.stop();
+  }
+});
+
 test("a cold scan longer than Bun's default idle deadline reaches the HTTP client", async () => {
   const { startLiveServer } = await import("../src/serve");
   const { httpLiveApiFor } = await import("@burn/sync-api");

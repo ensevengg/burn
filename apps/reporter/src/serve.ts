@@ -128,7 +128,7 @@ export function createLiveFetch(
   const pingPayload = () => {
     return {
       protocol: 1 as const,
-      capabilities: ["paged-events", "content-hash", "machine-metrics"],
+      capabilities: ["paged-events", "content-hash", "machine-metrics", "newest-first-pages"],
       ready: snapshots.peek() !== null,
       scanAgeMs: snapshots.peek()
         ? now() - Date.parse(snapshots.peek()!.generatedAt)
@@ -168,15 +168,26 @@ export function createLiveFetch(
           let sinceMs = requested ?? 0;
           const cursor = url.searchParams.get("cursor");
           const parts = cursor?.split(":");
-          if (sinceParam === null && parts?.length === 3)
-            sinceMs = Number(parts[1]);
+          // Ascending cursors keep their original three-part form; newest-first
+          // windows append their order so a resumed window cannot change it.
+          const cursorOrder =
+            parts?.length === 3
+              ? "asc"
+              : parts?.length === 4 && parts[3] === "desc"
+                ? "desc"
+                : null;
+          if (sinceParam === null && cursorOrder) sinceMs = Number(parts![1]);
           if (
             parts &&
-            (parts.length !== 3 ||
+            (cursorOrder === null ||
               Number(parts[1]) !== sinceMs ||
               !/^\d+$/.test(parts[2]!))
           )
             return jsonResponse({ error: "invalid page cursor" }, 400);
+          const orderParam = url.searchParams.get("order");
+          if (orderParam !== null && orderParam !== "asc" && orderParam !== "desc")
+            return jsonResponse({ error: "invalid page order" }, 400);
+          const newestFirst = (cursorOrder ?? orderParam) === "desc";
           const snapshot = parts
             ? snapshots.pageSnapshot(parts[0]!)
             : await snapshots.get(url.searchParams.get("force") === "1");
@@ -218,12 +229,14 @@ export function createLiveFetch(
             limitParam === null
               ? count
               : Math.max(1, Math.min(requestedLimit, 1000));
-          const pageKey = `${snapshot.id}:${sinceMs}:${offset}:${limit}`;
+          const pageKey = `${snapshot.id}:${sinceMs}:${offset}:${limit}:${newestFirst ? "desc" : "asc"}`;
           if (encoded.has(pageKey)) return respond(req, null, pageKey, headers);
-          const events = snapshot.events.slice(
-            first + offset,
-            first + offset + limit,
-          );
+          const end = snapshot.events.length;
+          const events = newestFirst
+            ? snapshot.events
+                .slice(Math.max(first, end - offset - limit), end - offset)
+                .reverse()
+            : snapshot.events.slice(first + offset, first + offset + limit);
           // Keep paged payloads below the phone's decode bound, including UTF-8.
           // Old clients without a limit retain their unpaged protocol.
           if (limitParam !== null) {
@@ -244,7 +257,7 @@ export function createLiveFetch(
           }
           const nextCursor =
             offset + events.length < count
-              ? `${snapshot.id}:${sinceMs}:${offset + events.length}`
+              ? `${snapshot.id}:${sinceMs}:${offset + events.length}${newestFirst ? ":desc" : ""}`
               : null;
           return respond(
             req,
