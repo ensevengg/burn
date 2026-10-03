@@ -1,5 +1,5 @@
 /** Bundled demo seeding uses the same local mirror as machine sync. */
-import { machineMetricId } from "@burn/sync-api";
+import { machineMetricId, quotaMirrorKey } from "@burn/sync-api";
 import { invalidateEventCache } from "../data/repository";
 import { kvSet, wipeForReseed, type SQLiteDatabase } from "./db";
 import { withWriteLock } from "./writelock";
@@ -64,15 +64,15 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
     }
 
     for (const quota of dataset.quotas) {
-      const rowKey = `${quota.environmentSlug}|${quota.provider}|${quota.accountKey}|${quota.metric}`;
+      const environmentId = envId[quota.environmentSlug] ?? quota.environmentSlug;
       await db.runAsync(
         `insert or replace into quota_snapshots
            (row_key, environment_id, provider, account_key, account_label, plan, metric,
             used_percent, remaining_percent, remaining_label, resets_at, status, error, fetched_at)
          values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          rowKey,
-          envId[quota.environmentSlug] ?? quota.environmentSlug,
+          quotaMirrorKey(environmentId, quota.provider, quota.accountKey, quota.metric, quota.status),
+          environmentId,
           quota.provider,
           quota.accountKey,
           quota.accountLabel,
