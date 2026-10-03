@@ -1024,10 +1024,12 @@ test("unchanged reconciliation pages neither evict caches nor refetch event scre
   const fx = mirrorFixture();
   let clock = Date.parse("2026-10-01T00:00:00Z");
   let late = ingestRow({ dedupKey: "late", occurredAtMs: 1 });
+  const orders: (string | undefined)[] = [];
   const api: LiveApi = {
     ping: async () => ping({ serverNowMs: clock }),
     quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
     events: async (since, signal, request) => {
+      if (!request?.cursor) orders.push(request?.order);
       return {
         slug: "win",
         sinceMs: since,
@@ -1056,6 +1058,7 @@ test("unchanged reconciliation pages neither evict caches nor refetch event scre
     late = { ...late, cost: "0.000999" };
     expect((await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock }))[0]!.pulledEvents).toBe(1);
     expect(published).toBe(1);
+    expect(orders).toEqual(["desc", "desc", "desc"]);
   } finally {
     unsubscribe();
     fx.native.close();

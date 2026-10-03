@@ -545,6 +545,9 @@ async function pullDirectUnlocked(
             try {
               page = await api.events(since, timeout.signal, {
                 limit: 1000,
+                // Newest rows land first, so recent usage is visible before an
+                // initial backfill or daily reconciliation reaches old history.
+                order: "desc",
                 ...(cursor ? { cursor } : {}),
                 // Incremental hashes describe the whole source snapshot, not
                 // proof that this phone downloaded its historical contents.
