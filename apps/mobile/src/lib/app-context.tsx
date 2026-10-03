@@ -102,30 +102,36 @@ export function AppProvider({ children }: { children: ReactNode }) {
     try {
       const statuses = await pullDirectFromMachines(db, options);
       if (epoch !== lifecycle.current) return;
-      const failed = statuses.filter((s) => s.state !== "live" || s.quotaError || s.metricsError).length;
-      const hasMore = statuses.some((s) => s.hasMore);
-      if (hasMore && NativeAppState.currentState === "active") {
+      if (statuses.some((s) => s.hasMore) && NativeAppState.currentState === "active") {
         if (backfillTimer.current) clearTimeout(backfillTimer.current);
         backfillTimer.current = setTimeout(() => {
           backfillTimer.current = null;
           void continueSync.current();
         }, 1000);
       }
-      setStatus((current) => ({
-        ...current,
-        lastSync: statuses.some((s) => s.state === "live") ? new Date() : current.lastSync,
-        syncError: failed ? `${failed} machine${failed === 1 ? "" : "s"} could not refresh fully. Showing cached data.` : null,
-        syncNotice: hasMore ? "Loading machine history in the background." : null,
-        liveMachines: options.environmentId
-          ? [...current.liveMachines.filter((s) => s.environmentId !== options.environmentId), ...statuses]
-          : statuses,
-      }));
+      setStatus((current) => {
+        // Targeted and continuation passes report a subset of machines.
+        const liveMachines = options.environmentId || options.continuation
+          ? [
+              ...current.liveMachines.filter((s) => !statuses.some((next) => next.environmentId === s.environmentId)),
+              ...statuses,
+            ]
+          : statuses;
+        const failed = liveMachines.filter((s) => s.state !== "live" || s.quotaError || s.metricsError).length;
+        return {
+          ...current,
+          lastSync: statuses.some((s) => s.state === "live") ? new Date() : current.lastSync,
+          syncError: failed ? `${failed} machine${failed === 1 ? "" : "s"} could not refresh fully. Showing cached data.` : null,
+          syncNotice: liveMachines.some((s) => s.hasMore) ? "Loading machine history in the background." : null,
+          liveMachines,
+        };
+      });
     } catch (err) {
       if (epoch === lifecycle.current) patchStatus({ syncError: (err as Error).message, syncNotice: null });
     }
   }, [db, mode, patchStatus]);
   const sync = useCallback(() => pull(), [pull]);
-  continueSync.current = sync;
+  continueSync.current = () => pull({ continuation: true });
 
   useEffect(() => {
     if (mode !== "direct") return;

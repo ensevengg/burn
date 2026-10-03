@@ -1064,3 +1064,91 @@ test("unchanged reconciliation pages neither evict caches nor refetch event scre
     fx.native.close();
   }
 });
+
+test("continuation passes resume pending machines only and reuse their quota and health results", async () => {
+  const fx = mirrorFixture();
+  const now = Date.now();
+  const calls = { quotas: 0, metrics: 0, eventsA: 0, eventsB: 0 };
+  const apiFor = (endpoint: string): LiveApi => {
+    const slug = endpoint === "http://a" ? "a" : "b";
+    return {
+      ping: async () => ping({ slug, displayName: slug }),
+      quotas: async () => {
+        calls.quotas++;
+        return { generatedAt: new Date(now).toISOString(), quotas: [{
+          provider: "codex", accountKey: "acct", accountLabel: null, plan: null, metric: "5h",
+          usedPercent: 10, remainingPercent: 90, remainingLabel: null, resetsAt: null,
+          creditStatus: null, spendControl: null, status: "ok", error: null, sourceOffsetMinutes: null,
+        }] };
+      },
+      metrics: async () => {
+        calls.metrics++;
+        return { generatedAt: new Date(now).toISOString(), metrics: [] };
+      },
+      events: async (since, signal, request) => {
+        if (slug === "a") calls.eventsA++;
+        else calls.eventsB++;
+        const more = slug === "a" && !request?.cursor;
+        return {
+          slug,
+          sinceMs: since,
+          generatedAt: new Date(now).toISOString(),
+          scanStartedAtMs: now,
+          snapshotId: `${slug}-snapshot`,
+          events: [ingestRow({ dedupKey: `${slug}-${request?.cursor ?? "first"}` })],
+          nextCursor: more ? "next" : null,
+        };
+      },
+    };
+  };
+  await addDirectMachine(fx.db, "http://a", { apiFor });
+  await addDirectMachine(fx.db, "http://b", { apiFor });
+  const first = await pullDirectFromMachines(fx.db, { apiFor, maxPages: 1 });
+  expect(first.find((s) => s.slug === "a")!.hasMore).toBe(true);
+  expect(calls).toEqual({ quotas: 2, metrics: 2, eventsA: 1, eventsB: 1 });
+  const resumed = await pullDirectFromMachines(fx.db, { apiFor, maxPages: 1, continuation: true });
+  expect(resumed.map((s) => s.slug)).toEqual(["a"]);
+  expect(resumed[0]).toMatchObject({ hasMore: false, pulledQuotas: 1, quotaError: null });
+  expect(calls).toEqual({ quotas: 2, metrics: 2, eventsA: 2, eventsB: 1 });
+  expect(await pullDirectFromMachines(fx.db, { apiFor, continuation: true })).toEqual([]);
+  fx.native.close();
+});
+
+test("a regular refresh queued behind a continuation still refreshes quotas", async () => {
+  const fx = mirrorFixture();
+  let quotaCalls = 0;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let resumed = false;
+  const api: LiveApi = {
+    ping: async () => ping(),
+    quotas: async () => {
+      quotaCalls++;
+      return { generatedAt: new Date().toISOString(), quotas: [] };
+    },
+    events: async (since, signal, request) => {
+      if (request?.cursor && !resumed) {
+        resumed = true;
+        await blocked;
+      }
+      return {
+        sinceMs: since,
+        generatedAt: new Date().toISOString(),
+        scanStartedAtMs: 1,
+        snapshotId: "snapshot",
+        events: [ingestRow({ dedupKey: request?.cursor ?? "first" })],
+        nextCursor: request?.cursor ? null : "next",
+      };
+    },
+  };
+  await addDirectMachine(fx.db, "http://win", { apiFor: () => api });
+  await pullDirectFromMachines(fx.db, { apiFor: () => api, maxPages: 1 });
+  expect(quotaCalls).toBe(1);
+  const continuation = pullDirectFromMachines(fx.db, { apiFor: () => api, continuation: true });
+  const refresh = pullDirectFromMachines(fx.db, { apiFor: () => api });
+  expect(refresh).not.toBe(continuation);
+  release();
+  await Promise.all([continuation, refresh]);
+  expect(quotaCalls).toBe(2);
+  fx.native.close();
+});

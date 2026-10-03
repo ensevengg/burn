@@ -52,6 +52,9 @@ export interface DirectPullOptions {
   environmentId?: string;
   eventsTimeoutMs?: number;
   maxPages?: number;
+  /** Resume persisted event backfills only. Quota and health results from the
+   * preceding pass are reported again instead of being re-requested. */
+  continuation?: boolean;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   /** Test seam. */
@@ -63,6 +66,19 @@ const inFlight = new WeakMap<SQLiteDatabase, Promise<DirectPullStatus[]>>();
 const inFlightController = new WeakMap<SQLiteDatabase, AbortController>();
 const inFlightOptions = new WeakMap<SQLiteDatabase, DirectPullOptions>();
 const cancellationEpochs = new WeakMap<SQLiteDatabase, number>();
+
+type ChannelResult = { count: number; error: string | null };
+const lastChannels = new WeakMap<
+  SQLiteDatabase,
+  Map<string, { quotas?: ChannelResult; metrics?: ChannelResult }>
+>();
+function channelMemo(db: SQLiteDatabase, environmentId: string) {
+  let machines = lastChannels.get(db);
+  if (!machines) lastChannels.set(db, (machines = new Map()));
+  let memo = machines.get(environmentId);
+  if (!memo) machines.set(environmentId, (memo = {}));
+  return memo;
+}
 
 export function directEnvId(slug: string): string {
   return `direct-${slug}`;
@@ -268,6 +284,7 @@ export async function removeDirectMachine(
     });
     invalidateEventCache(db);
   });
+  lastChannels.get(db)?.delete(environmentId);
   publishMirrorChange(db, "machines");
 }
 
@@ -287,9 +304,12 @@ export function pullDirectFromMachines(
   const existing = inFlight.get(db);
   if (existing) {
     const running = inFlightOptions.get(db)!;
+    // Any pass resumes pending backfills, but a continuation skips quota and
+    // health requests, so it cannot stand in for a regular refresh.
     if (
       running.environmentId === options.environmentId &&
-      Boolean(running.full) === Boolean(options.full)
+      Boolean(running.full) === Boolean(options.full) &&
+      (!running.continuation || options.continuation === true)
     )
       return existing;
     // A different target/full replay must run after the current pass. Even an
@@ -345,8 +365,19 @@ async function pullDirectUnlocked(
 ): Promise<DirectPullStatus[]> {
   const now = options.now ?? Date.now;
   assertActive();
+  const pending = options.continuation
+    ? new Set(
+        (
+          await db.getAllAsync<{ key: string }>(
+            "select key from kv where key glob 'direct_backfill_*'",
+          )
+        ).map((row) => row.key.slice("direct_backfill_".length)),
+      )
+    : null;
   const machines = (await listDirectMachines(db)).filter(
-    (machine) => !options.environmentId || machine.id === options.environmentId,
+    (machine) =>
+      (!options.environmentId || machine.id === options.environmentId) &&
+      (pending === null || pending.has(machine.id)),
   );
   assertActive();
   if (machines.length === 0) return [];
@@ -422,7 +453,11 @@ async function pullDirectUnlocked(
           });
         });
         publishMirrorChange(db, "machines");
-        const quotaTask = (async () => {
+        const memo = channelMemo(db, machine.id);
+        const quotaTask: Promise<ChannelResult> =
+          options.continuation && memo.quotas
+            ? Promise.resolve(memo.quotas)
+            : (async (): Promise<ChannelResult> => {
           const timeout = withTimeout(
             probeSignal,
             options.quotaTimeoutMs ?? 45_000,
@@ -452,8 +487,11 @@ async function pullDirectUnlocked(
           } finally {
             timeout.cancel();
           }
-        })();
-        const metricsTask = (async () => {
+        })().then((result) => (memo.quotas = result));
+        const metricsTask: Promise<ChannelResult> =
+          options.continuation && memo.metrics
+            ? Promise.resolve(memo.metrics)
+            : (async (): Promise<ChannelResult> => {
           if (!api.metrics || ping.osKind === "wsl") return { count: 0, error: null };
           const timeout = withTimeout(probeSignal, options.metricsTimeoutMs ?? 10_000);
           try {
@@ -475,7 +513,7 @@ async function pullDirectUnlocked(
             if (err instanceof LiveError && err.status === 404) return { count: 0, error: null };
             return { count: 0, error: (err as Error).message };
           } finally { timeout.cancel(); }
-        })();
+        })().then((result) => (memo.metrics = result));
         // Channels publish independently, including health when event scans fail.
         const eventTask = (async () => {
           const stored = options.full
