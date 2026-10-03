@@ -69,6 +69,8 @@ export interface LivePageRequest {
   cursor?: string;
   knownHash?: string;
   force?: boolean;
+  /** First-page order; continuation cursors carry it. Older reporters ignore it. */
+  order?: "asc" | "desc";
 }
 
 export interface LiveApi {
@@ -201,6 +203,7 @@ export function httpLiveApiFor(
       if (sinceMs !== null) params.set("since", String(Math.floor(sinceMs)));
       if (page.limit !== undefined) params.set("limit", String(page.limit));
       if (page.cursor) params.set("cursor", page.cursor);
+      else if (page.order) params.set("order", page.order);
       if (page.force) params.set("force", "1");
       return call(
         `/live/events${params.size ? `?${params}` : ""}`,
