@@ -59,17 +59,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setStatus((current) => ({ ...current, ...patch }));
   }, []);
 
-  const stop = useCallback(() => {
+  /** Invalidate in-flight pulls and timers; probe results stay visible. */
+  const cancelActive = useCallback(() => {
     lifecycle.current++;
     refreshCount.current = 0;
     if (backfillTimer.current) clearTimeout(backfillTimer.current);
     backfillTimer.current = null;
-    patchStatus({ refreshingMachines: false, checkingMachines: false, liveMachines: [] });
+    patchStatus({ refreshingMachines: false, checkingMachines: false });
     if (db) {
       advanceSyncGeneration(db);
       cancelDirectPull(db);
     }
   }, [db, patchStatus]);
+  const stop = useCallback(() => {
+    cancelActive();
+    patchStatus({ liveMachines: [] });
+  }, [cancelActive, patchStatus]);
 
   useEffect(() => {
     let active = true;
@@ -206,10 +211,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
       fullSync: (environmentId) => refresh(environmentId, true),
       async removeMachine(environmentId) {
         if (!db) return;
-        stop();
+        // In-flight pulls must not write the removed machine back. Other
+        // machines keep their status and resume pending backfills afterwards.
+        cancelActive();
+        setStatus((current) => ({
+          ...current,
+          liveMachines: current.liveMachines.filter((s) => s.environmentId !== environmentId),
+        }));
         if (mode === "direct") await removeDirectMachine(db, environmentId);
         else await removeEnvironmentLocal(db, environmentId);
         invalidate();
+        if (mode === "direct") void pull({ continuation: true });
       },
       async setReportingTimezone(tz) {
         if (!db) return;
@@ -218,7 +230,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         invalidate();
       },
     };
-  }, [db, mode, reportingTimezone, sync, stop, pull, refresh, queryClient, patchStatus]);
+  }, [db, mode, reportingTimezone, sync, stop, cancelActive, pull, refresh, queryClient, patchStatus]);
 
   return <AppContext.Provider value={value}>
     <SyncStatusContext.Provider value={status}>{children}</SyncStatusContext.Provider>
