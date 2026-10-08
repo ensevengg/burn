@@ -1,11 +1,10 @@
 import type { EnvironmentRow } from "../data/repository";
 import { formatRelative } from "./format";
 import type { DirectPullStatus } from "./direct";
-import type { LivePullStatus } from "./live";
 
 export const REPORTER_STALE_AFTER_MS = 30 * 60_000;
 
-export type ProbeStatus = LivePullStatus | DirectPullStatus | undefined;
+export type ProbeStatus = DirectPullStatus | undefined;
 
 /** One actionable reporter problem, ordered from explicit failure to staleness. */
 export function reporterIssue(
@@ -16,9 +15,10 @@ export function reporterIssue(
   if (machine.lastError !== null) return machine.lastError;
   if (machine.directInitialSyncComplete === false) return "Initial history sync is incomplete.";
   if (probe !== undefined && probe.state !== "live") return probe.error ?? `Live probe ${probe.state}.`;
-  if (probe !== undefined && "quotaError" in probe && probe.quotaError !== null) {
+  if (probe !== undefined && "quotaError" in probe && probe.quotaError != null) {
     return `Quota refresh failed: ${probe.quotaError}`;
   }
+  if (probe?.metricsError) return `Health refresh failed: ${probe.metricsError}`;
   if (machine.lastHeartbeatAt === null) return "No reporter heartbeat received yet.";
   const heartbeatAt = Date.parse(machine.lastHeartbeatAt);
   if (!Number.isNaN(heartbeatAt) && now - heartbeatAt > REPORTER_STALE_AFTER_MS) {

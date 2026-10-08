@@ -7,7 +7,11 @@
 import { spawn } from "node:child_process";
 import { platform } from "node:os";
 import { z } from "zod";
-import { quotaAccountKey, quotaMetricLabel, type IngestQuotaInput } from "@burn/sync-api";
+import {
+  quotaAccountKey,
+  quotaMetricLabel,
+  type MachineQuotaInput,
+} from "@burn/sync-api";
 
 export class TokscaleError extends Error {
   constructor(message: string) {
@@ -20,7 +24,11 @@ export class TokscaleError extends Error {
 export const usageOutputSchema = z.object({
   provider: z.string(),
   account: z
-    .object({ id: z.string(), label: z.string().nullable().optional(), is_active: z.boolean().default(false) })
+    .object({
+      id: z.string(),
+      label: z.string().nullable().optional(),
+      is_active: z.boolean().default(false),
+    })
     .nullable()
     .optional(),
   credential_source: z.string().nullable().optional(),
@@ -54,12 +62,14 @@ export function currentUtcOffsetMinutes(): number {
 
 /**
  * tokscale usage rows → scoped ingest snapshots (D6: account-level; identical
- * from any machine sharing the subscription). Shared by push, `usage`, and
+ * from any machine sharing the subscription). Shared by `usage` and
  * the live server's /live/quotas.
  */
-export function tokscaleQuotaInputs(outputs: TokscaleUsageReport): IngestQuotaInput[] {
+export function tokscaleQuotaInputs(
+  outputs: TokscaleUsageReport,
+): MachineQuotaInput[] {
   const offset = currentUtcOffsetMinutes();
-  const inputs: IngestQuotaInput[] = [];
+  const inputs: MachineQuotaInput[] = [];
   for (const out of outputs) {
     const accountKey = quotaAccountKey(out.account?.id);
     for (const metric of out.metrics) {
@@ -96,9 +106,10 @@ export interface Runner {
   prefix: string[];
 }
 
-let cachedRunner: Runner | null = null;
 const cachedVersions = new Map<string, string>();
 const versionProbes = new Map<string, Promise<string | null>>();
+const cachedRunners = new Map<string, Runner>();
+const runnerInFlight = new Map<string, Promise<Runner>>();
 
 export function spawnRunner(
   runner: Runner,
@@ -114,13 +125,19 @@ export function spawnRunner(
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new TokscaleError(`tokscale ${args.join(" ")} timed out after ${timeoutMs}ms`));
+      reject(
+        new TokscaleError(
+          `tokscale ${args.join(" ")} timed out after ${timeoutMs}ms`,
+        ),
+      );
     }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
     child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
     child.on("error", (err) => {
       clearTimeout(timer);
-      reject(new TokscaleError(`failed to launch ${runner.command}: ${err.message}`));
+      reject(
+        new TokscaleError(`failed to launch ${runner.command}: ${err.message}`),
+      );
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -136,7 +153,15 @@ export function spawnRunner(
 }
 
 async function resolveRunner(pin: string): Promise<Runner> {
-  if (cachedRunner !== null) return cachedRunner;
+  const cached = cachedRunners.get(pin);
+  if (cached) return cached;
+  const pending = runnerInFlight.get(pin);
+  if (pending) return pending;
+  const scan = findRunner(pin).finally(() => runnerInFlight.delete(pin));
+  runnerInFlight.set(pin, scan);
+  return scan;
+}
+async function findRunner(pin: string): Promise<Runner> {
   const candidates: Runner[] = [
     { command: "bun", prefix: ["x", `tokscale@${pin}`] },
     { command: npxBin, prefix: ["-y", `tokscale@${pin}`] },
@@ -144,8 +169,9 @@ async function resolveRunner(pin: string): Promise<Runner> {
   ];
   for (const candidate of candidates) {
     try {
-      await spawnRunner(candidate, ["--version"], 60_000);
-      cachedRunner = candidate;
+      const { stdout } = await spawnRunner(candidate, ["--version"], 60_000);
+      if (stdout.match(/\b(\d+\.\d+\.\d+)\b/)?.[1] !== pin) continue;
+      cachedRunners.set(pin, candidate);
       return candidate;
     } catch {
       /* probe the next strategy */
@@ -184,7 +210,9 @@ function extractJsonArray(text: string): unknown {
   const start = text.indexOf("[");
   const end = text.lastIndexOf("]");
   if (start === -1 || end === -1 || end < start) {
-    throw new TokscaleError(`tokscale output contained no JSON array: ${text.slice(0, 200)}`);
+    throw new TokscaleError(
+      `tokscale output contained no JSON array: ${text.slice(0, 200)}`,
+    );
   }
   return JSON.parse(text.slice(start, end + 1));
 }
@@ -194,14 +222,16 @@ export async function fetchUsage(pin: string): Promise<TokscaleUsageReport> {
   const { stdout } = await spawnRunner(runner, ["usage", "--json"], 120_000);
   const parsed = usageReportSchema.safeParse(extractJsonArray(stdout));
   if (!parsed.success) {
-    // D2: fail loudly on schema drift — never push unvalidated payloads.
+    // D2: fail loudly on schema drift — never serve unvalidated payloads.
     const issue = parsed.error.issues[0];
     if (issue !== undefined) {
       throw new TokscaleError(
         `tokscale usage --json schema drift at ${issue.path.join(".")}: ${issue.message} (pinned ${pin})`,
       );
     }
-    throw new TokscaleError(`tokscale usage --json failed schema validation (pinned ${pin})`);
+    throw new TokscaleError(
+      `tokscale usage --json failed schema validation (pinned ${pin})`,
+    );
   }
   return parsed.data;
 }

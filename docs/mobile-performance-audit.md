@@ -1,5 +1,7 @@
 # Mobile performance and quota freshness audit
 
+> Historical audit. The cloud path described here was removed by [ADR 0003](adr/0003-tailscale-only-backend.md); current transfer behavior is in [connection-transfer-fixes.md](connection-transfer-fixes.md).
+
 Date: 2026-09-06. Scope: original findings plus the implemented follow-up below.
 
 ## Reproduction and limits

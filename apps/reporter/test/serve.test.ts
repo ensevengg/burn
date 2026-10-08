@@ -1,19 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { BurnConfig } from "../src/config.js";
 import { createLiveFetch, type LiveDeps } from "../src/serve.js";
-import { SystemMetricHistory } from "../src/system-metrics.js";
 
 const CONFIG: BurnConfig = {
-  supabaseUrl: "https://example.supabase.co",
-  publishableKey: "sb_publishable_test",
-  ingestToken: "x".repeat(32),
   environmentSlug: "lenovo-windows",
   environmentName: "Lenovo Windows",
   hostGroup: null,
   osKind: "windows",
   reportingTimezone: "Asia/Kolkata",
-  intervalMinutes: 10,
-  syncPollSeconds: 10,
   tokscalePin: "4.15.1",
 };
 
@@ -29,7 +23,13 @@ const EXPORTER_ROW_WITH_KEY = {
   agent: null,
   timestamp: 1725599000000,
   date: "2024-09-06",
-  tokens: { input: 100, output: 10, cache_read: 5, cache_write: 0, reasoning: 0 },
+  tokens: {
+    input: 100,
+    output: 10,
+    cache_read: 5,
+    cache_write: 0,
+    reasoning: 0,
+  },
   cost: 0.000123,
   cost_source: "provider_reported",
   duration_ms: 900,
@@ -47,23 +47,26 @@ const EXPORTER_ROW_WITHOUT_KEY = {
   dedup_key: null,
 };
 
-const CURSOR = { lastRevision: 5, lastPushAt: "2026-09-07T10:00:00.000Z" };
-const SINCE = Date.parse(CURSOR.lastPushAt) - 60 * 60_000;
-
 function deps(overrides: Partial<LiveDeps> = {}): LiveDeps {
   return {
     config: CONFIG,
     now: () => Date.parse("2026-09-07T10:05:00.000Z"),
-    cursor: () => CURSOR,
     exporterCheck: async () => "4.15.1",
-    exporterFingerprint: async () => null,
-    exporterScan: async () => `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n${JSON.stringify(EXPORTER_ROW_WITHOUT_KEY)}\n`,
+    exporterScan: async () =>
+      `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n${JSON.stringify(EXPORTER_ROW_WITHOUT_KEY)}\n`,
     usage: async () => [
       {
         provider: "codex",
         account: { id: "acc-1", label: "Personal", is_active: true },
         plan: "chatgpt_plus",
-        metrics: [{ label: "5h", used_percent: 12, remaining_percent: 88, remaining_label: "3h left" }],
+        metrics: [
+          {
+            label: "5h",
+            used_percent: 12,
+            remaining_percent: 88,
+            remaining_label: "3h left",
+          },
+        ],
       },
     ],
     ...overrides,
@@ -71,8 +74,10 @@ function deps(overrides: Partial<LiveDeps> = {}): LiveDeps {
 }
 
 describe("live server", () => {
-  test("/ping advertises identity, contract version, and the cursor-minus-overlap window", async () => {
-    const res = await createLiveFetch(deps())(new Request("http://machine/ping"));
+  test("/ping advertises identity, contract version, and full history availability", async () => {
+    const res = await createLiveFetch(deps())(
+      new Request("http://machine/ping"),
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.protocol).toBe(1);
@@ -81,15 +86,20 @@ describe("live server", () => {
     expect(body.osKind).toBe("windows");
     expect(body.reportingTimezone).toBe("Asia/Kolkata");
     expect(body.exportSchema).toBe(1);
-    expect(body.sinceMs).toBe(SINCE);
+    expect(body.sinceMs).toBe(0);
     expect(body.serverNowMs).toBe(Date.parse("2026-09-07T10:05:00.000Z"));
   });
 
-  test("/live/events serves ingest-shaped rows with server-matchable identities", async () => {
-    const res = await createLiveFetch(deps())(new Request("http://machine/live/events"));
+  test("/live/events serves ingest-shaped rows with stable machine identities", async () => {
+    const res = await createLiveFetch(deps())(
+      new Request("http://machine/live/events"),
+    );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { sinceMs: number; events: Record<string, unknown>[] };
-    expect(body.sinceMs).toBe(SINCE);
+    const body = (await res.json()) as {
+      sinceMs: number;
+      events: Record<string, unknown>[];
+    };
+    expect(body.sinceMs).toBe(0);
     expect(body.events).toHaveLength(2);
     const [first, second] = body.events;
     // Decimal-string cost (D8), pinned parser version, identity fields.
@@ -105,124 +115,75 @@ describe("live server", () => {
     expect(second!.costIsComplete).toBe(false);
   });
 
-  test("/live/events coalesces callers requesting the same scan", async () => {
-    let scans = 0;
+  test("/live/events shares an in-flight scan and reuses its successful snapshot", async () => {
     let release!: () => void;
     const gate = new Promise<string>((resolve) => {
       release = () => resolve(`${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n`);
     });
-    const fetcher = createLiveFetch(
-      deps({
-        exporterScan: () => {
-          scans += 1;
-          return gate;
-        },
-      }),
-    );
+    const fetcher = createLiveFetch(deps({ exporterScan: () => gate }));
     const first = fetcher(new Request("http://machine/live/events"));
     const second = fetcher(new Request("http://machine/live/events"));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(scans).toBe(1);
     release();
     expect((await first).status).toBe(200);
     expect((await second).status).toBe(200);
-  });
-
-  test("/live/events reuses a full snapshot while source fingerprints match", async () => {
-    let scans = 0;
-    let fingerprint = "a".repeat(64);
-    const fetcher = createLiveFetch(
-      deps({
-        exporterFingerprint: async () => fingerprint,
-        exporterScan: async (sinceMs) => {
-          scans += 1;
-          expect(sinceMs).toBe(0);
-          return `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n${JSON.stringify(EXPORTER_ROW_WITHOUT_KEY)}\n`;
-        },
-      }),
-    );
-
-    const first = await fetcher(new Request("http://machine/live/events?since=0"));
-    expect(((await first.json()) as { events: unknown[] }).events).toHaveLength(2);
-    const second = await fetcher(
-      new Request(`http://machine/live/events?since=${EXPORTER_ROW_WITHOUT_KEY.timestamp}`),
-    );
-    expect(((await second.json()) as { events: unknown[] }).events).toHaveLength(1);
-    expect(scans).toBe(1);
-    const unchanged = await fetcher(
-      new Request(`http://machine/live/events?since=0&generation=${"a".repeat(64)}`),
-    );
-    expect(((await unchanged.json()) as { events: unknown[] }).events).toHaveLength(0);
-    expect(scans).toBe(1);
-
-    fingerprint = "b".repeat(64);
-    expect((await fetcher(new Request("http://machine/live/events?since=0"))).status).toBe(200);
-    expect(scans).toBe(2);
-  });
-
-  test("/live/events compresses large responses when the phone accepts gzip", async () => {
-    const res = await createLiveFetch(deps())(
-      new Request("http://machine/live/events", { headers: { "accept-encoding": "gzip" } }),
-    );
-    expect(res.headers.get("content-encoding")).toBe("gzip");
-    const decoded = Bun.gunzipSync(new Uint8Array(await res.arrayBuffer()));
-    const body = JSON.parse(new TextDecoder().decode(decoded)) as { events: unknown[] };
-    expect(body.events).toHaveLength(2);
+    const after = await fetcher(new Request("http://machine/live/events"));
+    expect(after.status).toBe(200);
   });
 
   test("/live/events reports a missing exporter as 503, a pin mismatch as 500", async () => {
-    const missing = await createLiveFetch(deps({ exporterCheck: async () => null }))(
-      new Request("http://machine/live/events"),
-    );
+    const missing = await createLiveFetch(
+      deps({ exporterCheck: async () => null }),
+    )(new Request("http://machine/live/events"));
     expect(missing.status).toBe(503);
-    const mismatched = await createLiveFetch(deps({ exporterCheck: async () => "0.0.1" }))(
-      new Request("http://machine/live/events"),
-    );
+    const mismatched = await createLiveFetch(
+      deps({ exporterCheck: async () => "0.0.1" }),
+    )(new Request("http://machine/live/events"));
     expect(mismatched.status).toBe(500);
-    expect(((await mismatched.json()) as { error: string }).error).toContain("pin");
-  });
-
-  test("/live/events still enforces the exporter pin for an unchanged generation", async () => {
-    const fingerprint = "a".repeat(64);
-    const res = await createLiveFetch(
-      deps({
-        exporterCheck: async () => "0.0.1",
-        exporterFingerprint: async () => fingerprint,
-      }),
-    )(new Request(`http://machine/live/events?generation=${fingerprint}`));
-
-    expect(res.status).toBe(500);
-    expect(((await res.json()) as { error: string }).error).toContain("pin");
+    expect(((await mismatched.json()) as { error: string }).error).toContain(
+      "pin",
+    );
   });
 
   test("/live/events fails loudly on schema drift (D2), never serves unvalidated rows", async () => {
-    const res = await createLiveFetch(deps({ exporterScan: async () => '{"client": "x"}\n' }))(
-      new Request("http://machine/live/events"),
-    );
+    const res = await createLiveFetch(
+      deps({ exporterScan: async () => '{"client": "x"}\n' }),
+    )(new Request("http://machine/live/events"));
     expect(res.status).toBe(500);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("schema drift");
   });
 
-  test("/live/events honors a ?since= cursor (direct mode) over the machine's own", async () => {
+  test("/live/events honors a ?since= cursor (direct mode) independently per phone", async () => {
     let scanned: number | null = null;
     const res = await createLiveFetch(
-      deps({ exporterScan: async (sinceMs) => { scanned = sinceMs; return `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n`; } }),
+      deps({
+        exporterScan: async (sinceMs) => {
+          scanned = sinceMs;
+          return `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n`;
+        },
+      }),
     )(new Request("http://machine/live/events?since=1725590000000"));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { sinceMs: number };
     expect(body.sinceMs).toBe(1725590000000);
-    expect(scanned!).toBe(1725590000000);
-    // Invalid values fall back to the machine cursor window.
+    expect(scanned!).toBe(0);
+    // Invalid cursors fail explicitly instead of unexpectedly widening the pull.
     const fallback = await createLiveFetch(
-      deps({ exporterScan: async (sinceMs) => { scanned = sinceMs; return `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n`; } }),
+      deps({
+        exporterScan: async (sinceMs) => {
+          scanned = sinceMs;
+          return `${JSON.stringify(EXPORTER_ROW_WITH_KEY)}\n`;
+        },
+      }),
     )(new Request("http://machine/live/events?since=potato"));
-    expect(((await fallback.json()) as { sinceMs: number }).sinceMs).toBe(SINCE);
-    expect(scanned!).toBe(SINCE);
+    expect(fallback.status).toBe(400);
+    expect(scanned!).toBe(0);
   });
 
   test("/live/quotas maps tokscale usage rows into ingest snapshots", async () => {
-    const res = await createLiveFetch(deps())(new Request("http://machine/live/quotas"));
+    const res = await createLiveFetch(deps())(
+      new Request("http://machine/live/quotas"),
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { quotas: Record<string, unknown>[] };
     expect(body.quotas).toHaveLength(1);
@@ -236,46 +197,286 @@ describe("live server", () => {
     });
   });
 
-  test("/live/quotas reuses a recent vendor response", async () => {
-    let now = Date.parse("2026-09-07T10:05:00.000Z");
-    let calls = 0;
-    const base = deps();
-    const fetcher = createLiveFetch({
-      ...base,
-      now: () => now,
-      usage: async (pin) => {
-        calls += 1;
-        return base.usage!(pin);
-      },
-    });
-
-    expect((await fetcher(new Request("http://machine/live/quotas"))).status).toBe(200);
-    now += 60_000;
-    expect((await fetcher(new Request("http://machine/live/quotas"))).status).toBe(200);
-    expect(calls).toBe(1);
-    now += 5 * 60_000;
-    expect((await fetcher(new Request("http://machine/live/quotas"))).status).toBe(200);
-    expect(calls).toBe(2);
-  });
-
-  test("/live/metrics samples machine vitals and filters its 24h ring", async () => {
-    const metricHistory = new SystemMetricHistory(async () => ({
-      capturedAtMs: Date.parse("2026-09-07T10:04:00.000Z"),
-      cpuLoadPct: 12, cpuTempC: 60, ramUsedPct: 44, ramTempC: 41,
-      gpuUtilPct: 72, gpuTempC: 68,
-    }), () => Date.parse("2026-09-07T10:05:00.000Z"));
-    const res = await createLiveFetch(deps({ metricHistory }))(
-      new Request("http://machine/live/metrics?since=0"),
-    );
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { metrics: { ramTempC: number }[] };
-    expect(body.metrics).toHaveLength(1);
-    expect(body.metrics[0]?.ramTempC).toBe(41);
-  });
-
   test("routing: unknown path 404, non-GET 405", async () => {
     const fetcher = createLiveFetch(deps());
-    expect((await fetcher(new Request("http://machine/nope"))).status).toBe(404);
-    expect((await fetcher(new Request("http://machine/ping", { method: "POST" }))).status).toBe(405);
+    expect((await fetcher(new Request("http://machine/nope"))).status).toBe(
+      404,
+    );
+    expect(
+      (await fetcher(new Request("http://machine/ping", { method: "POST" })))
+        .status,
+    ).toBe(405);
   });
+});
+
+test("snapshot pages, cache TTL, conditional GETs and quota TTL work over real HTTP", async () => {
+  const { startLiveServer } = await import("../src/serve");
+  const { httpLiveApiFor } = await import("@burn/sync-api");
+  let clock = Date.now();
+  let scans = 0;
+  let checks = 0;
+  let quotaCalls = 0;
+  const rows = Array.from({ length: 2501 }, (_, i) => ({
+    ...EXPORTER_ROW_WITH_KEY,
+    timestamp: EXPORTER_ROW_WITH_KEY.timestamp + i,
+    dedup_key: `row-${i}`,
+    session_title: "Project · résumé 🔥 ".repeat(8),
+  }));
+  const server = await startLiveServer(CONFIG, {
+    bind: "127.0.0.1",
+    port: 0,
+    deps: deps({
+      now: () => clock,
+      exporterCheck: async () => {
+        checks++;
+        return CONFIG.tokscalePin;
+      },
+      exporterScan: async () => {
+        scans++;
+        return rows.map((r) => JSON.stringify(r)).join("\n");
+      },
+      usage: async () => {
+        quotaCalls++;
+        return [];
+      },
+    }),
+  });
+  try {
+    const api = httpLiveApiFor(server.url);
+    const [first, twin] = await Promise.all([
+      api.events(0, undefined, { limit: 1000 }),
+      api.events(0, undefined, { limit: 1000 }),
+    ]);
+    expect(first.events.length).toBe(1000);
+    expect(twin.snapshotId).toBe(first.snapshotId);
+    expect(scans).toBe(1);
+    expect(checks).toBe(1);
+    const second = await api.events(0, undefined, {
+      limit: 1000,
+      cursor: first.nextCursor!,
+    });
+    const third = await api.events(0, undefined, {
+      limit: 1000,
+      cursor: second.nextCursor!,
+    });
+    expect(third.events.length).toBe(501);
+    expect(third.nextCursor).toBeNull();
+    expect(
+      new Set(
+        [...first.events, ...second.events, ...third.events].map(
+          (e) => e.dedupKey,
+        ),
+      ).size,
+    ).toBe(2501);
+    expect(
+      (
+        await api.events(0, undefined, {
+          limit: 1000,
+          knownHash: first.contentHash!,
+        })
+      ).notModified,
+    ).toBe(true);
+    const compressed = await fetch(
+      `${server.url}/live/events?since=0&limit=1000`,
+      { headers: { "accept-encoding": "gzip" } },
+    );
+    expect(compressed.headers.get("content-encoding")).toBe("gzip");
+    const plain = await fetch(`${server.url}/live/events?since=0&limit=1000`, {
+      headers: { "accept-encoding": "gzip;q=0" },
+    });
+    expect(plain.headers.get("content-encoding")).toBeNull();
+    await Promise.all([api.quotas(), api.quotas()]);
+    expect(quotaCalls).toBe(1);
+    clock += 31_000;
+    await api.events(0, undefined, { limit: 1000 });
+    expect(scans).toBe(2);
+    expect(checks).toBe(1);
+    await api.quotas();
+    expect(quotaCalls).toBe(1);
+    clock += 15_000;
+    await api.quotas();
+    expect(quotaCalls).toBe(2);
+    clock += 301_000;
+    await expect(
+      api.events(0, undefined, { limit: 1000, cursor: second.nextCursor! }),
+    ).rejects.toMatchObject({ status: 410 });
+    await api.events(0, undefined, { limit: 1000 });
+    expect(checks).toBe(2);
+  } finally {
+    server.stop();
+  }
+});
+
+test("newest-first pages cover the window once and their cursors keep that order", async () => {
+  const { startLiveServer } = await import("../src/serve");
+  const { httpLiveApiFor } = await import("@burn/sync-api");
+  const rows = Array.from({ length: 2501 }, (_, i) => ({
+    ...EXPORTER_ROW_WITH_KEY,
+    timestamp: EXPORTER_ROW_WITH_KEY.timestamp + i,
+    dedup_key: `row-${i}`,
+  }));
+  const server = await startLiveServer(CONFIG, {
+    bind: "127.0.0.1",
+    port: 0,
+    deps: deps({
+      now: Date.now,
+      exporterScan: async () => rows.map((r) => JSON.stringify(r)).join("\n"),
+    }),
+  });
+  try {
+    const api = httpLiveApiFor(server.url);
+    const first = await api.events(0, undefined, { limit: 1000, order: "desc" });
+    expect(first.events[0]!.dedupKey).toBe("row-2500");
+    expect(first.events[999]!.dedupKey).toBe("row-1501");
+    expect(first.nextCursor).toEndWith(":desc");
+    // The cursor, not a conflicting order parameter, decides continuation.
+    const second = (await (
+      await fetch(
+        `${server.url}/live/events?since=0&limit=1000&order=asc&cursor=${first.nextCursor}`,
+      )
+    ).json()) as { events: { dedupKey: string }[]; nextCursor: string };
+    expect(second.events[0]!.dedupKey).toBe("row-1500");
+    const third = await api.events(0, undefined, {
+      limit: 1000,
+      cursor: second.nextCursor,
+    });
+    expect(third.events.map((e) => e.dedupKey).at(-1)).toBe("row-0");
+    expect(third.nextCursor).toBeNull();
+    expect(
+      new Set(
+        [...first.events, ...second.events, ...third.events].map((e) => e.dedupKey),
+      ).size,
+    ).toBe(2501);
+    const tail = await api.events(rows[2000]!.timestamp, undefined, {
+      limit: 1000,
+      order: "desc",
+    });
+    expect(tail.events.map((e) => e.dedupKey)).toEqual(
+      rows.slice(2000).reverse().map((r) => r.dedup_key),
+    );
+    expect(tail.nextCursor).toBeNull();
+    expect(
+      (await fetch(`${server.url}/live/events?since=0&limit=10&order=newest`)).status,
+    ).toBe(400);
+  } finally {
+    server.stop();
+  }
+});
+
+test("a cold scan longer than Bun's default idle deadline reaches the HTTP client", async () => {
+  const { startLiveServer } = await import("../src/serve");
+  const { httpLiveApiFor } = await import("@burn/sync-api");
+  const server = await startLiveServer(CONFIG, {
+    bind: "127.0.0.1",
+    port: 0,
+    deps: deps({
+      now: Date.now,
+      exporterScan: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 12_000));
+        return JSON.stringify(EXPORTER_ROW_WITH_KEY);
+      },
+    }),
+  });
+  try {
+    expect(
+      (await httpLiveApiFor(server.url).events(0, undefined, { limit: 1000 }))
+        .events.length,
+    ).toBe(1);
+  } finally {
+    server.stop();
+  }
+}, 20_000);
+
+test("encoded page cache bypasses repeated row serialization and preserves negotiated encoding", async () => {
+  const { spyOn } = await import("bun:test");
+  const handler = createLiveFetch(
+    deps({
+      exporterScan: async () =>
+        Array.from({ length: 1000 }, (_, i) =>
+          JSON.stringify({
+            ...EXPORTER_ROW_WITH_KEY,
+            dedup_key: `cached-${i}`,
+          }),
+        ).join("\n"),
+    }),
+  );
+  const request = (encoding: string) =>
+    new Request("http://machine/live/events?since=0&limit=1000", {
+      headers: { "accept-encoding": encoding },
+    });
+  await (await handler(request("identity"))).text();
+  const spy = spyOn(JSON, "stringify");
+  try {
+    const cached = await handler(request("gzip"));
+    expect(spy).not.toHaveBeenCalled();
+    expect(cached.headers.get("content-encoding")).toBe("gzip");
+    const plain = await handler(request("gzip;q=0"));
+    expect(plain.headers.get("content-encoding")).toBeNull();
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test("health serves source samples even when usage scanning fails; WSL does not invent physical vitals", async () => {
+  const { SystemMetricHistory } = await import("../src/system-metrics");
+  const { parseLiveMetricsPage } = await import("@burn/sync-api");
+  const sample = { capturedAtMs: 1000, cpuLoadPct: 1, cpuTempC: null, ramUsedPct: 50,
+    ramTempC: null, gpuUtilPct: null, gpuTempC: null };
+  let calls = 0;
+  const metrics = new SystemMetricHistory(async () => { calls++; return sample; }, () => 1000);
+  const fetch = createLiveFetch(deps({ metrics, exporterScan: async () => { throw new Error("scan failed"); } }));
+  const page = parseLiveMetricsPage(await (await fetch(new Request("http://machine/live/metrics?since=0"))).json());
+  expect(page.metrics).toEqual([sample]);
+  expect((await fetch(new Request("http://machine/live/metrics?since=-1"))).status).toBe(400);
+  const wsl = createLiveFetch(deps({ config: { ...CONFIG, osKind: "wsl" }, metrics }));
+  expect(parseLiveMetricsPage(await (await wsl(new Request("http://machine/live/metrics"))).json()).metrics).toEqual([]);
+  expect(calls).toBe(1);
+});
+
+test("source fingerprints retain main's warm cache across TTLs without changing pageable snapshots", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  let time = 1000;
+  let scans = 0;
+  let fingerprint = "same";
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    now: () => time, check: async () => CONFIG.tokscalePin,
+    fingerprint: async () => fingerprint,
+    scan: async () => { scans++; return JSON.stringify(EXPORTER_ROW_WITH_KEY); },
+  });
+  const original = await snapshots.get();
+  time += 31_000;
+  const [first, second] = await Promise.all([snapshots.get(), snapshots.get()]);
+  expect(scans).toBe(1);
+  expect(first).toBe(original);
+  expect(second).toBe(original);
+  expect(snapshots.pageSnapshot(original.id)).toBe(original);
+  await snapshots.get(true);
+  expect(scans).toBe(2);
+  fingerprint = "changed";
+  time += 31_000;
+  await snapshots.get();
+  expect(scans).toBe(3);
+});
+
+test("a missing source fingerprint keeps scanning and a clock rollback renews scan boundaries", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  let time = 100_000;
+  let scans = 0;
+  let fingerprint: string | null = null;
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    now: () => time, check: async () => CONFIG.tokscalePin,
+    fingerprint: async () => fingerprint,
+    scan: async () => { scans++; return JSON.stringify(EXPORTER_ROW_WITH_KEY); },
+  });
+  await snapshots.get();
+  time += 31_000;
+  await snapshots.get();
+  expect(scans).toBe(2);
+  fingerprint = "stable";
+  time += 31_000;
+  await snapshots.get();
+  time = 1000;
+  const replay = await snapshots.get();
+  expect(scans).toBe(4);
+  expect(replay.startedAtMs).toBe(1000);
 });

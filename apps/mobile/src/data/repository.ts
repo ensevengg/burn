@@ -45,7 +45,6 @@ export interface EnvironmentRow {
   lastHeartbeatAt: string | null;
   lastSuccessAt: string | null;
   lastError: string | null;
-  latestRevision: number;
   directInitialSyncComplete: boolean | null;
 }
 
@@ -327,7 +326,7 @@ export function computeGranularityMax(
 
 /**
  * Cache savings: what the cache-read discount saved vs paying uncached input
- * prices. Null when no price reference is loaded (cloud pricing payload is a
+ * prices. Null when no price reference is loaded (machine pricing payload is a
  * spec'd follow-up — AGENTS.md).
  */
 export function computeCacheSavings(
@@ -404,7 +403,7 @@ export async function queryGranularityMax(
   return Math.max(0, ...[...buckets.values()].map((b) => (metric === "cost" ? b.cost : b.tokens)));
 }
 
-/** Local mirror deletion for machine removal (server row is deleted separately). */
+/** Local mirror deletion for machine removal (machine registry is removed separately). */
 export function removeEnvironmentLocal(db: SQLiteDatabase, environmentId: string): Promise<void> {
   return withWriteLock(async () => {
     await db.withTransactionAsync(async () => {
@@ -601,7 +600,7 @@ export interface WindowOverview {
   sessions: number;
   series: SeriesBucket[];
   byClient: ClientShare[];
-  /** Null when no model price reference exists (cloud pricing payload pending). */
+  /** Null when no model price reference exists (machine pricing payload pending). */
   cacheSavings: number | null;
 }
 
@@ -670,7 +669,7 @@ export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
     const provider = String(r["provider"]);
     const metric = String(r["metric"]);
     const dedupKey = JSON.stringify([provider, String(r["account_key"]), metric]);
-    if (seen.has(dedupKey)) continue; // freshest row wins (server pre-selects; demo rows may tie)
+    if (seen.has(dedupKey)) continue; // freshest row wins (rows are ordered by collection time; demo rows may tie)
     seen.add(dedupKey);
     const usedPercent = r["used_percent"] === null ? null : Number(r["used_percent"]);
     const reportedRemaining = r["remaining_percent"] === null ? null : Number(r["remaining_percent"]);
@@ -695,9 +694,9 @@ export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
 export async function queryEnvironments(db: SQLiteDatabase): Promise<EnvironmentRow[]> {
   const rows = await db.getAllAsync<Record<string, unknown>>(
     `select e.id, e.slug, e.display_name, e.host_group, e.os_kind, e.tokscale_version, e.reporter_version,
-            e.last_heartbeat_at, e.last_success_at, e.last_error, e.latest_revision,
+            e.last_heartbeat_at, e.last_success_at, e.last_error,
             case when d.id is null then null else exists(
-              select 1 from kv where key = 'direct_since_v2_' || e.id
+              select 1 from kv where key = 'direct_since_v3_' || e.id
             ) end as direct_initial_sync_complete
        from environments e left join direct_machines d on d.id = e.id order by e.slug`,
   );
@@ -712,7 +711,6 @@ export async function queryEnvironments(db: SQLiteDatabase): Promise<Environment
     lastHeartbeatAt: (r["last_heartbeat_at"] as string | null) ?? null,
     lastSuccessAt: (r["last_success_at"] as string | null) ?? null,
     lastError: (r["last_error"] as string | null) ?? null,
-    latestRevision: Number(r["latest_revision"] ?? 0),
     directInitialSyncComplete: r["direct_initial_sync_complete"] === null ? null : Number(r["direct_initial_sync_complete"]) === 1,
   }));
 }

@@ -2,7 +2,7 @@
  * Domain types shared by the reporter and the phone.
  *
  * Money rule (D8): `cost` is a decimal string everywhere on the wire —
- * never a float. Postgres stores it as numeric(14,6).
+ * never a float. The phone mirror stores the decimal text unchanged.
  */
 
 export type OsKind = "windows" | "wsl" | "linux" | "macos";
@@ -21,9 +21,6 @@ export interface EnvironmentInfo {
   lastHeartbeatAt: string | null; // ISO instant
   lastSuccessAt: string | null;
   lastError: string | null;
-  latestRevision: number;
-  /** Tailscale live-pull base URL advertised by the machine's heartbeat (D1 v2). */
-  liveEndpoint: string | null;
 }
 
 /** A normalized per-message usage row (tokscale UnifiedMessage projection). */
@@ -59,7 +56,6 @@ export interface UsageEvent {
   costIsComplete: boolean;
   modelAttributionConflicted: boolean;
   parserVersion: string;
-  revision: number;
 }
 
 /** Vendor-reported quota snapshot (tokscale usage --json projection). */
@@ -82,34 +78,4 @@ export interface QuotaSnapshot {
   error: string | null;
   fetchedAt: string;
   sourceOffsetMinutes: number | null;
-}
-
-export interface DeltaPage {
-  /** Cursor contract version. Version 2 is database-global across machines. */
-  cursorVersion: number;
-  environments: EnvironmentInfo[];
-  events: UsageEvent[];
-  /** Greatest global sync revision present in `events`; the phone's next watermark. */
-  maxRevision: number;
-  hasMore: boolean;
-}
-
-export interface SyncRequestInfo {
-  generation: number;
-  requestedAt: string;
-  targetEnvironmentId: string | null;
-}
-
-/** One reporter-collected sample of the physical machine's vitals. */
-export interface MachineMetric {
-  id: string;
-  environmentId: string;
-  capturedAtMs: number;
-  cpuLoadPct: number;
-  cpuTempC: number | null;
-  ramUsedPct: number;
-  ramTempC: number | null;
-  gpuUtilPct: number | null;
-  gpuTempC: number | null;
-  revision: number;
 }

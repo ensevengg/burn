@@ -16,7 +16,6 @@ function machine(overrides: Partial<EnvironmentRow> = {}): EnvironmentRow {
     lastHeartbeatAt: new Date(NOW - 60_000).toISOString(),
     lastSuccessAt: new Date(NOW - 60_000).toISOString(),
     lastError: null,
-    latestRevision: 4,
     directInitialSyncComplete: true,
     ...overrides,
   };

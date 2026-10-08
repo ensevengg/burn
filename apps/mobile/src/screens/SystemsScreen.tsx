@@ -69,7 +69,7 @@ function MetricTile({ label, unit, samples, field }: {
     const value = sample[field];
     return value === null ? [] : [value];
   });
-  const latest = values.at(-1);
+  const latest = samples.at(-1)?.[field] ?? undefined;
   return (
     <View style={[styles.metricTile, { backgroundColor: C.panelAlt }]}>
       <Text style={[type.muted, { color: C.muted }]}>{label}</Text>
@@ -97,14 +97,14 @@ function machineState(system: SystemRow, now: number): { label: string; tone: "g
 
 export function SystemsScreen() {
   const { mode, requestSync } = useApp();
-  const { refreshingMachines } = useSyncStatus();
+  const { refreshingMachines, liveMachines } = useSyncStatus();
   const systems = useSystemsQuery();
   const { C } = useTheme();
   const [demoRefreshing, setDemoRefreshing] = useState(false);
   const now = Date.now();
 
   const refresh = () => {
-    if (mode === "cloud" || mode === "direct") {
+    if (mode === "direct") {
       void requestSync(null);
       return;
     }
@@ -118,7 +118,7 @@ export function SystemsScreen() {
         contentContainerStyle={{ paddingBottom: 40 }}
         refreshControl={
           <RefreshControl
-            refreshing={mode === "cloud" || mode === "direct" ? refreshingMachines : demoRefreshing}
+            refreshing={mode === "direct" ? refreshingMachines : demoRefreshing}
             onRefresh={refresh}
             tintColor={C.muted}
           />
@@ -126,7 +126,7 @@ export function SystemsScreen() {
       >
         <Text style={[type.title, styles.title, { color: C.text }]}>Systems</Text>
         <Text style={[type.muted, styles.subtitle, { color: C.muted }]}>
-          Machine vitals sampled every reporter cycle and refreshed live on probe. Sparklines show the trailing 24 hours.
+          Machine vitals sampled every 30 seconds and refreshed on request. Sparklines show the trailing 24 hours.
         </Text>
 
         <SectionTitle trailing={`${systems.data?.length ?? 0} machines`}>Machine health</SectionTitle>
@@ -136,6 +136,8 @@ export function SystemsScreen() {
           systems.data?.map((system) => {
             const state = machineState(system, now);
             const latest = system.metrics.at(-1);
+            const probe = liveMachines.find((machine) => machine.environmentId === system.id);
+            const refreshError = probe?.metricsError ?? (probe?.state !== "live" ? probe?.error : null);
             return (
               <Card key={system.id}>
                 <View style={styles.cardHeader}>
@@ -148,6 +150,7 @@ export function SystemsScreen() {
                 <Text style={[type.muted, { color: C.faint, marginTop: spacing.s }]}>
                   {latest === undefined ? "No health sample yet" : `sampled ${formatRelative(new Date(latest.capturedAtMs).toISOString())}`}
                 </Text>
+                {refreshError ? <Text style={[type.muted, { color: C.muted, marginTop: spacing.s }]}>Health refresh: {refreshError}</Text> : null}
                 {latest === undefined ? (
                   <View style={[styles.missing, { borderColor: C.border }]}>
                     <Text style={[type.muted, { color: C.muted }]}>Update this machine’s reporter, then run daemon or serve to collect vitals.</Text>

@@ -1,5 +1,7 @@
 # ADR 0003: Database-global cloud sync revision
 
+> Historical record: superseded by [ADR 0003 — Tailscale-only backend](0003-tailscale-only-backend.md). Backend revisions no longer apply.
+
 Status: **implemented** · Corrects D5 · 2026-09-09
 
 ## Problem

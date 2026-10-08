@@ -1,4 +1,4 @@
-import type { IngestMachineMetricInput } from "@burn/sync-api";
+import type { MachineMetricInput } from "@burn/sync-api";
 import { cpus, freemem, platform, totalmem } from "node:os";
 import { readdir, readFile, realpath } from "node:fs/promises";
 import { spawnRunner } from "./tokscale.js";
@@ -61,7 +61,9 @@ async function linuxHwmonTemperatures(): Promise<Map<string, number[]>> {
       continue;
     }
     for (const file of sensors.filter((value) => /^temp\d+_input$/.test(value))) {
-      const raw = Number(await text(`${root}/${file}`));
+      const reading = await text(`${root}/${file}`);
+      if (reading === null || reading === "") continue;
+      const raw = Number(reading);
       const value = raw / 1000;
       if (!Number.isFinite(value) || value < -50 || value > 200) continue;
       const values = found.get(name) ?? [];
@@ -108,7 +110,9 @@ async function linuxGpuBusy(): Promise<number | null> {
   }
   const values: number[] = [];
   for (const card of cards.filter((entry) => /^card\d+$/.test(entry.name))) {
-    const value = Number(await text(`/sys/class/drm/${card.name}/device/gpu_busy_percent`));
+    const reading = await text(`/sys/class/drm/${card.name}/device/gpu_busy_percent`);
+    if (reading === null || reading === "") continue;
+    const value = Number(reading);
     if (Number.isFinite(value) && value >= 0 && value <= 100) values.push(value);
   }
   return values.length === 0 ? null : Math.max(...values);
@@ -123,7 +127,7 @@ export interface SystemMetricDeps {
 }
 
 /** Best-effort sensors: unsupported temperatures stay null; values are never invented. */
-export async function collectSystemMetric(deps: SystemMetricDeps = {}): Promise<IngestMachineMetricInput> {
+export async function collectSystemMetric(deps: SystemMetricDeps = {}): Promise<MachineMetricInput> {
   const memory = (deps.memory ?? (() => ({ total: totalmem(), free: freemem() })))();
   const [load, sensors, discreteGpu, sysfsGpuBusy] = await Promise.all([
     (deps.cpuLoad ?? cpuLoadPct)(),
@@ -146,17 +150,17 @@ export async function collectSystemMetric(deps: SystemMetricDeps = {}): Promise<
   };
 }
 
-/** Process-local trailing history for /live/metrics; cloud remains the durable copy. */
+/** Process-local trailing history for /live/metrics; the phone persists samples in its mirror. */
 export class SystemMetricHistory {
-  private samples: IngestMachineMetricInput[] = [];
-  private active: Promise<IngestMachineMetricInput> | null = null;
+  private samples: MachineMetricInput[] = [];
+  private active: Promise<MachineMetricInput> | null = null;
 
   constructor(
-    private readonly collect: () => Promise<IngestMachineMetricInput> = collectSystemMetric,
+    private readonly collect: () => Promise<MachineMetricInput> = collectSystemMetric,
     private readonly now: () => number = Date.now,
   ) {}
 
-  sample(): Promise<IngestMachineMetricInput> {
+  sample(): Promise<MachineMetricInput> {
     if (this.active !== null) return this.active;
     const pending = this.collect().then((sample) => {
       this.samples.push(sample);
@@ -170,7 +174,7 @@ export class SystemMetricHistory {
     return pending;
   }
 
-  async since(sinceMs: number): Promise<IngestMachineMetricInput[]> {
+  async since(sinceMs: number): Promise<MachineMetricInput[]> {
     await this.sample();
     return this.samples.filter((sample) => sample.capturedAtMs >= sinceMs);
   }

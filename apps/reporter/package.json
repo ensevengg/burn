@@ -1,7 +1,7 @@
 {
   "name": "burn-report",
   "version": "0.1.0",
-  "description": "burn's machine-side reporter: pushes tokscale usage + vendor quotas to your own Supabase (run via npx burn-report)",
+  "description": "burn's read-only machine backend: serves tokscale events and vendor quotas to your phone over Tailscale",
   "type": "module",
   "bin": {
     "burn-report": "./src/index.ts"

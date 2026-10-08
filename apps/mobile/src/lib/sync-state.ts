@@ -1,9 +1,9 @@
 import type { SQLiteDatabase } from "expo-sqlite";
-import type { MirrorChange } from "./sync-cloud";
+export type MirrorChange = "events" | "quotas" | "machines" | "systems";
 const generations = new WeakMap<SQLiteDatabase, number>();
-export const cloudGeneration = (db: SQLiteDatabase): number => generations.get(db) ?? 0;
-export const advanceCloudGeneration = (db: SQLiteDatabase): void => {
-  generations.set(db, cloudGeneration(db) + 1);
+export const syncGeneration = (db: SQLiteDatabase): number => generations.get(db) ?? 0;
+export const advanceSyncGeneration = (db: SQLiteDatabase): void => {
+  generations.set(db, syncGeneration(db) + 1);
 };
 const listeners = new Set<(db: SQLiteDatabase, kind: MirrorChange) => void>();
 export function subscribeMirrorChanges(

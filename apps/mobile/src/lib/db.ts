@@ -1,5 +1,5 @@
 /**
- * Local mirror of the server schema in expo-sqlite (WAL). All screens render
+ * Local mirror of machine data in expo-sqlite (WAL). All screens render
  * from here first — nothing blocks on the network (engineering convention).
  * Day/month/year bucketing happens at render time from UTC instants (D8);
  * no pre-bucketed day keys are ever stored.
@@ -31,7 +31,6 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           last_heartbeat_at text,
           last_success_at text,
           last_error text,
-          latest_revision integer not null default 0,
           live_endpoint text
         );
         create table if not exists usage_events (
@@ -61,8 +60,7 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           cost_source text not null default 'unknown',
           cost_is_complete integer not null default 0,
           model_attribution_conflicted integer not null default 0,
-          parser_version text not null default 'unknown',
-          revision integer not null default 0
+          parser_version text not null default 'unknown'
         );
         create index if not exists usage_events_occurred_idx on usage_events (occurred_at_ms);
         create index if not exists usage_events_session_idx on usage_events (environment_id, session_id);
@@ -84,6 +82,18 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           error text,
           fetched_at text not null
         );
+        create table if not exists machine_metrics (
+          id text primary key,
+          environment_id text not null,
+          captured_at_ms integer not null,
+          cpu_load_pct real not null,
+          cpu_temp_c real,
+          ram_used_pct real not null,
+          ram_temp_c real,
+          gpu_util_pct real,
+          gpu_temp_c real
+        );
+        create index if not exists machine_metrics_env_time_idx on machine_metrics (environment_id, captured_at_ms);
         create table if not exists kv (key text primary key, value text not null);
         create table if not exists direct_machines (
           id text primary key,
@@ -100,20 +110,6 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           cache_read_cost_per_m real not null,
           output_cost_per_m real
         );
-        create table if not exists machine_metrics (
-          id text primary key,
-          environment_id text not null,
-          captured_at_ms integer not null,
-          cpu_load_pct real not null,
-          cpu_temp_c real,
-          ram_used_pct real not null,
-          ram_temp_c real,
-          gpu_util_pct real,
-          gpu_temp_c real,
-          revision integer not null default 0
-        );
-        create index if not exists machine_metrics_env_time_idx
-          on machine_metrics (environment_id, captured_at_ms);
       `);
       // C1 parity: installs created before export_schema existed get the column
       // added here; fresh installs already have it from the create block.
@@ -122,7 +118,7 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
       } catch {
         /* column already exists */
       }
-      // Same parity for the live-pull advertisement (D1 v2, ADR 0001).
+      // Older installs retain their machine endpoint for upgrade registration.
       try {
         await db.execAsync("alter table environments add column live_endpoint text");
       } catch {
@@ -169,9 +165,11 @@ export function resetDb(db: SQLite.SQLiteDatabase): Promise<void> {
 export async function wipeForReseed(db: SQLite.SQLiteDatabase): Promise<void> {
   await db.withTransactionAsync(async () => {
     await db.runAsync("delete from usage_events");
+    await db.runAsync("delete from machine_metrics");
     await db.runAsync("delete from environments");
     await db.runAsync("delete from quota_snapshots");
-    await db.runAsync("delete from machine_metrics");
+    await db.runAsync("delete from direct_machines");
+    await db.runAsync("delete from model_prices");
     await db.runAsync(
       "delete from kv where key not in ('reporting_timezone', 'theme_mode')",
     );

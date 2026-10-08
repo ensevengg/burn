@@ -2,73 +2,70 @@
 
 > Token burn rate for AI devs — see every token you burn across every machine, from your phone.
 
-**burn** tracks AI coding-agent token usage and physical-machine RAM/GPU health across Windows and Linux, with daily/monthly/yearly views, per-model and per-workspace drill-downs, and live subscription limits (Codex, Z.ai, …). It wraps [tokscale](https://github.com/junhoyeo/tokscale) for parsing (50+ clients), syncs through **your own** Supabase project, and ships as an Android app (Expo). No accounts, no hosted service, no telemetry.
+**burn** tracks AI coding-agent usage, cache hit rates, cost and vendor limits and physical-machine RAM/GPU health across Windows, WSL, Linux and macOS. It wraps [tokscale](https://github.com/junhoyeo/tokscale) for parsing and pricing, and reads your machines directly over **Tailscale**. The Android app renders from a local SQLite mirror, including when machines are offline. No hosted database, accounts or telemetry.
 
 ```
-machines (cron/daemon: tokscale → burn-report) ──push──▶ your Supabase ◀──read── phone (Expo)
+machine: tokscale + burn-events → burn-report daemon ← Tailscale → phone: Expo + SQLite
 ```
 
-## Status
+## Quickstart
 
-**Demo phase — everything below is built and verified.**
+The reporter currently requires Bun for its TypeScript CLI. Install [Tailscale](https://tailscale.com/) on each machine and the phone, and connect them to the same tailnet. From this checkout:
 
-| Piece | State |
-|---|---|
-| `supabase/` | Schema + scoped-token RPCs (`burn_*`), demo seed. SQL contract verified end-to-end (RLS lockdown, idempotent ingest, revision propagation, quota dedup, rendezvous). |
-| `packages/sync-api` | Shared contract: types, `SyncApi` interfaces, upsert-key definitions, Supabase impl (the only supabase-js import in the repo). |
-| `apps/reporter` | `burn-report` CLI: `init` / `doctor` / `usage` / `push` / `daemon` all work against real tokscale — it pushes usage, quotas, and best-effort RAM/GPU sensor samples. |
-| `crates/burn-events` | D2 export seam: a small pinned Rust binary calling `tokscale-core`'s unified-message pipeline, emitting priced `UnifiedMessage` records as JSONL. |
-| `apps/mobile` | All v1 screens, including a Systems tab with 24-hour RAM/GPU vitals per physical machine. Runs on bundled demo data instantly; connects to a real backend via read token. |
-
-## Demo quickstart
-
-**Phone (2 minutes, no backend):**
 ```bash
 bun install
-bun run mobile        # then scan the QR with Expo Go on your Android phone
-# Setup screen → "Explore with demo data"
+cargo install --path crates/burn-events  # once per machine, or use a release binary
+bun run reporter -- init --slug my-machine --name "My Machine"
+bun run reporter -- doctor
+bun run reporter -- daemon             # keep running; prints the endpoint URL
 ```
 
-**Full loop (with your Supabase project):** follow [supabase/README.md](./supabase/README.md) — three SQL pastes, `npx burn-report init`, then connect the phone with the printed read token. Install the exporter once per machine (`cargo install --path crates/burn-events`); `bun run reporter -- push` then streams per-message usage rows (tokens, cache, cost) and refreshes vendor quotas independently; `bun run reporter -- usage` is the quota-only command. The Machines tab can request eager syncs from machines running `burn-report daemon`.
+Start the app with `bun run mobile`, open it in Expo Go on Android, choose **Use machines directly**, then paste the reporter URL under **Machines → +**. Each Windows, WSL or dual-boot installation gets its own slug; use a shared `--host-group` for installations on one physical machine. Add as many machines as needed.
 
-**Reporter (on each machine):**
-```bash
-cargo install --path crates/burn-events   # D2 exporter, once per machine (or grab a release binary)
-bun run reporter -- doctor    # verify tokscale pin, exporter version, config, backend, clock
-bun run reporter -- push      # push usage event rows since cursor (--full = correction pass)
-bun run reporter -- usage     # push vendor quota snapshots
-bun run reporter -- daemon    # resident: answers phone refresh requests (~30s) + scheduled push
-```
+`burn-report serve` is an alias for the resident backend. Both commands accept `--port 8787` and `--bind <address>`. The default bind is the machine's Tailscale IPv4; without Tailscale it falls back to loopback and prints a warning. A loopback endpoint is useful for local diagnostics and cannot be reached by the phone. `burn-report usage` prints vendor quota JSON locally.
 
-**Verify everything yourself:**
-```bash
-bun run typecheck && bun run test
-```
+For the published CLI, the equivalent setup is `npx burn-report init --slug my-machine --name "My Machine"`, then `npx burn-report daemon`.
+
+To explore without machines, start the app and choose **Explore with demo data**. It loads a bundled 120-day dataset locally.
+
+## Sync behavior
+
+Opening the app or pulling to refresh probes registered machines. Validated usage pages, vendor quotas and system-health samples merge independently, preserving successful quotas when a vendor check fails. Interrupted history backfills resume while the app is foregrounded. Source fingerprints, content hashes, compressed pages and no-op writes reduce repeated scans and transfers.
+
+Per-machine cursors checkpoint completed scan starts with a conservative overlap. Full-history reconciliation on a foreground/refresh pull after 24 hours catches late records and parser/pricing corrections. **Machines → Reconcile full history** runs it immediately. Offline machines retain cached history and show contact/error diagnostics.
+
+The **Systems** tab shows RAM/GPU usage and available temperatures with trailing 24-hour sparklines. Resident reporters sample physical hardware every 30 seconds and on request; unsupported sensors stay unavailable. WSL uses its Windows host’s hardware and does not create a second physical system. Reporters keep a process-local 24-hour health history; the phone persists received samples and shows stale/unavailable readings when a machine cannot answer.
+
+History lives in the source files on your machines and the phone mirror. A fresh phone needs each source machine to come online to rebuild its history. Removing a machine or disconnecting clears local cached data only, after confirmation.
+
+## Upgrading
+
+Restart reporters after updating this branch. Check `burn-events --capabilities` for `fingerprint-v1`; rebuild with `cargo install --path crates/burn-events` if it is missing (the tokscale pin remains 4.15.1). Existing configs retain identity and parser pins; loading them removes obsolete upload settings and credentials. The phone preserves cached history, preferences and registered URLs. Saved legacy endpoint URLs become Tailscale registrations automatically; add a reporter URL manually if none was saved. The upgrade performs one corrective history reconciliation. Old scheduled `push` jobs should be replaced by a resident `daemon`; the `push` command has been removed.
+
+See [transfer behavior and upgrade details](docs/connection-transfer-fixes.md) and [the backend decision](docs/adr/0003-tailscale-only-backend.md).
 
 ## Repository layout
 
+| Path | Purpose |
+|---|---|
+| `apps/mobile` | Expo Android app, dashboards, limits, Systems, machines, sessions/workspaces and settings. |
+| `apps/reporter` | Read-only machine backend and setup/diagnostic CLI. |
+| `crates/burn-events` | Pinned Rust exporter of priced tokscale UnifiedMessage records as JSONL. |
+| `packages/sync-api` | Machine transport, shared types, wire validation and idempotent mirror keys. |
+| `docs` | Decisions, current transfer behavior and historical audits. |
+
+## Development
+
+```bash
+bun run typecheck
+bun run test
+bun run --cwd apps/mobile android  # local Android build; requires JDK + Android SDK
 ```
-apps/mobile        Expo app (SDK 57 / RN 0.86 / React 19)
-apps/reporter      burn-report CLI (npm: npx burn-report)
-crates/burn-events D2 exporter — Rust binary emitting tokscale records as JSONL
-packages/sync-api  SyncApi contract — supabase-js touches nothing else
-supabase/          migrations, RLS, scoped-token RPCs, demo seed
-docs → AGENTS.md   the rulebook: decisions D1–D12, conventions, status
-```
 
-## Documentation
+[AGENTS.md](AGENTS.md) records engineering rules and current decisions. The original planning interview and architecture review remain historical records; [ADR 0003](docs/adr/0003-tailscale-only-backend.md) supersedes their cloud architecture.
 
-- [AGENTS.md](./AGENTS.md) — decisions and engineering rules. Read first.
-- [GLM-questionnaire.html](./GLM-questionnaire.html) — planning interview record.
-- [sol-thoughts.html](./sol-thoughts.html) — second-agent architecture review (corrections folded in).
-
-## Known deferrals (post-demo iterations)
-
-1. upstream `tokscale events --jsonl` PR — would replace the `burn-events` exporter binary (its output parses with the same reporter schema).
-2. victory-native (Skia) chart pass behind the existing `Chart` boundary (D9).
-3. EAS build profiles + GitHub Releases packaging.
-4. `burn-report install-service` (systemd user units / Task Scheduler XML).
+Planned follow-ups: upstream `tokscale events --jsonl`, the Skia chart pass, EAS/GitHub Releases APK packaging, reporter service installation, QR onboarding and accurate model-price reference transport.
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](LICENSE)

@@ -15,7 +15,6 @@
     },
     "android": {
       "package": "dev.burn.app",
-      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0c0d10"
@@ -27,6 +26,10 @@
         "projectId": "81ce3728-e9d0-4ad1-8d7e-bdacc817b30c"
       }
     },
-    "owner": "ensevengg"
+    "owner": "ensevengg",
+    "plugins": [
+      "./plugins/with-tailnet-http",
+      "./plugins/with-workspace-bundle"
+    ]
   }
 }

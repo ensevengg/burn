@@ -2,7 +2,7 @@
  * Deterministic demo dataset (seed 42): three environments, 30 days of
  * Codex/Z.ai/OpenCode usage with realistic token/cache/cost shapes. Pure TS —
  * consumed by the app's demo mode (in-memory, dates relative to now) and by
- * scripts/generate-demo-seed.ts (writes supabase/seed/demo.sql).
+ * the mobile mirror seed writer.
  */
 
 export interface DemoEvent {

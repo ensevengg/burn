@@ -1,4 +1,4 @@
-/** Wire-format contract version. Bump when an RPC's payload shape changes. */
+/** Machine wire-format contract version. Bump on breaking payload changes. */
 export const SYNC_SCHEMA_VERSION = 1;
 
 /**
@@ -10,6 +10,6 @@ export const TOKSCALE_PIN = "4.15.1";
 /**
  * Exporter contract version (D2): the JSONL shape the `burn-events` exporter
  * emits and the reporter consumes. Bump when the payload shape changes;
- * reported in heartbeats as the environment's export_schema.
+ * reported by /ping as the environment's exportSchema.
  */
 export const EVENT_EXPORT_SCHEMA = 1;

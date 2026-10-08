@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useApp, useSyncStatus } from "../lib/app-context";
+import { confirmDestructive } from "../lib/confirm-destructive";
 import { useTheme, type ThemeMode } from "../lib/theme-context";
 import { spacing, type } from "../theme";
 import { Card, SectionTitle, Segmented, Chip } from "../ui/primitives";
@@ -27,6 +28,15 @@ export function SettingsScreen() {
   const { lastSync } = useSyncStatus();
   const { C, themeMode, setThemeMode } = useThemeExtras();
   const [tzPicker, setTzPicker] = useState(false);
+  const confirmWipe = () =>
+    confirmDestructive(
+      Alert,
+      mode === "demo" ? "Clear demo data?" : "Disconnect and wipe local cache?",
+      mode === "direct"
+        ? "This removes all machine connections, cached usage, quotas and reference prices from this phone. You will need to add your machine URLs again. Data on your machines stays intact."
+        : "This clears the demo data from this phone and returns to setup.",
+      mode === "direct" ? disconnect : clearData,
+    );
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: C.bg }]} edges={["top"]}>
@@ -45,29 +55,19 @@ export function SettingsScreen() {
         <Card>
           <View style={styles.rowBetween}>
             <Text style={[type.body, { color: C.text }]}>Mode</Text>
-            <Chip tone={mode === "cloud" || mode === "direct" ? "green" : mode === "demo" ? "yellow" : "muted"}>{mode}</Chip>
+            <Chip tone={mode === "direct" ? "green" : mode === "demo" ? "yellow" : "muted"}>{mode === "direct" ? "Tailscale" : "Demo"}</Chip>
           </View>
           <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
             {mode === "direct"
-              ? "Direct over Tailscale (ADR 0002). Your machines are the backend; nothing leaves the tailnet."
-              : "BYO Supabase (D4). The app holds only a scoped read token (D7); the secret key never leaves your dashboard."}
+              ? "Your phone reads directly from your machines over Tailscale. Cached history stays available when a machine is offline."
+              : "Bundled demo data. Choose Tailscale during setup to connect real machines."}
           </Text>
-          {mode === "cloud" && (
-            <Pressable
-              accessibilityRole="button"
-              android_ripple={{ color: C.border, foreground: true, borderless: false }}
-              style={[styles.dangerButton, { borderColor: C.border }]}
-              onPress={() => void disconnect()}
-            >
-              <Text style={{ color: C.err, fontWeight: "600" }}>Disconnect & wipe local cache</Text>
-            </Pressable>
-          )}
           {mode === "direct" && (
             <Pressable
               accessibilityRole="button"
               android_ripple={{ color: C.border, foreground: true, borderless: false }}
               style={[styles.dangerButton, { borderColor: C.border }]}
-              onPress={() => void clearData()}
+              onPress={confirmWipe}
             >
               <Text style={{ color: C.err, fontWeight: "600" }}>Disconnect & wipe local cache</Text>
             </Pressable>
@@ -77,7 +77,7 @@ export function SettingsScreen() {
               accessibilityRole="button"
               android_ripple={{ color: C.border, foreground: true, borderless: false }}
               style={[styles.dangerButton, { borderColor: C.border }]}
-              onPress={() => void clearData()}
+              onPress={confirmWipe}
             >
               <Text style={{ color: C.err, fontWeight: "600" }}>Clear demo data</Text>
             </Pressable>
@@ -121,15 +121,13 @@ export function SettingsScreen() {
               style={[styles.tzToggle, { backgroundColor: C.panelAlt, borderColor: C.border }]}
               onPress={() => void sync()}
             >
-              <Text style={{ color: C.text, fontWeight: "600" }}>{mode === "direct" ? "Sync machines now" : "Pull delta now"}</Text>
+              <Text style={{ color: C.text, fontWeight: "600" }}>Sync machines now</Text>
             </Pressable>
           </View>
           <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
-            {mode === "cloud"
-              ? `Fetches revision > watermark. Last pulled ${lastSync === null ? "never" : lastSync.toISOString()}.`
-              : mode === "direct"
-                ? `Probes every registered machine. Last pulled ${lastSync === null ? "never" : lastSync.toISOString()}.`
-                : "Available when connected to a backend."}
+            {mode === "direct"
+              ? `Probes every registered machine. Last pulled ${lastSync === null ? "never" : lastSync.toISOString()}.`
+              : "Available when connected to your machines."}
           </Text>
         </Card>
 
@@ -141,9 +139,8 @@ export function SettingsScreen() {
           </Text>
           <Text style={[type.muted, { color: C.muted, marginTop: 8 }]}>
             burn wraps tokscale (MIT, by junhoyeo) for parsing — 50+ AI coding agents, priced with LiteLLM data. Your
-            machines run the `burn-report` reporter; this app is the reader. Both talk only to your own Supabase
-            project through scoped, revocable tokens — no burn servers, no accounts, no telemetry (D12). Remove a
-            machine with − on its card; rotate access by revoking its token in Supabase.
+            machines run the `burn-report` reporter; this app reads them over your tailnet. No burn servers,
+            accounts or telemetry. Remove a machine with − on its card; manage network access in Tailscale.
           </Text>
           <Text style={[type.muted, { color: C.muted, marginTop: 8 }]}>
             Open source under MIT. Issues and PRs welcome at the burn repository — AGENTS.md documents every

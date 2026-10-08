@@ -1,5 +1,7 @@
 # ADR 0001 — Tailscale direct-pull (live machines)
 
+> Historical decision, superseded on 2026-10-02 by [ADR 0003](0003-tailscale-only-backend.md). The cloud path described below has been removed.
+
 Status: **accepted for v2** (in progress on `feat/tailscale-live-pull`) · Amends D1 · 2026-09-07
 
 ## Context
