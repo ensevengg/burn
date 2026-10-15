@@ -1,12 +1,15 @@
 import { useState } from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { Alert, LayoutAnimation, StyleSheet, Text, View } from "react-native";
+import Svg, { Path } from "react-native-svg";
+import { SYNC_SCHEMA_VERSION, TOKSCALE_PIN } from "@burn/sync-api";
 import { useApp, useSyncStatus } from "../lib/app-context";
 import { confirmDestructive } from "../lib/confirm-destructive";
+import { formatRelative } from "../lib/format";
 import { useTheme, type ThemeMode } from "../lib/theme-context";
-import { spacing, type } from "../theme";
-import { Card, SectionTitle, Segmented, Chip } from "../ui/primitives";
-import { SYNC_SCHEMA_VERSION, TOKSCALE_PIN } from "@burn/sync-api";
+import { hairline, radius, spacing, type } from "../theme";
+import { Card, Chip, Row, SectionTitle, Segmented } from "../ui/primitives";
+import { PressableScale } from "../ui/motion";
+import { Screen } from "../ui/screen";
 
 const TIMEZONES = [
   "Asia/Kolkata",
@@ -23,10 +26,18 @@ const THEME_OPTIONS = [
   { label: "Dark", value: "dark" },
 ] as const satisfies readonly { label: string; value: ThemeMode }[];
 
+function Chevron({ open, color }: { open: boolean; color: string }) {
+  return (
+    <Svg width={12} height={12} viewBox="0 0 12 12" style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
+      <Path d="M4.5 2.5 8 6l-3.5 3.5" stroke={color} strokeWidth={1.6} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  );
+}
+
 export function SettingsScreen() {
   const { mode, reportingTimezone, setReportingTimezone, disconnect, clearData, sync } = useApp();
   const { lastSync } = useSyncStatus();
-  const { C, themeMode, setThemeMode } = useThemeExtras();
+  const { C, mode: themeMode, setMode: setThemeMode } = useTheme();
   const [tzPicker, setTzPicker] = useState(false);
   const confirmWipe = () =>
     confirmDestructive(
@@ -39,142 +50,112 @@ export function SettingsScreen() {
     );
 
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: C.bg }]} edges={["top"]}>
-      <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
-        <Text style={[type.title, { color: C.text }, styles.title]}>Settings</Text>
+    <Screen title="Settings" refreshable={false}>
+      <SectionTitle>Appearance</SectionTitle>
+      <Card>
+        <Segmented options={THEME_OPTIONS} value={themeMode} onChange={setThemeMode} />
+        <Text style={[type.muted, { color: C.muted, marginTop: spacing.m, lineHeight: 18 }]}>
+          Graphite dark uses true black for OLED panels. System follows your phone.
+        </Text>
+      </Card>
 
-        <SectionTitle>Appearance</SectionTitle>
-        <Card>
-          <Segmented options={THEME_OPTIONS} value={themeMode} onChange={setThemeMode} />
-          <Text style={[type.muted, { color: C.muted, marginTop: spacing.s }]}>
-            Grey-dark accent in dark mode, near-black in light. System follows your phone.
-          </Text>
-        </Card>
-
-        <SectionTitle>Backend</SectionTitle>
-        <Card>
-          <View style={styles.rowBetween}>
-            <Text style={[type.body, { color: C.text }]}>Mode</Text>
-            <Chip tone={mode === "direct" ? "green" : mode === "demo" ? "yellow" : "muted"}>{mode === "direct" ? "Tailscale" : "Demo"}</Chip>
+      <SectionTitle>Connection</SectionTitle>
+      <Card style={styles.list}>
+        <Row
+          first
+          title="Backend"
+          subtitle={
+            mode === "direct"
+              ? "Reads your machines directly over Tailscale. Cached history stays available offline."
+              : "Bundled demo data. Choose Tailscale during setup to connect real machines."
+          }
+          trailing={<Chip tone={mode === "direct" ? "green" : "yellow"} dot>{mode === "direct" ? "Tailscale" : "Demo"}</Chip>}
+        />
+        {mode === "direct" && (
+          <Row
+            title="Sync machines now"
+            subtitle={`Last pulled ${lastSync === null ? "never" : formatRelative(lastSync.toISOString())}`}
+            onPress={() => void sync()}
+            trailing={<Chevron open={false} color={C.faint} />}
+          />
+        )}
+        <Row
+          title="Reporting timezone"
+          subtitle={`${reportingTimezone} · days and months bucket here at render time`}
+          onPress={() => {
+            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+            setTzPicker(!tzPicker);
+          }}
+          trailing={<Chevron open={tzPicker} color={C.faint} />}
+        />
+        {tzPicker && (
+          <View style={styles.tzGrid}>
+            {TIMEZONES.map((tz) => {
+              const active = tz === reportingTimezone;
+              return (
+                <PressableScale
+                  key={tz}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                  onPress={() => {
+                    void setReportingTimezone(tz);
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    setTzPicker(false);
+                  }}
+                  style={[
+                    styles.tzChip,
+                    { backgroundColor: active ? C.accent : C.panelAlt, borderColor: active ? C.accent : C.border },
+                  ]}
+                >
+                  <Text style={{ fontSize: 12.5, fontWeight: "600", color: active ? C.accentInk : C.text }}>
+                    {tz.replace("_", " ")}
+                  </Text>
+                </PressableScale>
+              );
+            })}
           </View>
-          <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
-            {mode === "direct"
-              ? "Your phone reads directly from your machines over Tailscale. Cached history stays available when a machine is offline."
-              : "Bundled demo data. Choose Tailscale during setup to connect real machines."}
-          </Text>
-          {mode === "direct" && (
-            <Pressable
-              accessibilityRole="button"
-              android_ripple={{ color: C.border, foreground: true, borderless: false }}
-              style={[styles.dangerButton, { borderColor: C.border }]}
-              onPress={confirmWipe}
-            >
-              <Text style={{ color: C.err, fontWeight: "600" }}>Disconnect & wipe local cache</Text>
-            </Pressable>
-          )}
-          {mode === "demo" && (
-            <Pressable
-              accessibilityRole="button"
-              android_ripple={{ color: C.border, foreground: true, borderless: false }}
-              style={[styles.dangerButton, { borderColor: C.border }]}
-              onPress={confirmWipe}
-            >
-              <Text style={{ color: C.err, fontWeight: "600" }}>Clear demo data</Text>
-            </Pressable>
-          )}
-        </Card>
+        )}
+      </Card>
 
-        <SectionTitle>Reporting timezone</SectionTitle>
-        <Card>
-          <Text style={[type.body, { color: C.text }]}>{reportingTimezone}</Text>
-          <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
-            Persisted at setup and stable until you change it (D8). History is re-bucketed at render time from
-            stored UTC instants — nothing is rewritten.
-          </Text>
-          <Pressable
-            accessibilityRole="button"
-            android_ripple={{ color: C.border, foreground: true, borderless: false }}
-            style={[styles.tzToggle, { backgroundColor: C.panelAlt, borderColor: C.border }]}
-            onPress={() => setTzPicker(!tzPicker)}
-          >
-            <Text style={{ color: C.text, fontWeight: "600" }}>{tzPicker ? "Hide options" : "Change…"}</Text>
-          </Pressable>
-          {tzPicker && (
-            <Segmented
-              options={TIMEZONES.map((tz) => ({ label: tz.split("/").pop() ?? tz, value: tz }))}
-              value={reportingTimezone}
-              onChange={(tz) => {
-                void setReportingTimezone(tz);
-                setTzPicker(false);
-              }}
-            />
-          )}
-        </Card>
+      <SectionTitle>Data</SectionTitle>
+      <Card style={styles.list}>
+        <Row
+          first
+          destructive
+          title={mode === "direct" ? "Disconnect & wipe local cache" : "Clear demo data"}
+          subtitle="Asks before deleting anything. Your machines keep their data."
+          onPress={confirmWipe}
+        />
+      </Card>
 
-        <SectionTitle>Sync</SectionTitle>
-        <Card>
-          <View style={styles.rowBetween}>
-            <Text style={[type.body, { color: C.text }]}>Manual refresh</Text>
-            <Pressable
-              accessibilityRole="button"
-              android_ripple={{ color: C.border, foreground: true, borderless: false }}
-              style={[styles.tzToggle, { backgroundColor: C.panelAlt, borderColor: C.border }]}
-              onPress={() => void sync()}
-            >
-              <Text style={{ color: C.text, fontWeight: "600" }}>Sync machines now</Text>
-            </Pressable>
-          </View>
-          <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
-            {mode === "direct"
-              ? `Probes every registered machine. Last pulled ${lastSync === null ? "never" : lastSync.toISOString()}.`
-              : "Available when connected to your machines."}
-          </Text>
-        </Card>
-
-        <SectionTitle>About</SectionTitle>
-        <Card>
-          <Text style={[type.body, { color: C.text }]}>burn 0.1.0</Text>
-          <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
-            {`Sync schema v${SYNC_SCHEMA_VERSION} · tokscale pin ${TOKSCALE_PIN} · Expo SDK 57 / React Native 0.86`}
-          </Text>
-          <Text style={[type.muted, { color: C.muted, marginTop: 8 }]}>
-            burn wraps tokscale (MIT, by junhoyeo) for parsing — 50+ AI coding agents, priced with LiteLLM data. Your
-            machines run the `burn-report` reporter; this app reads them over your tailnet. No burn servers,
-            accounts or telemetry. Remove a machine with − on its card; manage network access in Tailscale.
-          </Text>
-          <Text style={[type.muted, { color: C.muted, marginTop: 8 }]}>
-            Open source under MIT. Issues and PRs welcome at the burn repository — AGENTS.md documents every
-            architectural decision (D1–D12) for contributors and their agents.
-          </Text>
-        </Card>
-      </ScrollView>
-    </SafeAreaView>
+      <SectionTitle>About</SectionTitle>
+      <Card>
+        <View style={styles.aboutTop}>
+          <Text style={[type.h2, { color: C.text }]}>burn 0.1.0</Text>
+          <Text style={[type.mono, { color: C.faint }]}>{`schema v${SYNC_SCHEMA_VERSION} · tokscale ${TOKSCALE_PIN}`}</Text>
+        </View>
+        <Text style={[type.muted, { color: C.muted, marginTop: 10, lineHeight: 18 }]}>
+          burn wraps tokscale (MIT, by junhoyeo) to parse 50+ AI coding agents, priced with LiteLLM data. Your machines
+          run the burn-report reporter; this app reads them over your tailnet. No burn servers, accounts or telemetry.
+        </Text>
+        <Text style={[type.muted, { color: C.faint, marginTop: 8, lineHeight: 18 }]}>
+          Open source under MIT. AGENTS.md documents every architectural decision (D1–D12).
+        </Text>
+      </Card>
+    </Screen>
   );
 }
 
-/** Bridges theme-mode state (ThemeContext) into the screen. */
-function useThemeExtras() {
-  const { C, mode, setMode } = useTheme();
-  return { C, themeMode: mode, setThemeMode: setMode };
-}
-
 const styles = StyleSheet.create({
-  safe: { flex: 1 },
-  title: { marginHorizontal: spacing.l, marginTop: spacing.m, marginBottom: spacing.s },
-  rowBetween: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  tzToggle: {
-    alignSelf: "flex-start",
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    marginTop: spacing.m,
+  list: { paddingVertical: 2 },
+  tzGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    paddingBottom: 14,
+    paddingTop: 4,
+    marginHorizontal: -2,
   },
-  dangerButton: {
-    borderWidth: 1,
-    borderRadius: 10,
-    alignItems: "center",
-    paddingVertical: 11,
-    marginTop: spacing.m,
-  },
+  tzChip: { borderRadius: radius.pill, borderWidth: hairline, paddingHorizontal: 12, paddingVertical: 8 },
+  aboutTop: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", gap: spacing.s },
 });
