@@ -6,14 +6,13 @@
 
 export type Granularity = "daily" | "monthly" | "yearly";
 
+const DAY_MS = 86_400_000;
 const formatterCache = new Map<string, Intl.DateTimeFormat>();
-const partsCache = new Map<string, { y: number; m: number; d: number }>();
+/** `${zone}|${utcDay}` → the zone's offset for that whole UTC day, or NaN on a transition day. */
+const dayOffsetCache = new Map<string, number>();
 
-/** Calendar parts of an instant in the given IANA zone (Intl-backed). */
-export function calendarParts(occurredAtMs: number, timeZone: string): { y: number; m: number; d: number } {
-  const cacheKey = `${occurredAtMs}|${timeZone}`;
-  const cached = partsCache.get(cacheKey);
-  if (cached) return cached;
+/** Exact UTC offset (ms) of `timeZone` at an instant, via Intl. The slow path. */
+function zoneOffsetExact(atMs: number, timeZone: string): number {
   let formatter = formatterCache.get(timeZone);
   if (formatter === undefined) {
     formatter = new Intl.DateTimeFormat("en-CA", {
@@ -21,16 +20,46 @@ export function calendarParts(occurredAtMs: number, timeZone: string): { y: numb
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
     });
     if (formatterCache.size >= 8) formatterCache.delete(formatterCache.keys().next().value!);
     formatterCache.set(timeZone, formatter);
   }
-  const parts = formatter.formatToParts(new Date(occurredAtMs));
+  const whole = Math.floor(atMs / 1000) * 1000;
+  const parts = formatter.formatToParts(new Date(whole));
   const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
-  const out = { y: get("year"), m: get("month"), d: get("day") };
-  if (partsCache.size > 8192) partsCache.clear();
-  partsCache.set(cacheKey, out);
-  return out;
+  // Some ICU builds still render midnight as "24" under h23.
+  const local = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour") % 24, get("minute"), get("second"));
+  return local - whole;
+}
+
+/**
+ * Offset at an instant. Zones change offset at most once per UTC day, so two
+ * Intl lookups per day (start and end) settle every instant in it; only a
+ * DST-transition day falls back to per-instant lookups. On Hermes, Intl is
+ * the dominant cost of bucketing tens of thousands of rows.
+ */
+function zoneOffset(atMs: number, timeZone: string): number {
+  const day = Math.floor(atMs / DAY_MS);
+  const key = `${timeZone}|${day}`;
+  let offset = dayOffsetCache.get(key);
+  if (offset === undefined) {
+    const start = zoneOffsetExact(day * DAY_MS, timeZone);
+    const end = zoneOffsetExact(day * DAY_MS + DAY_MS - 1000, timeZone);
+    offset = start === end ? start : Number.NaN;
+    if (dayOffsetCache.size > 50_000) dayOffsetCache.clear();
+    dayOffsetCache.set(key, offset);
+  }
+  return Number.isNaN(offset) ? zoneOffsetExact(atMs, timeZone) : offset;
+}
+
+/** Calendar parts of an instant in the given IANA zone. */
+export function calendarParts(occurredAtMs: number, timeZone: string): { y: number; m: number; d: number; h: number } {
+  const local = new Date(occurredAtMs + zoneOffset(occurredAtMs, timeZone));
+  return { y: local.getUTCFullYear(), m: local.getUTCMonth() + 1, d: local.getUTCDate(), h: local.getUTCHours() };
 }
 
 /** Bucket key for a group-by: 2026-09-05 (daily), 2026-09 (monthly), 2026 (yearly). */

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bucketKey, bucketLabel, formatCost, formatPercent, formatTokens } from "../src/lib/format";
+import { bucketKey, bucketLabel, calendarParts, formatCost, formatPercent, formatTokens } from "../src/lib/format";
 import { humanize } from "../src/lib/labels";
 
 // 2026-09-05 12:30 IST == 07:00 UTC. IST day buckets must not depend on the
@@ -48,4 +48,27 @@ describe("formatting", () => {
   test("percent one decimal", () => {
     expect(formatPercent(0.8734)).toBe("87.3%");
   });
+});
+
+test("cached zone offsets match Intl exactly, including DST transition days", () => {
+  const zones = ["Asia/Kolkata", "America/New_York", "Europe/Berlin", "Australia/Lord_Howe", "Pacific/Chatham", "UTC"];
+  const reference = (ms: number, timeZone: string) => {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23",
+    }).formatToParts(new Date(ms));
+    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+    return { y: get("year"), m: get("month"), d: get("day"), h: get("hour") % 24 };
+  };
+  // Every 7 minutes across both 2026 transitions in each hemisphere, plus a year of random instants.
+  const instants: number[] = [];
+  for (const center of ["2026-03-08T07:00:00Z", "2026-03-29T01:00:00Z", "2026-04-04T15:00:00Z", "2026-10-04T15:00:00Z", "2026-10-25T01:00:00Z", "2026-11-01T06:00:00Z"]) {
+    const at = Date.parse(center);
+    for (let t = at - 6 * 3_600_000; t <= at + 6 * 3_600_000; t += 7 * 60_000) instants.push(t);
+  }
+  let seed = 7;
+  for (let i = 0; i < 2000; i++) {
+    seed = (seed * 48271) % 2147483647;
+    instants.push(Date.parse("2025-11-01T00:00:00Z") + (seed % 400) * 86_400_000 + (seed % 86_400_000));
+  }
+  for (const zone of zones) for (const t of instants) expect(calendarParts(t, zone)).toEqual(reference(t, zone));
 });
