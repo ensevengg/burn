@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bucketKey, bucketLabel, calendarParts, formatCost, formatPercent, formatTokens } from "../src/lib/format";
+import { bucketKey, bucketLabel, calendarParts, formatCost, formatPercent, formatTokens, formatUntil } from "../src/lib/format";
 import { humanize } from "../src/lib/labels";
 
 // 2026-09-05 12:30 IST == 07:00 UTC. IST day buckets must not depend on the
@@ -42,12 +42,21 @@ describe("formatting", () => {
     expect(formatCost(0.000123)).toBe("$0.0001");
     expect(formatCost(0)).toBe("$0");
     expect(formatCost(4.5)).toBe("$4.50");
-    expect(formatCost(1234)).toBe("$1234");
+    expect(formatCost(1234)).toBe("$1,234");
   });
 
   test("percent one decimal", () => {
     expect(formatPercent(0.8734)).toBe("87.3%");
   });
+});
+
+test("formatUntil counts down to quota resets", () => {
+  const now = Date.parse("2026-10-16T00:00:00Z");
+  expect(formatUntil("2026-10-16T00:45:00Z", now)).toBe("45m");
+  expect(formatUntil("2026-10-16T03:12:00Z", now)).toBe("3h 12m");
+  expect(formatUntil("2026-10-18T04:00:00Z", now)).toBe("2d 4h");
+  expect(formatUntil("2026-10-15T23:00:00Z", now)).toBeNull();
+  expect(formatUntil(null, now)).toBeNull();
 });
 
 test("dash-separated model versions read as decimals without merging dates", () => {

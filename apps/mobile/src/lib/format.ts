@@ -106,6 +106,16 @@ export function bucketTitle(key: string, granularity: Granularity): string {
   return `${weekday} ${d} ${MONTHS[m - 1]}, ${key.slice(11, 13)}:00`;
 }
 
+/** Axis-friendly money: $1.2k, $56, $0.42. */
+export function formatCostCompact(cost: number): string {
+  if (cost >= 10_000) return `$${(cost / 1000).toFixed(0)}k`;
+  if (cost >= 1000) return `$${(cost / 1000).toFixed(1)}k`;
+  if (cost >= 10) return `$${cost.toFixed(0)}`;
+  if (cost >= 1) return `$${cost.toFixed(1)}`;
+  if (cost > 0) return `$${cost.toFixed(2)}`;
+  return "$0";
+}
+
 export function formatTokens(n: number): string {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
@@ -114,7 +124,7 @@ export function formatTokens(n: number): string {
 }
 
 export function formatCost(cost: number): string {
-  if (cost >= 1000) return `$${cost.toFixed(0)}`;
+  if (cost >= 1000) return `$${Math.round(cost).toLocaleString("en")}`;
   if (cost >= 1) return `$${cost.toFixed(2)}`;
   if (cost >= 0.01) return `$${cost.toFixed(3)}`;
   if (cost > 0) return `$${cost.toFixed(4)}`;
@@ -136,4 +146,18 @@ export function formatRelative(iso: string | null, now = Date.now()): string {
   const hours = Math.round(minutes / 60);
   if (hours < 48) return `${hours}h ago`;
   return `${Math.round(hours / 24)}d ago`;
+}
+
+/** Countdown to an instant: "3h 12m", "2d 4h", "45m", "now". Null when unknown or past. */
+export function formatUntil(iso: string | null, now = Date.now()): string | null {
+  if (iso === null) return null;
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return null;
+  const minutes = Math.round((at - now) / 60_000);
+  if (minutes < 0) return null;
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
