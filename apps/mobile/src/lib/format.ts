@@ -4,7 +4,7 @@
  * from UTC instants in the persisted reporting_timezone — never stored.
  */
 
-export type Granularity = "daily" | "monthly" | "yearly";
+export type Granularity = "hourly" | "daily" | "monthly" | "yearly";
 
 const DAY_MS = 86_400_000;
 const formatterCache = new Map<string, Intl.DateTimeFormat>();
@@ -62,16 +62,26 @@ export function calendarParts(occurredAtMs: number, timeZone: string): { y: numb
   return { y: local.getUTCFullYear(), m: local.getUTCMonth() + 1, d: local.getUTCDate(), h: local.getUTCHours() };
 }
 
-/** Bucket key for a group-by: 2026-09-05 (daily), 2026-09 (monthly), 2026 (yearly). */
+/** Bucket key for a group-by: 2026-09-05T14 (hourly), 2026-09-05 (daily), 2026-09 (monthly), 2026 (yearly). */
 export function bucketKey(occurredAtMs: number, timeZone: string, granularity: Granularity): string {
-  const { y, m, d } = calendarParts(occurredAtMs, timeZone);
-  if (granularity === "yearly") return String(y).padStart(4, "0");
-  if (granularity === "monthly") return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}`;
-  return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  const { y, m, d, h } = calendarParts(occurredAtMs, timeZone);
+  return keyFromParts(y, m, d, h, granularity);
+}
+
+/** Key for calendar parts already in the reporting timezone. */
+export function keyFromParts(y: number, m: number, d: number, h: number, granularity: Granularity): string {
+  const year = String(y).padStart(4, "0");
+  if (granularity === "yearly") return year;
+  const month = `${year}-${String(m).padStart(2, "0")}`;
+  if (granularity === "monthly") return month;
+  const day = `${month}-${String(d).padStart(2, "0")}`;
+  if (granularity === "daily") return day;
+  return `${day}T${String(h).padStart(2, "0")}`;
 }
 
 export function bucketLabel(key: string, granularity: Granularity): string {
   if (granularity === "yearly") return key;
+  if (granularity === "hourly") return `${key.slice(11, 13)}:00`;
   if (granularity === "monthly") {
     const [y, m] = key.split("-").map(Number);
     return new Date(Date.UTC(y ?? 1970, (m ?? 1) - 1, 1)).toLocaleString("en", { month: "short" });
@@ -81,6 +91,19 @@ export function bucketLabel(key: string, granularity: Granularity): string {
     month: "numeric",
     day: "numeric",
   });
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** Long-form bucket title for scrub readouts: "Sun 11 Oct", "Oct 2026", "Fri 16 Oct, 14:00". */
+export function bucketTitle(key: string, granularity: Granularity): string {
+  if (granularity === "yearly") return key;
+  const [y = 1970, m = 1, d = 1] = key.slice(0, 10).split("-").map(Number);
+  if (granularity === "monthly") return `${MONTHS[m - 1]} ${y}`;
+  const weekday = WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+  if (granularity === "daily") return `${weekday} ${d} ${MONTHS[m - 1]}`;
+  return `${weekday} ${d} ${MONTHS[m - 1]}, ${key.slice(11, 13)}:00`;
 }
 
 export function formatTokens(n: number): string {
