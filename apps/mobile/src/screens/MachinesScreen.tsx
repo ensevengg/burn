@@ -1,312 +1,191 @@
 import { useState } from "react";
-import {
-  Alert,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { Alert, LayoutAnimation, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import Svg, { Path } from "react-native-svg";
 import { reporterIssue } from "../lib/system-health";
 import { useMachinesQuery } from "../data/queries";
+import type { EnvironmentRow } from "../data/repository";
 import { formatRelative } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp, useSyncStatus } from "../lib/app-context";
+import type { DirectPullStatus } from "../lib/direct";
 import { useTheme } from "../lib/theme-context";
 import { confirmDestructive } from "../lib/confirm-destructive";
-import { spacing, type } from "../theme";
-import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
+import { gutter, hairline, radius, spacing, type } from "../theme";
+import { Button, Card, Empty, SectionTitle } from "../ui/primitives";
+import { FadeIn, PressableScale } from "../ui/motion";
+import { Screen, SyncPill } from "../ui/screen";
+import { Sheet } from "../ui/sheet";
 
 export function MachinesScreen() {
   const machines = useMachinesQuery();
-  const {
-    mode,
-    requestSync,
-    reportingTimezone,
-    removeMachine,
-    addDirectMachine,
-    fullSync,
-  } = useApp();
-  const { refreshingMachines, liveMachines } = useSyncStatus();
+  const { mode, reportingTimezone, addDirectMachine } = useApp();
   const { C } = useTheme();
   const [showAdd, setShowAdd] = useState(false);
-  // Gesture-driven spinner for demo mode: the machines query heartbeats every
-  // minute, and isFetching would blip the pull-to-refresh control.
-  const [demoRefreshing, setDemoRefreshing] = useState(false);
-  const liveBySlug = new Map(
-    liveMachines.map((status) => [status.slug, status]),
+
+  const trailing = (
+    <View style={styles.trailing}>
+      <SyncPill />
+      {mode === "direct" && (
+        <PressableScale
+          accessibilityRole="button"
+          accessibilityLabel="Add a machine"
+          hitSlop={6}
+          onPress={() => setShowAdd(true)}
+          style={[styles.addButton, { backgroundColor: C.accent }]}
+        >
+          <Svg width={14} height={14} viewBox="0 0 14 14">
+            <Path d="M7 1.5v11M1.5 7h11" stroke={C.accentInk} strokeWidth={2} strokeLinecap="round" />
+          </Svg>
+        </PressableScale>
+      )}
+    </View>
   );
 
+  // Machine count is dynamic; each installation is registered by URL.
+  return (
+    <Screen title="Machines" trailing={trailing}>
+      <Text style={[type.muted, styles.subtitle, { color: C.muted }]}>
+        {mode === "direct"
+          ? `Read directly over Tailscale. Pull down to refresh every machine. Days bucket in ${reportingTimezone}.`
+          : "Demo machines. Connect over Tailscale for live data."}
+      </Text>
+
+      {machines.data !== undefined && machines.data.length === 0 ? (
+        <Empty message="Add a machine URL to start tracking usage." />
+      ) : (
+        <>
+          <SectionTitle trailing={`${machines.data?.length ?? 0} reporters`}>Environments</SectionTitle>
+          {machines.data?.map((machine, index) => (
+            <FadeIn key={machine.id} delay={index * 50}>
+              <MachineCard machine={machine} />
+            </FadeIn>
+          ))}
+        </>
+      )}
+
+      {mode === "direct" && (
+        <Sheet visible={showAdd} onClose={() => setShowAdd(false)}>
+          <AddMachine onAdded={() => setShowAdd(false)} addMachine={addDirectMachine} />
+        </Sheet>
+      )}
+    </Screen>
+  );
+}
+
+/** Friendly one-line state; the raw error lives behind "Details". */
+function describe(machine: EnvironmentRow, live: DirectPullStatus | undefined): { text: string; tone: "ok" | "muted" | "warn" } {
+  if (live === undefined) return { text: `Not checked yet · last contact ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
+  if (live.state === "offline") return { text: `Unreachable · showing cached history · seen ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
+  if (live.state === "skipped") return { text: "Endpoint answered as a different machine", tone: "warn" };
+  if (live.state === "error") return { text: "Pull failed · showing cached history", tone: "warn" };
+  if (live.quotaError) return { text: "Live · quota refresh failed", tone: "warn" };
+  if (live.metricsError) return { text: "Live · health refresh failed", tone: "warn" };
+  const events = live.pulledEvents > 0 ? `+${live.pulledEvents.toLocaleString("en")} events` : "no new events";
+  const extra = live.hasMore ? " · loading history" : "";
+  return { text: `Live · ${events} · ${live.pulledQuotas} quotas · ${(live.elapsedMs / 1000).toFixed(1)}s${extra}`, tone: "ok" };
+}
+
+function MachineCard({ machine }: { machine: EnvironmentRow }) {
+  const { C } = useTheme();
+  const { mode, requestSync, removeMachine, fullSync } = useApp();
+  const { refreshingMachines, liveMachines, pass } = useSyncStatus();
+  const [details, setDetails] = useState(false);
+  const live = liveMachines.find((status) => status.slug === machine.slug);
+  const issue = reporterIssue(machine, live);
+  const summary = describe(machine, live);
+  const pending = pass !== null && pass.ids.includes(machine.id) && pass.settled[machine.id] === undefined;
+  const dot = pending ? C.text : summary.tone === "ok" ? C.ok : summary.tone === "warn" ? C.warn : C.faint;
+  const toneColor = summary.tone === "ok" ? C.ok : summary.tone === "warn" ? C.warn : C.muted;
+
   // Removing a machine clears its local history only, after confirmation.
-  const confirmRemove = (machineId: string, name: string) => {
+  const confirmRemove = () =>
     confirmDestructive(
       Alert,
       "Remove machine?",
       mode === "direct"
-        ? `Remove "${name}" and its cached usage and quotas from this phone? You will need to add its URL again to reconnect. Machine files stay intact.`
-        : `Remove "${name}" and its demo usage and quotas from this phone?`,
-      () => removeMachine(machineId),
+        ? `Remove "${machine.displayName}" and its cached usage and quotas from this phone? You will need to add its URL again to reconnect. Machine files stay intact.`
+        : `Remove "${machine.displayName}" and its demo usage and quotas from this phone?`,
+      () => removeMachine(machine.id),
     );
-  };
 
-  // Machine count is dynamic; each installation is registered by URL.
   return (
-    <SafeAreaView
-      style={[styles.safe, { backgroundColor: C.bg }]}
-      edges={["top"]}
-    >
-      <ScrollView
-        contentContainerStyle={{ paddingBottom: 40 }}
-        refreshControl={
-          <RefreshControl
-            refreshing={
-              mode === "direct"
-                ? refreshingMachines
-                : demoRefreshing
-            }
-            onRefresh={() => {
-              if (mode === "direct") {
-                void requestSync(null);
-                return;
-              }
-              setDemoRefreshing(true);
-              void machines.refetch().finally(() => setDemoRefreshing(false));
-            }}
-            tintColor={C.muted}
-          />
-        }
-      >
-        <View style={styles.headerRow}>
-          <Text style={[type.title, { color: C.text, flex: 1 }]}>Machines</Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Add a machine"
-            android_ripple={{
-              color: C.border,
-              foreground: true,
-              borderless: false,
-            }}
-            style={[
-              styles.addButton,
-              { borderColor: C.border, backgroundColor: C.panelAlt },
-            ]}
-            onPress={() => setShowAdd(!showAdd)}
-          >
-            <Text
-              style={{
-                color: C.text,
-                fontSize: 20,
-                fontWeight: "600",
-                lineHeight: 26,
-              }}
-            >
-              +
-            </Text>
-          </Pressable>
-        </View>
-        <Text
-          style={[type.muted, { color: C.muted, marginHorizontal: spacing.l }]}
+    <Card>
+      <View style={styles.cardTop}>
+        <View style={[styles.statusDot, { backgroundColor: dot }]} />
+        <Text style={[type.h2, { color: C.text, flex: 1, fontSize: 17 }]} numberOfLines={1}>
+          {machine.displayName}
+        </Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Remove ${machine.displayName}`}
+          hitSlop={8}
+          onPress={confirmRemove}
+          style={[styles.removeButton, { borderColor: C.border }]}
         >
-          {mode === "direct"
-            ? "Pull down (or open the app) to refresh every machine over Tailscale. Reporting timezone: "
-            : "Demo machines. Connect over Tailscale for live data. Reporting timezone: "}
-          {reportingTimezone}.
-        </Text>
-
-        {showAdd && mode === "direct" && (
-          <AddDirectMachineSheet onAdded={() => setShowAdd(false)} addMachine={addDirectMachine} />
-        )}
-
-        {mode !== "direct" && !showAdd && (
-          <Card>
-            <Text style={[type.body, { color: C.text }]}>
-              {mode === "demo"
-                ? "Showing demo data — connect over Tailscale for real machines."
-                : "Not connected yet."}
-            </Text>
-          </Card>
-        )}
-
-        {machines.data !== undefined && machines.data.length === 0 ? (
-          <Empty message="Add a machine URL to start tracking usage." />
-        ) : (
-          <>
-            <SectionTitle trailing={`${machines.data?.length ?? 0} reporters`}>
-              Environments
-            </SectionTitle>
-            {machines.data?.map((machine) => {
-              const live = liveBySlug.get(machine.slug);
-              const issue = reporterIssue(machine, live);
-              const healthy = issue === null;
-              return (
-                <Card key={machine.id}>
-                  <View style={styles.header}>
-                    <Text
-                      style={[type.h2, { color: C.text, flex: 1 }]}
-                      numberOfLines={1}
-                    >
-                      {machine.displayName}
-                    </Text>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`Remove ${machine.displayName}`}
-                      android_ripple={{
-                        color: C.border,
-                        foreground: true,
-                        borderless: false,
-                      }}
-                      style={[styles.removeButton, { borderColor: C.border }]}
-                      onPress={() =>
-                        confirmRemove(machine.id, machine.displayName)
-                      }
-                    >
-                      <Text
-                        style={{
-                          color: C.err,
-                          fontSize: 16,
-                          lineHeight: 20,
-                          fontWeight: "600",
-                        }}
-                      >
-                        −
-                      </Text>
-                    </Pressable>
-                    <Chip tone={healthy ? "green" : "yellow"}>
-                      {healthy ? "ok" : "attention"}
-                    </Chip>
-                  </View>
-                  <Text style={[type.muted, { color: C.muted }]}>
-                    {`${machine.slug} · ${humanize(machine.osKind)}${machine.hostGroup !== null ? ` · host ${machine.hostGroup}` : ""}`}
-                  </Text>
-                  <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
-                    {`last contact ${formatRelative(machine.lastHeartbeatAt)} · last pull ${formatRelative(machine.lastSuccessAt)}`}
-                  </Text>
-                  <Text style={[type.muted, { color: C.muted, marginTop: 4 }]}>
-                    {`tokscale ${machine.tokscaleVersion ?? "?"} · reporter ${machine.reporterVersion ?? "?"}`}
-                  </Text>
-                  {live !== undefined && <LiveLine status={live} />}
-                  {issue !== null && (
-                    <Text
-                      style={{ color: C.err, marginTop: 6 }}
-                      numberOfLines={3}
-                    >
-                      {issue}
-                    </Text>
-                  )}
-                  {mode === "direct" && (
-                    // Refresh reads only what changed; reconcile forces a
-                    // machine rescan and re-downloads every row.
-                    <View style={styles.actions}>
-                      {([
-                        ["Refresh", () => requestSync(machine.id)],
-                        ["Reconcile history", () => fullSync(machine.id)],
-                      ] as const).map(([label, action]) => (
-                        <Pressable
-                          key={label}
-                          accessibilityRole="button"
-                          accessibilityLabel={`${label} ${machine.displayName}`}
-                          accessibilityState={{ disabled: refreshingMachines }}
-                          disabled={refreshingMachines}
-                          onPress={() => void action()}
-                          style={[
-                            styles.requestButton,
-                            styles.action,
-                            {
-                              backgroundColor: C.panelAlt,
-                              borderColor: C.border,
-                              opacity: refreshingMachines ? 0.35 : 1,
-                            },
-                          ]}
-                        >
-                          <Text style={{ color: C.text, fontWeight: "600" }}>
-                            {label}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                  )}
-                </Card>
-              );
-            })}
-          </>
-        )}
-      </ScrollView>
-    </SafeAreaView>
-  );
-}
-
-/**
- * Direct pull result for one machine. Rendered only after a probe ran —
- * absence means "not probed yet", not "offline", so the card never implies a
- * machine is down before the user asked.
- */
-function LiveLine({
-  status,
-}: {
-  status: import("../lib/direct").DirectPullStatus;
-}) {
-  const { C } = useTheme();
-  if (status.state === "live") {
-    const tail =
-      status.pulledEvents > 0
-        ? `live · +${status.pulledEvents} changed event${status.pulledEvents === 1 ? "" : "s"}`
-        : "live · no event changes";
-    const quota =
-      "pulledQuotas" in status
-        ? ` · ${status.pulledQuotas} quota${status.pulledQuotas === 1 ? "" : "s"}`
-        : "";
-    const timing = ` · ${(status.elapsedMs / 1000).toFixed(1)}s`;
-    const scan =
-      "scanMs" in status && status.scanMs != null
-        ? ` · scan ${(status.scanMs / 1000).toFixed(1)}s`
-        : "";
-    return (
-      <>
-        <Text style={{ color: C.ok ?? C.muted, marginTop: 4 }}>
-          {tail}
-          {quota}
-          {timing}
-          {scan}
-          {status.hasMore ? " · loading history" : ""}
-        </Text>
-        {"quotaError" in status && status.quotaError ? (
-          <Text style={{ color: C.err, marginTop: 4 }} numberOfLines={2}>
-            Quota refresh: {status.quotaError}
-          </Text>
-        ) : null}
-      </>
-    );
-  }
-  if (status.state === "offline") {
-    return (
-      <Text style={[type.muted, { color: C.muted, marginTop: 4 }]}>
-        live probe: unreachable — showing cached data
+          <Svg width={12} height={12} viewBox="0 0 12 12">
+            <Path d="M2 6h8" stroke={C.err} strokeWidth={1.8} strokeLinecap="round" />
+          </Svg>
+        </Pressable>
+      </View>
+      <Text style={[type.muted, styles.meta, { color: C.muted }]} numberOfLines={1}>
+        {[humanize(machine.osKind), machine.slug, machine.hostGroup === null ? null : `host ${machine.hostGroup}`]
+          .filter(Boolean)
+          .join(" · ")}
       </Text>
-    );
-  }
-  if (status.state === "skipped") {
-    return (
-      <Text
-        style={{ color: C.err, marginTop: 4 }}
-      >{`live probe skipped: ${status.error ?? "identity mismatch"}`}</Text>
-    );
-  }
-  return (
-    <Text
-      style={{ color: C.err, marginTop: 4 }}
-      numberOfLines={2}
-    >{`live probe failed: ${status.error ?? "unknown"}`}</Text>
+      <Text style={[type.muted, styles.meta, { color: C.faint }]} numberOfLines={1}>
+        {`reporter ${machine.reporterVersion ?? "?"} · tokscale ${machine.tokscaleVersion ?? "?"} · pulled ${formatRelative(machine.lastSuccessAt)}`}
+      </Text>
+      <View style={[styles.statusLine, { backgroundColor: C.panelAlt }]}>
+        <Text style={[type.muted, { color: pending ? C.text : toneColor, flex: 1 }]} numberOfLines={2}>
+          {pending ? "Syncing…" : summary.text}
+        </Text>
+        {issue !== null && (
+          <Pressable
+            hitSlop={8}
+            accessibilityRole="button"
+            onPress={() => {
+              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+              setDetails(!details);
+            }}
+          >
+            <Text style={[type.muted, { color: C.text, fontWeight: "600" }]}>{details ? "Hide" : "Details"}</Text>
+          </Pressable>
+        )}
+      </View>
+      {details && issue !== null && (
+        <Text selectable style={[styles.issue, { color: C.muted, borderColor: C.border }]}>
+          {issue}
+        </Text>
+      )}
+      {mode === "direct" && (
+        // Refresh reads only what changed; reconcile forces a machine rescan
+        // and re-downloads every row.
+        <View style={styles.actions}>
+          <Button
+            label="Refresh"
+            disabled={refreshingMachines}
+            onPress={() => void requestSync(machine.id)}
+            grow
+            style={styles.action}
+          />
+          <Button
+            label="Reconcile history"
+            disabled={refreshingMachines}
+            onPress={() => void fullSync(machine.id)}
+            grow
+            style={styles.action}
+          />
+        </View>
+      )}
+    </Card>
   );
 }
 
 /**
- * Direct mode (ADR 0002): adding a machine = its tailnet endpoint. The ping
- * validates it and the slug dedupes it; the machine card appears immediately.
+ * Adding a machine = its tailnet endpoint. The ping validates it and the slug
+ * dedupes it; the machine card appears immediately.
  */
-function AddDirectMachineSheet({
+function AddMachine({
   onAdded,
   addMachine,
 }: {
@@ -330,18 +209,17 @@ function AddDirectMachineSheet({
   };
 
   return (
-    <Card>
-      <Text style={[type.h2, { color: C.text }]}>Add a machine</Text>
-      <Text style={[type.muted, { color: C.muted, marginVertical: 6 }]}>
-        Run this on the machine, then keep the daemon running. Connect both
-        devices to your tailnet and paste the printed URL below.
+    <View>
+      <Text style={[type.title, { color: C.text, fontSize: 24 }]}>Add a machine</Text>
+      <Text style={[type.muted, { color: C.muted, marginTop: 6, lineHeight: 18 }]}>
+        Run this on the machine and keep the daemon running. With both devices on your tailnet, paste the URL it
+        prints.
       </Text>
-      <Text selectable style={[styles.command, { color: C.text, backgroundColor: C.panelAlt }]}>
+      <Text selectable style={[styles.command, { color: C.text, backgroundColor: C.panelAlt, borderColor: C.border }]}>
         {'npx burn-report init --slug <machine-slug> --name "<Display Name>"\nnpx burn-report daemon'}
       </Text>
-      <Text style={[type.muted, { color: C.muted, marginTop: 6 }]}>
-        Give each Windows, WSL or dual-boot installation a distinct slug; use
-        the same --host-group for installations on one physical machine.
+      <Text style={[type.muted, { color: C.faint, marginTop: 8, lineHeight: 17 }]}>
+        Give each Windows, WSL or dual-boot installation its own slug; share --host-group across one physical machine.
       </Text>
       <TextInput
         value={url}
@@ -351,86 +229,72 @@ function AddDirectMachineSheet({
         autoCapitalize="none"
         autoCorrect={false}
         keyboardType="url"
-        style={[
-          styles.command,
-          { backgroundColor: C.panelAlt, borderColor: C.border, color: C.text },
-        ]}
+        returnKeyType="go"
+        onSubmitEditing={submit}
+        style={[styles.input, { backgroundColor: C.panelAlt, borderColor: valid ? C.muted : C.border, color: C.text }]}
       />
-      {error !== null && (
-        <Text style={{ color: C.err, marginTop: 6 }}>{error}</Text>
-      )}
-      <Pressable
-        accessibilityRole="button"
-        android_ripple={{
-          color: C.border,
-          foreground: true,
-          borderless: false,
-        }}
-        style={[
-          styles.requestButton,
-          {
-            backgroundColor: C.panelAlt,
-            borderColor: C.border,
-            opacity: valid && !busy ? 1 : 0.35,
-          },
-        ]}
+      {error !== null && <Text style={{ color: C.err, marginTop: 8 }}>{error}</Text>}
+      <Button
+        label={busy ? "Checking…" : "Add machine"}
+        variant="solid"
         disabled={!valid || busy}
         onPress={submit}
-      >
-        <Text style={{ color: C.text, fontWeight: "600" }}>
-          {busy ? "Checking…" : "Add machine"}
-        </Text>
-      </Pressable>
-    </Card>
+        style={{ marginTop: spacing.m }}
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1 },
-  headerRow: {
+  subtitle: { marginHorizontal: gutter, lineHeight: 18 },
+  trailing: { flexDirection: "row", alignItems: "center", gap: 8 },
+  addButton: { width: 30, height: 30, borderRadius: 15, alignItems: "center", justifyContent: "center" },
+  cardTop: { flexDirection: "row", alignItems: "center", gap: 10 },
+  statusDot: { width: 9, height: 9, borderRadius: 5 },
+  meta: { marginTop: 3, marginLeft: 19 },
+  statusLine: {
     flexDirection: "row",
-    alignItems: "center",
-    marginHorizontal: spacing.l,
-    marginTop: spacing.m,
-  },
-  addButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  command: {
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    marginTop: 6,
-    fontSize: 11.5,
-    fontFamily: "monospace",
-  },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
     gap: spacing.s,
+    marginTop: spacing.m,
+    borderRadius: radius.s,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  issue: {
+    marginTop: spacing.s,
+    fontSize: 11.5,
+    lineHeight: 16,
+    fontFamily: "monospace",
+    borderLeftWidth: 2,
+    paddingLeft: 10,
   },
   removeButton: {
-    width: 26,
-    height: 26,
-    borderRadius: 8,
-    borderWidth: 1,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: hairline,
     alignItems: "center",
     justifyContent: "center",
   },
-  requestButton: {
-    borderWidth: 1,
-    borderRadius: 10,
-    alignItems: "center",
+  actions: { flexDirection: "row", gap: spacing.s, marginTop: spacing.m },
+  action: { paddingVertical: 9 },
+  command: {
+    borderWidth: hairline,
+    borderRadius: radius.s,
+    paddingHorizontal: 12,
     paddingVertical: 10,
     marginTop: spacing.m,
+    fontSize: 11.5,
+    lineHeight: 17,
+    fontFamily: "monospace",
   },
-  actions: { flexDirection: "row", gap: spacing.s },
-  action: { flex: 1 },
+  input: {
+    borderWidth: 1,
+    borderRadius: radius.s,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginTop: spacing.m,
+    fontSize: 14,
+  },
 });
