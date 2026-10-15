@@ -19,6 +19,10 @@ const EXACT: Record<string, string> = {
   zai: "Z.ai",
   zcode: "ZCode",
   opencode: "OpenCode",
+  lmstudio: "LM Studio",
+  "5h": "5-hour",
+  "30d": "30-day",
+  "7d": "7-day",
   codex: "Codex",
   claude: "Claude",
   openai: "OpenAI",
@@ -75,9 +79,19 @@ export function humanize(raw: string | null | undefined): string {
   if (trimmed === "") return "";
   const exact = EXACT[trimmed] ?? EXACT[trimmed.toLowerCase()];
   if (exact !== undefined) return exact;
-  return trimmed
-    .split(/[_\-\s]+/)
-    .filter((part) => part !== "")
-    .map(wordCase)
-    .join(" ");
+  const words = trimmed.split(/[_\-\s]+/).filter((part) => part !== "");
+  // Dash-separated versions: "claude-opus-4-5" → "Claude Opus 4.5". Only a
+  // short number followed by a single digit merges, so dates stay intact.
+  const merged: string[] = [];
+  for (const word of words) {
+    const previous = merged[merged.length - 1];
+    if (previous !== undefined && /^\d{1,2}$/.test(previous) && /^\d$/.test(word)) merged[merged.length - 1] = `${previous}.${word}`;
+    else merged.push(word);
+  }
+  const cased = merged.map(wordCase);
+  // Product casing for versioned GPT ids: "gpt-6-1-sol" → "GPT-6.1 Sol".
+  for (let i = cased.length - 2; i >= 0; i--) {
+    if (cased[i] === "GPT" && /^\d/.test(cased[i + 1]!)) cased.splice(i, 2, `GPT-${cased[i + 1]}`);
+  }
+  return cased.join(" ");
 }

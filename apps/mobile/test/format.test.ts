@@ -50,6 +50,15 @@ describe("formatting", () => {
   });
 });
 
+test("dash-separated model versions read as decimals without merging dates", () => {
+  expect(humanize("claude-opus-5-5")).toBe("Claude Opus 5.5");
+  expect(humanize("claude-sonnet-4-5-20250929")).toBe("Claude Sonnet 4.5 20250929");
+  expect(humanize("gpt-6-astra")).toBe("GPT-6 Astra");
+  expect(humanize("glm-4.7")).toBe("GLM-4.7");
+  expect(humanize("gpt-6-1-sol")).toBe("GPT-6.1 Sol");
+  expect(humanize("gpt-5.2-codex")).toBe("GPT-5.2 Codex");
+});
+
 test("cached zone offsets match Intl exactly, including DST transition days", () => {
   const zones = ["Asia/Kolkata", "America/New_York", "Europe/Berlin", "Australia/Lord_Howe", "Pacific/Chatham", "UTC"];
   const reference = (ms: number, timeZone: string) => {
