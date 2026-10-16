@@ -3,7 +3,7 @@ import { Animated, Pressable, StyleSheet, Text, View, type StyleProp, type ViewS
 import Svg, { Circle } from "react-native-svg";
 import { useTheme } from "../lib/theme-context";
 import { gutter, hairline, motion, radius, spacing, type } from "../theme";
-import { GrowBar, PressableScale } from "./motion";
+import { GrowBar, PressableScale, useTweenedNumber } from "./motion";
 
 /** Raised graphite surface. Hairline edge so it reads on true black. */
 export function Card({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
@@ -172,7 +172,8 @@ export function Ring({
   const { C } = useTheme();
   const r = (size - stroke) / 2;
   const circumference = 2 * Math.PI * r;
-  const clamped = Math.max(0, Math.min(1, fraction));
+  // Sweeps to new values on refresh rather than snapping.
+  const swept = useTweenedNumber(Math.max(0, Math.min(1, fraction)), 650);
   return (
     <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
       <Svg width={size} height={size} style={StyleSheet.absoluteFill}>
@@ -186,7 +187,7 @@ export function Ring({
           fill="none"
           strokeLinecap="round"
           strokeDasharray={`${circumference} ${circumference}`}
-          strokeDashoffset={circumference * (1 - clamped)}
+          strokeDashoffset={circumference * (1 - swept)}
           rotation={-90}
           origin={`${size / 2}, ${size / 2}`}
         />
@@ -205,12 +206,16 @@ export function ShareBar({ shares, height = 8 }: { shares: { key: string; fracti
       {visible.length === 0 ? (
         <View style={{ flex: 1, backgroundColor: C.panelAlt }} />
       ) : (
-        visible.map((share) => (
-          <View key={share.key} style={{ flex: share.fraction, backgroundColor: share.color, borderRadius: 2 }} />
-        ))
+        visible.map((share) => <ShareSegment key={share.key} fraction={share.fraction} color={share.color} />)
       )}
     </View>
   );
+}
+
+/** Segments glide to new shares, so a refresh or range switch re-proportions instead of jumping. */
+function ShareSegment({ fraction, color }: { fraction: number; color: string }) {
+  const flex = useTweenedNumber(fraction, 650);
+  return <View style={{ flex, backgroundColor: color, borderRadius: 2 }} />;
 }
 
 /** Settings-style list row inside a Card. */
