@@ -8,6 +8,18 @@
 machine: tokscale + burn-events → burn-report daemon ← Tailscale → phone: Expo + SQLite
 ```
 
+<p align="center">
+  <img src="docs/screenshots/overview.webp" width="250" alt="Overview: 30-day spend, usage chart and agent shares">
+  <img src="docs/screenshots/scrub.webp" width="250" alt="Dragging the chart to read a single day">
+  <img src="docs/screenshots/limits.webp" width="250" alt="Token breakdown with cache hit rate, and vendor limits">
+</p>
+<p align="center">
+  <img src="docs/screenshots/explore.webp" width="250" alt="Explore: models ranked by tokens, one expanded to its token mix">
+  <img src="docs/screenshots/systems.webp" width="250" alt="Systems: RAM and GPU usage and temperatures per machine">
+  <img src="docs/screenshots/light.webp" width="250" alt="Overview in light mode">
+</p>
+<p align="center"><sub>The bundled demo dataset on Android. Its machines, usage and prices are made up.</sub></p>
+
 ## Quickstart
 
 The reporter currently requires Bun for its TypeScript CLI. Install [Tailscale](https://tailscale.com/) on each machine and the phone, and connect them to the same tailnet. From this checkout:
@@ -27,6 +39,16 @@ Start the app with `bun run mobile`, open it in Expo Go on Android, choose **Con
 For the published CLI, the equivalent setup is `npx burn-report init --slug my-machine --name "My Machine"`, then `npx burn-report daemon`.
 
 To explore without machines, start the app and choose **Explore with demo data**. It loads a bundled 120-day dataset locally.
+
+## The app
+
+- **Overview**: spend or tokens over 24 hours, 7, 30 or 90 days, or all time. Drag the chart to read a single day or hour. Below it are agent shares, the input/output/cache split with cache hit rate, and vendor limits with reset countdowns, most urgent first.
+- **Explore**: models, agents, workspaces and sessions ranked over a chosen window. Tap a row for its token mix.
+- **Systems**: RAM and GPU usage and temperatures per machine, with 24-hour trends. Machines that stop reporting fold into a short list.
+- **Machines**: add a reporter by URL; refresh or reconcile one machine. Status is in plain language, with the raw error behind **Details**.
+- **Settings**: System, Light or Dark theme (dark is true black), the reporting timezone, and disconnect or clear data behind a confirmation.
+
+Pull down on any tab to refresh. The header pill shows per-machine progress ("Syncing 1/3") and, once idle, how many machines answered. Refreshed numbers glide to their new values, and the Overview total briefly shows what the pull added.
 
 ## Sync behavior
 
