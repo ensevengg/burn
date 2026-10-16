@@ -12,12 +12,12 @@ Track your AI coding agents across Windows, WSL, Linux and macOS:
 No servers. No accounts. No telemetry.
 
 <p align="center">
-  <img src="assets/overview.webp" width="190" alt="Overview: 30-day spend, usage chart and agent shares">
+  <img src="assets/overview.webp" width="190" alt="Overview in light mode: 30-day spend, usage chart and agent shares">
   <img src="assets/limits.webp" width="190" alt="Token breakdown with cache hit rate, and vendor limits">
-  <img src="assets/explore.webp" width="190" alt="Explore: models ranked by tokens, one expanded to its token mix">
+  <img src="assets/explore.webp" width="190" alt="Explore in light mode: models ranked by tokens">
   <img src="assets/systems.webp" width="190" alt="Systems: RAM and GPU usage and temperatures per machine">
 </p>
-<p align="center"><sub>Demo data. Machines, usage and prices are made up.</sub></p>
+<p align="center"><sub>Light or dark, your call. Demo data: machines, usage and prices are made up.</sub></p>
 
 ## How it works
 
