@@ -1,6 +1,6 @@
 # AGENTS.md — burn
 
-Rules and directions for AI agents (and humans) working on **burn**. Read this before writing any code. If a decision here conflicts with your instinct, the decision wins — the rationale is in [`GLM-questionnaire.html`](./GLM-questionnaire.html), which records the full planning interview, and [`sol-thoughts.html`](./sol-thoughts.html), the second-agent architecture review whose corrections were accepted and folded in (user delegated the final calls to the planning agent). The owner's 2026-10-02 decision in [ADR 0003](docs/adr/0003-tailscale-only-backend.md) supersedes the original cloud architecture. Do not relitigate settled decisions; propose an ADR only if you have *new* information.
+Rules and directions for AI agents (and humans) working on **burn**. Read this before writing any code. If a decision here conflicts with your instinct, the decision wins — the rationale is in `GLM-questionnaire.html`, which records the full planning interview, and `sol-thoughts.html`, the second-agent architecture review whose corrections were accepted and folded in (user delegated the final calls to the planning agent). Both are local-only conversation transcripts, gitignored and absent from fresh clones. The owner's 2026-10-02 decision in [ADR 0003](docs/adr/0003-tailscale-only-backend.md) supersedes the original cloud architecture. Do not relitigate settled decisions; propose an ADR only if you have *new* information.
 
 ## What burn is
 
