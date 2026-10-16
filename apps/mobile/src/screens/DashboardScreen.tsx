@@ -7,6 +7,7 @@ import {
   bucketTitle,
   formatCost,
   formatCostCompact,
+  formatCount,
   formatPercent,
   formatRelative,
   formatTokens,
@@ -18,9 +19,9 @@ import { useApp, useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
 import { fillSeries, rollupYears } from "../lib/series";
 import { DASHBOARD_RANGES, USAGE_RANGES, usageWindowStart, type UsageRangeId } from "../lib/usage-range";
-import { gutter, hairline, radius, spacing, type } from "../theme";
+import { gutter, hairline, motion, radius, spacing, type } from "../theme";
 import { Card, Dot, Empty, Ring, SectionTitle, Segmented, ShareBar } from "../ui/primitives";
-import { FadeIn, PressableScale, Skeleton, useTweenedNumber } from "../ui/motion";
+import { easeOut, FadeIn, PressableScale, Skeleton, TweenText, useTweenedNumber } from "../ui/motion";
 import { UsageChart, type ChartPoint } from "../ui/charts";
 import { Screen } from "../ui/screen";
 
@@ -164,15 +165,13 @@ function UsageHero({
       : scrubbing
         ? bucketTitle(shown.keys[scrub]!, shown.granularity)
         : `${shown.metric === "cost" ? "Spend" : "Processed"} · ${RANGE_WORDS[shown.rangeId]}`;
-  const sub =
-    shown === null
-      ? " "
-      : scrubbing
-        ? shown.metric === "cost"
-          ? `${formatTokens(shown.tokens[scrub]!)} tokens`
-          : `${formatCost(shown.costs[scrub]!)} API estimate`
-        : `${shown.messages.toLocaleString("en")} messages · ${shown.sessions.toLocaleString("en")} sessions`;
   const scrubValue = scrubbing ? (shown.metric === "cost" ? shown.costs[scrub]! : shown.tokens[scrub]!) : null;
+  const scrubSub = !scrubbing
+    ? null
+    : shown.metric === "cost"
+      ? `${formatTokens(shown.tokens[scrub]!)} tokens`
+      : `${formatCost(shown.costs[scrub]!)} API estimate`;
+  const delta = useRefreshDelta(fresh, reportingTimezone);
 
   const onScrub = useCallback((index: number | null) => setScrub(index), []);
 
@@ -188,11 +187,20 @@ function UsageHero({
         {shown === null ? (
           <Skeleton style={[styles.heroSkeleton, { backgroundColor: C.panelAlt }]} />
         ) : (
-          <HeroNumber key={shown.metric} value={shown.total} scrubValue={scrubValue} format={format} />
+          <View style={styles.heroNumberRow}>
+            <HeroNumber key={shown.metric} value={shown.total} scrubValue={scrubValue} format={format} />
+            <View style={{ opacity: scrubbing ? 0 : 1 }}>
+              <DeltaTag delta={delta} format={shown.metric === "tokens" ? formatTokens : formatCostDelta} />
+            </View>
+          </View>
         )}
-        <Text style={[type.muted, { color: C.muted, marginTop: 4 }]} numberOfLines={1}>
-          {sub}
-        </Text>
+        {shown === null || scrubSub !== null ? (
+          <Text style={[type.muted, { color: C.muted, marginTop: 4 }]} numberOfLines={1}>
+            {scrubSub ?? " "}
+          </Text>
+        ) : (
+          <HeroSub messages={shown.messages} sessions={shown.sessions} />
+        )}
         <View style={styles.chartWrap}>
           {shown === null ? (
             <Skeleton style={[styles.chartSkeleton, { backgroundColor: C.panel }]} />
@@ -229,9 +237,90 @@ function HeroNumber({
   const { C } = useTheme();
   const shown = useTweenedNumber(scrubValue ?? value, scrubValue === null ? 650 : 0, 0);
   return (
-    <Text style={[type.display, { color: C.text }]} numberOfLines={1} adjustsFontSizeToFit>
+    <Text style={[type.display, { color: C.text, flexShrink: 1 }]} numberOfLines={1} adjustsFontSizeToFit>
       {format(shown)}
     </Text>
+  );
+}
+
+function HeroSub({ messages, sessions }: { messages: number; sessions: number }) {
+  const { C } = useTheme();
+  const shownMessages = useTweenedNumber(messages, 650);
+  const shownSessions = useTweenedNumber(sessions, 650);
+  return (
+    <Text style={[type.muted, { color: C.muted, marginTop: 4 }]} numberOfLines={1}>
+      {`${formatCount(shownMessages)} messages · ${formatCount(shownSessions)} sessions`}
+    </Text>
+  );
+}
+
+const DELTA_HOLD_MS = 2400;
+
+/** Cents are enough for "what this refresh added"; sub-cent amounts keep formatCost's precision. */
+const formatCostDelta = (amount: number) => (amount >= 0.01 && amount < 1 ? `$${amount.toFixed(2)}` : formatCost(amount));
+
+interface Delta {
+  amount: number;
+  id: number;
+}
+
+/**
+ * What refreshes just added to the same window and metric. Back-to-back page
+ * commits accumulate into one tag; switching range, metric or timezone never
+ * counts as growth.
+ */
+function useRefreshDelta(fresh: HeroSnapshot | null, timeZone: string): Delta | null {
+  const [delta, setDelta] = useState<Delta | null>(null);
+  const previous = useRef<{ key: string; total: number } | null>(null);
+  const base = useRef<{ total: number; until: number } | null>(null);
+  useEffect(() => {
+    if (fresh === null) return;
+    const key = `${fresh.rangeId}|${fresh.metric}|${timeZone}`;
+    const before = previous.current;
+    previous.current = { key, total: fresh.total };
+    if (before === null || before.key !== key) {
+      base.current = null;
+      return;
+    }
+    if (fresh.total - before.total < 1e-9) return;
+    const now = Date.now();
+    if (base.current === null || now > base.current.until) base.current = { total: before.total, until: 0 };
+    base.current.until = now + DELTA_HOLD_MS;
+    const amount = fresh.total - base.current.total;
+    setDelta((current) => ({ amount, id: (current?.id ?? 0) + 1 }));
+  }, [fresh, timeZone]);
+  return delta;
+}
+
+/** "+$0.40" beside the total: rises in, holds, fades. Native-driven. */
+function DeltaTag({ delta, format }: { delta: Delta | null; format: (n: number) => string }) {
+  const { C } = useTheme();
+  const progress = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (delta === null) return;
+    const animation = Animated.sequence([
+      Animated.timing(progress, { toValue: 1, duration: motion.base, easing: easeOut, useNativeDriver: true }),
+      Animated.delay(DELTA_HOLD_MS),
+      Animated.timing(progress, { toValue: 0, duration: motion.slow, useNativeDriver: true }),
+    ]);
+    animation.start();
+    return () => animation.stop();
+  }, [delta, progress]);
+  if (delta === null) return null;
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        styles.deltaTag,
+        {
+          backgroundColor: C.panelAlt,
+          opacity: progress,
+          transform: [{ translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [6, 0] }) }],
+        },
+      ]}
+    >
+      <Text style={[styles.deltaText, { color: C.text }]}>{`+${format(delta.amount)}`}</Text>
+    </Animated.View>
   );
 }
 
@@ -260,15 +349,23 @@ const AgentShares = memo(function AgentShares({ metric, rangeId }: { metric: Met
             <Text style={[type.body, { color: C.text, fontWeight: "600" }]} numberOfLines={1}>
               {humanize(row.key)}
             </Text>
-            <Text style={[type.muted, { color: C.faint, marginLeft: 8, flex: 1 }]} numberOfLines={1}>
-              {`${row.sessions} sessions`}
-            </Text>
-            <Text style={[type.muted, { color: C.muted, width: 52, textAlign: "right", fontVariant: ["tabular-nums"] }]}>
-              {formatPercent(row.share)}
-            </Text>
-            <Text style={[styles.agentValue, { color: C.text }]}>
-              {metric === "cost" ? formatCost(row.cost) : formatTokens(row.tokens)}
-            </Text>
+            <TweenText
+              value={row.sessions}
+              format={formatSessions}
+              style={[type.muted, { color: C.faint, marginLeft: 8, flex: 1 }]}
+              numberOfLines={1}
+            />
+            <TweenText
+              value={row.share}
+              format={formatPercent}
+              style={[type.muted, { color: C.muted, width: 52, textAlign: "right", fontVariant: ["tabular-nums"] }]}
+            />
+            <TweenText
+              key={metric}
+              value={metric === "cost" ? row.cost : row.tokens}
+              format={metric === "cost" ? formatCost : formatTokens}
+              style={[styles.agentValue, { color: C.text }]}
+            />
           </View>
         ))}
       </View>
@@ -288,16 +385,16 @@ const TokenBreakdown = memo(function TokenBreakdown({ metric, rangeId }: { metri
       <SectionTitle>Tokens</SectionTitle>
       <Card style={styles.tokensCard}>
         <Ring fraction={totals.hitRate} size={78} stroke={7} color={C.text}>
-          <Text style={[styles.ringValue, { color: C.text }]}>{`${(totals.hitRate * 100).toFixed(0)}%`}</Text>
+          <TweenText value={totals.hitRate} format={formatWholePercent} style={[styles.ringValue, { color: C.text }]} />
           <Text style={[styles.ringLabel, { color: C.muted }]}>cache hit</Text>
         </Ring>
         <View style={styles.tokenGrid}>
-          <TokenStat label="Processed" value={formatTokens(eventTokens(totals))} />
-          <TokenStat label="Output" value={formatTokens(totals.outputTokens)} />
-          <TokenStat label="Cached input" value={formatTokens(totals.cacheReadTokens)} />
-          <TokenStat label="Uncached input" value={formatTokens(totals.inputTokens)} />
-          {savings !== null && <TokenStat label="Cache savings" value={formatCost(savings)} />}
-          {totals.reasoningTokens > 0 && <TokenStat label="Reasoning" value={formatTokens(totals.reasoningTokens)} />}
+          <TokenStat label="Processed" value={eventTokens(totals)} />
+          <TokenStat label="Output" value={totals.outputTokens} />
+          <TokenStat label="Cached input" value={totals.cacheReadTokens} />
+          <TokenStat label="Uncached input" value={totals.inputTokens} />
+          {savings !== null && <TokenStat label="Cache savings" value={savings} format={formatCost} />}
+          {totals.reasoningTokens > 0 && <TokenStat label="Reasoning" value={totals.reasoningTokens} />}
         </View>
       </Card>
     </>
@@ -314,15 +411,18 @@ function SectionSkeleton({ title, height, corner }: { title: string; height: num
   );
 }
 
-function TokenStat({ label, value }: { label: string; value: string }) {
+function TokenStat({ label, value, format = formatTokens }: { label: string; value: number; format?: (n: number) => string }) {
   const { C } = useTheme();
   return (
     <View style={styles.tokenStat}>
       <Text style={[type.muted, { color: C.muted }]}>{label}</Text>
-      <Text style={[styles.tokenValue, { color: C.text }]}>{value}</Text>
+      <TweenText value={value} format={format} style={[styles.tokenValue, { color: C.text }]} />
     </View>
   );
 }
+
+const formatSessions = (n: number) => `${formatCount(n)} sessions`;
+const formatWholePercent = (fraction: number) => `${(fraction * 100).toFixed(0)}%`;
 
 interface Subscription {
   key: string;
@@ -393,9 +493,15 @@ function Limits() {
                   return (
                     <View key={quota.metric} style={styles.limitMetric}>
                       <Ring fraction={(remaining ?? 0) / 100} size={50} stroke={4.5} color={tone}>
-                        <Text style={[styles.limitPct, { color: remaining !== null && remaining <= 15 ? C.err : C.text }]}>
-                          {remaining === null ? "—" : `${remaining.toFixed(0)}%`}
-                        </Text>
+                        {remaining === null ? (
+                          <Text style={[styles.limitPct, { color: C.text }]}>—</Text>
+                        ) : (
+                          <TweenText
+                            value={remaining / 100}
+                            format={formatWholePercent}
+                            style={[styles.limitPct, { color: remaining <= 15 ? C.err : C.text }]}
+                          />
+                        )}
                       </Ring>
                       <Text style={[styles.limitName, { color: C.text }]} numberOfLines={1}>
                         {humanize(quota.metric)}
@@ -457,6 +563,9 @@ const styles = StyleSheet.create({
   hero: { paddingHorizontal: gutter, paddingTop: spacing.s },
   heroTop: { flexDirection: "row", alignItems: "center", gap: spacing.m, marginBottom: 6 },
   metricToggle: { width: 138 },
+  heroNumberRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  deltaTag: { borderRadius: radius.pill, paddingHorizontal: 9, paddingVertical: 4 },
+  deltaText: { fontSize: 13, fontWeight: "600", fontVariant: ["tabular-nums"] },
   heroSkeleton: { height: 46, width: 190, borderRadius: radius.s, marginVertical: 2 },
   chartWrap: { marginTop: spacing.l, minHeight: 196 },
   chartSkeleton: { height: 196, borderRadius: radius.m },
