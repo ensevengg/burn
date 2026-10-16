@@ -11,12 +11,13 @@ export interface UsageRange {
 }
 
 export const USAGE_RANGES: Record<UsageRangeId, UsageRange> = {
-  "1": { label: "Past 24h", value: "1", days: 1, granularity: "daily" },
+  "1": { label: "24h", value: "1", days: 1, granularity: "hourly" },
   "7": { label: "7d", value: "7", days: 7, granularity: "daily" },
   "30": { label: "30d", value: "30", days: 30, granularity: "daily" },
   "90": { label: "90d", value: "90", days: 90, granularity: "daily" },
   "365": { label: "1y", value: "365", days: 365, granularity: "monthly" },
-  all: { label: "All", value: "all", days: null, granularity: "yearly" },
+  // All buckets monthly; the chart folds into years once history passes 36 months.
+  all: { label: "All", value: "all", days: null, granularity: "monthly" },
 };
 
 export const DASHBOARD_RANGES = [USAGE_RANGES["1"], USAGE_RANGES["7"], USAGE_RANGES["30"], USAGE_RANGES["90"], USAGE_RANGES.all] as const;

@@ -9,6 +9,7 @@ import {
   type LivePing,
 } from "@burn/sync-api";
 import { queryWindowOverview } from "../src/data/repository";
+import { subscribePullProgress, type PullProgress } from "../src/lib/sync-state";
 import { mirrorFixture } from "./mirror-fixture";
 import {
   addDirectMachine,
@@ -490,6 +491,48 @@ describe("direct pull", () => {
       [directEnvId("win")],
     );
     expect(winEnv!.n).toBe(0);
+  });
+
+  test("each machine publishes its own settle without waiting for slower machines", async () => {
+    const fx = mirrorFixture();
+    const apis = {
+      "http://win:8787": { seenSince: [] },
+      "http://cachyos:8787": { seenSince: [], ping: ping({ slug: "cachyos" }) },
+    } satisfies Record<string, FakeEntry>;
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor: directApiFor(apis), now: () => 1_000 });
+    await addDirectMachine(fx.db, "http://cachyos:8787", { apiFor: directApiFor(apis), now: () => 1_000 });
+    let releaseOffline!: () => void;
+    const offlineGate = new Promise<void>((resolve) => (releaseOffline = resolve));
+    const fast = directApiFor(apis);
+    const events: PullProgress[] = [];
+    const unsubscribe = subscribePullProgress((db, event) => {
+      if (db === fx.db) events.push(event);
+    });
+    try {
+      const pending = pullDirectFromMachines(fx.db, {
+        apiFor: (endpoint) =>
+          endpoint === "http://win:8787"
+            ? {
+                ...fast(endpoint),
+                ping: async () => {
+                  await offlineGate;
+                  throw new LiveUnreachableError("timed out");
+                },
+              }
+            : fast(endpoint),
+        now: () => 2_000,
+      });
+      for (let i = 0; i < 50 && events.length < 2; i++) await new Promise((r) => setTimeout(r, 1));
+      expect(events).toEqual([
+        { kind: "begin", machines: [directEnvId("win"), directEnvId("cachyos")] },
+        { kind: "settled", environmentId: directEnvId("cachyos"), state: "live" },
+      ]);
+      releaseOffline();
+      await pending;
+      expect(events.at(-1)).toEqual({ kind: "settled", environmentId: directEnvId("win"), state: "offline" });
+    } finally {
+      unsubscribe();
+    }
   });
 
   test("an aborted direct pull never commits", async () => {

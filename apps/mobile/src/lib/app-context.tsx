@@ -12,7 +12,7 @@ import {
   removeDirectMachine, type DirectPullStatus, type DirectPullOptions,
 } from "./direct";
 import { removeEnvironmentLocal } from "../data/repository";
-import { advanceSyncGeneration, subscribeMirrorChanges } from "./sync-state";
+import { advanceSyncGeneration, subscribeMirrorChanges, subscribePullProgress } from "./sync-state";
 
 interface AppState {
   db: SQLiteDatabase | null;
@@ -30,6 +30,8 @@ interface AppState {
   fullSync: (environmentId: string) => Promise<void>;
 }
 
+export type MachineState = DirectPullStatus["state"];
+
 /** Progress is separate from app state so updates do not rerender all screens. */
 interface SyncStatus {
   lastSync: Date | null;
@@ -38,6 +40,10 @@ interface SyncStatus {
   refreshingMachines: boolean;
   checkingMachines: boolean;
   liveMachines: DirectPullStatus[];
+  /** The pull pass in flight (or just finished): which machines it covers and which have settled. */
+  pass: { ids: string[]; settled: Record<string, MachineState> } | null;
+  /** Last known reachability per machine, updated the moment each machine settles. */
+  machineStates: Record<string, MachineState>;
 }
 const AppContext = createContext<AppState | null>(null);
 const SyncStatusContext = createContext<SyncStatus | null>(null);
@@ -50,6 +56,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<SyncStatus>({
     lastSync: null, syncError: null, syncNotice: null,
     refreshingMachines: false, checkingMachines: false, liveMachines: [],
+    pass: null, machineStates: {},
   });
   const lifecycle = useRef(0);
   const refreshCount = useRef(0);
@@ -65,7 +72,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     refreshCount.current = 0;
     if (backfillTimer.current) clearTimeout(backfillTimer.current);
     backfillTimer.current = null;
-    patchStatus({ refreshingMachines: false, checkingMachines: false });
+    patchStatus({ refreshingMachines: false, checkingMachines: false, pass: null });
     if (db) {
       advanceSyncGeneration(db);
       cancelDirectPull(db);
@@ -100,6 +107,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
         : query.queryKey[0] === kind || (kind === "machines" && query.queryKey[0] === "systems"),
     });
   }), [db, queryClient]);
+
+  useEffect(() => subscribePullProgress((changedDb, event) => {
+    if (changedDb !== db) return;
+    setStatus((current) => {
+      if (event.kind === "begin") return { ...current, pass: { ids: event.machines, settled: {} } };
+      if (current.pass === null || !current.pass.ids.includes(event.environmentId)) return current;
+      return {
+        ...current,
+        pass: { ...current.pass, settled: { ...current.pass.settled, [event.environmentId]: event.state } },
+        machineStates: { ...current.machineStates, [event.environmentId]: event.state },
+      };
+    });
+  }), [db]);
 
   const pull = useCallback(async (options: DirectPullOptions = {}) => {
     if (!db || mode !== "direct") return;
@@ -166,7 +186,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       stop();
       await queryClient.cancelQueries();
       queryClient.removeQueries();
-      patchStatus({ lastSync: null, syncError: null, syncNotice: null });
+      patchStatus({ lastSync: null, syncError: null, syncNotice: null, machineStates: {} });
     };
     const clearData = async () => {
       if (!db) return;
@@ -214,10 +234,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // In-flight pulls must not write the removed machine back. Other
         // machines keep their status and resume pending backfills afterwards.
         cancelActive();
-        setStatus((current) => ({
-          ...current,
-          liveMachines: current.liveMachines.filter((s) => s.environmentId !== environmentId),
-        }));
+        setStatus((current) => {
+          const { [environmentId]: _removed, ...machineStates } = current.machineStates;
+          return {
+            ...current,
+            liveMachines: current.liveMachines.filter((s) => s.environmentId !== environmentId),
+            machineStates,
+          };
+        });
         if (mode === "direct") await removeDirectMachine(db, environmentId);
         else await removeEnvironmentLocal(db, environmentId);
         invalidate();

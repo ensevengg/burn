@@ -1,70 +1,124 @@
 # burn
 
-> Token burn rate for AI devs — see every token you burn across every machine, from your phone.
+**Every token you burn. Every machine. One phone.**
 
-**burn** tracks AI coding-agent usage, cache hit rates, cost and vendor limits and physical-machine RAM/GPU health across Windows, WSL, Linux and macOS. It wraps [tokscale](https://github.com/junhoyeo/tokscale) for parsing and pricing, and reads your machines directly over **Tailscale**. The Android app renders from a local SQLite mirror, including when machines are offline. No hosted database, accounts or telemetry.
+Track your AI coding agents across Windows, WSL, Linux and macOS:
+
+- **Spend**: dollars and tokens per agent, model, workspace and session
+- **Cache hits**: how much of your input came from cache
+- **Limits**: vendor quotas (Claude, Codex, Z.ai and more) with reset countdowns
+- **Health**: RAM, GPU and temperatures per machine
+
+No servers. No accounts. No telemetry.
+
+<p align="center">
+  <img src="assets/overview.webp" width="190" alt="Overview in light mode: 30-day spend, usage chart and agent shares">
+  <img src="assets/limits.webp" width="190" alt="Token breakdown with cache hit rate, and vendor limits">
+  <img src="assets/explore.webp" width="190" alt="Explore in light mode: models ranked by tokens">
+  <img src="assets/systems.webp" width="190" alt="Systems: RAM and GPU usage and temperatures per machine">
+</p>
+<p align="center"><sub>Light or dark, your call. Demo data: machines, usage and prices are made up.</sub></p>
+
+## How it works
 
 ```
 machine: tokscale + burn-events → burn-report daemon ← Tailscale → phone: Expo + SQLite
 ```
 
+- **Machines are the backend:** each runs `burn-report daemon`, a read-only server.
+- **[tokscale](https://github.com/junhoyeo/tokscale) parses and prices** ~50 AI clients.
+- **The phone pulls over Tailscale** and keeps an offline copy.
+- **Machine offline?** Its history is still there.
+
 ## Quickstart
 
-The reporter currently requires Bun for its TypeScript CLI. Install [Tailscale](https://tailscale.com/) on each machine and the phone, and connect them to the same tailnet. From this checkout:
+**1. Join one tailnet.** Install [Tailscale](https://tailscale.com/) on every machine and your phone.
+
+**2. Run a reporter on each machine.** Needs Bun.
 
 ```bash
 bun install
-cargo install --path crates/burn-events  # once per machine, or use a release binary
+cargo install --path crates/burn-events   # once per machine, or use a release binary
 bun run reporter -- init --slug my-machine --name "My Machine"
 bun run reporter -- doctor
-bun run reporter -- daemon             # keep running; prints the endpoint URL
+bun run reporter -- daemon                # keep it running; prints the URL
 ```
 
-Start the app with `bun run mobile`, open it in Expo Go on Android, choose **Use machines directly**, then paste the reporter URL under **Machines → +**. Each Windows, WSL or dual-boot installation gets its own slug; use a shared `--host-group` for installations on one physical machine. Add as many machines as needed.
+Published CLI: `npx burn-report init --slug my-machine --name "My Machine"`, then `npx burn-report daemon`.
 
-`burn-report serve` is an alias for the resident backend. Both commands accept `--port 8787` and `--bind <address>`. The default bind is the machine's Tailscale IPv4; without Tailscale it falls back to loopback and prints a warning. A loopback endpoint is useful for local diagnostics and cannot be reached by the phone. `burn-report usage` prints vendor quota JSON locally.
+**3. Open the app.** Run `bun run mobile` and open it in Expo Go on Android. Tap **Connect my machines**, then paste the URL under **Machines → +**.
 
-For the published CLI, the equivalent setup is `npx burn-report init --slug my-machine --name "My Machine"`, then `npx burn-report daemon`.
+**Just looking?** Tap **Explore with demo data**.
 
-To explore without machines, start the app and choose **Explore with demo data**. It loads a bundled 120-day dataset locally.
+### Reporter tips
 
-## Sync behavior
+- **One slug per install:** Windows, WSL and each dual-boot side.
+- **Same box?** Share a `--host-group`.
+- **Flags:** `--port 8787`, `--bind <address>`. `serve` is an alias for `daemon`.
+- **No Tailscale?** It falls back to loopback, which the phone can't reach.
+- **Quotas:** `burn-report usage` prints them locally.
 
-Opening the app or pulling to refresh probes registered machines. Validated usage pages, vendor quotas and system-health samples merge independently, preserving successful quotas when a vendor check fails. Interrupted history backfills resume while the app is foregrounded. Source fingerprints, content hashes, compressed pages and no-op writes reduce repeated scans and transfers.
+## The app
 
-Per-machine cursors checkpoint completed scan starts with a conservative overlap. Full-history reconciliation on a foreground/refresh pull after 24 hours catches late records and parser/pricing corrections. **Machines → Reconcile full history** runs it immediately. Offline machines retain cached history and show contact/error diagnostics.
+| Tab | What you get |
+|---|---|
+| **Overview** | Spend or tokens, 24h to All. Drag the chart for any day. Agents, cache hits, limits. |
+| **Explore** | Models, agents, workspaces, sessions. Ranked. |
+| **Systems** | RAM, GPU, temps. 24h trends. |
+| **Machines** | Add by URL. Refresh or reconcile. |
+| **Settings** | Theme, timezone, disconnect. |
 
-The **Systems** tab shows RAM/GPU usage and available temperatures with trailing 24-hour sparklines. Resident reporters sample physical hardware every 30 seconds and on request; unsupported sensors stay unavailable. WSL uses its Windows host’s hardware and does not create a second physical system. Reporters keep a process-local 24-hour health history; the phone persists received samples and shows stale/unavailable readings when a machine cannot answer.
+- **Pull down** anywhere to refresh.
+- **Header pill** shows progress: "Syncing 1/3".
+- **Numbers glide**, and the total shows what the pull added.
 
-History lives in the source files on your machines and the phone mirror. A fresh phone needs each source machine to come online to rebuild its history. Removing a machine or disconnecting clears local cached data only, after confirmation.
+## Sync, in short
+
+- **Incremental:** only new rows travel.
+- **Resumable:** big backfills continue while the app is open.
+- **Self-correcting:** a daily full reconcile catches late records and price fixes.
+- **Independent:** a failed quota check never wipes good data.
+- **Health:** sampled every 30s, 24h kept.
+- **Phone-only deletes:** removing a machine clears the phone's copy, never the machine's.
 
 ## Upgrading
 
-Restart reporters after updating this branch. Check `burn-events --capabilities` for `fingerprint-v1`; rebuild with `cargo install --path crates/burn-events` if it is missing (the tokscale pin remains 4.15.1). Existing configs retain identity and parser pins; loading them removes obsolete upload settings and credentials. The phone preserves cached history, preferences and registered URLs. Saved legacy endpoint URLs become Tailscale registrations automatically; add a reporter URL manually if none was saved. The upgrade performs one corrective history reconciliation. Old scheduled `push` jobs should be replaced by a resident `daemon`; the `push` command has been removed.
+- **Restart reporters.**
+- **Exporter:** if `burn-events --capabilities` lacks `fingerprint-v1`, rerun `cargo install --path crates/burn-events`.
+- **`push` is gone:** run `daemon` instead.
+- **Kept:** reporter identity, phone history, settings and machine URLs.
 
-See [transfer behavior and upgrade details](docs/connection-transfer-fixes.md) and [the backend decision](docs/adr/0003-tailscale-only-backend.md).
+Deep dives: [transfer behavior](docs/connection-transfer-fixes.md) · [why Tailscale-only](docs/adr/0003-tailscale-only-backend.md)
 
-## Repository layout
+## Repo map
 
-| Path | Purpose |
+| Path | What |
 |---|---|
-| `apps/mobile` | Expo Android app, dashboards, limits, Systems, machines, sessions/workspaces and settings. |
-| `apps/reporter` | Read-only machine backend and setup/diagnostic CLI. |
-| `crates/burn-events` | Pinned Rust exporter of priced tokscale UnifiedMessage records as JSONL. |
-| `packages/sync-api` | Machine transport, shared types, wire validation and idempotent mirror keys. |
-| `docs` | Decisions, current transfer behavior and historical audits. |
+| `apps/mobile` | Expo Android app |
+| `apps/reporter` | `burn-report` CLI and read-only machine backend |
+| `crates/burn-events` | Pinned Rust exporter of priced tokscale records (JSONL) |
+| `packages/sync-api` | Transport, shared types, validation, mirror keys |
+| `docs` | Decisions, transfer behavior, audits |
 
-## Development
+## Develop
 
 ```bash
 bun run typecheck
 bun run test
-bun run --cwd apps/mobile android  # local Android build; requires JDK + Android SDK
+bun run --cwd apps/mobile android   # local Android build; needs JDK + Android SDK
 ```
 
-[AGENTS.md](AGENTS.md) records engineering rules and current decisions. The original planning interview and architecture review remain historical records; [ADR 0003](docs/adr/0003-tailscale-only-backend.md) supersedes their cloud architecture.
+- **Rules:** [AGENTS.md](AGENTS.md)
+- **Why Tailscale-only:** [ADR 0003](docs/adr/0003-tailscale-only-backend.md)
 
-Planned follow-ups: upstream `tokscale events --jsonl`, the Skia chart pass, EAS/GitHub Releases APK packaging, reporter service installation, QR onboarding and accurate model-price reference transport.
+## Next up
+
+- Upstream `tokscale events --jsonl`
+- Skia charts
+- APKs on GitHub Releases
+- Reporter service install
+- QR onboarding
+- Accurate model-price reference transport
 
 ## License
 

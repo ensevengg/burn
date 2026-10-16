@@ -1,12 +1,13 @@
-import { useMemo, useState } from "react";
-import { FlatList, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { memo, useCallback, useMemo, useState } from "react";
+import { Animated, LayoutAnimation, StyleSheet, Text, View } from "react-native";
 import { useClientsQuery, useModelsQuery, useSessionsQuery, useWorkspacesQuery } from "../data/queries";
 import { formatCost, formatPercent, formatRelative, formatTokens } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useTheme } from "../lib/theme-context";
-import { spacing, type } from "../theme";
-import { Card, Empty, MeterBar, SectionTitle, Segmented } from "../ui/primitives";
+import { gutter, hairline, radius, spacing, type } from "../theme";
+import { Empty, Segmented, ShareBar } from "../ui/primitives";
+import { GrowBar, PressableScale, Skeleton, TweenText, useTweenedNumber } from "../ui/motion";
+import { Screen } from "../ui/screen";
 import { eventTokens, type BreakdownRow, type SessionRow } from "../data/repository";
 import { EXPLORE_RANGES, USAGE_RANGES, type UsageRangeId } from "../lib/usage-range";
 
@@ -15,13 +16,24 @@ type Tab = "models" | "clients" | "workspaces" | "sessions";
 const TABS = [
   { label: "Models", value: "models" },
   { label: "Agents", value: "clients" },
-  { label: "Workspaces", value: "workspaces" },
+  { label: "Spaces", value: "workspaces" },
   { label: "Sessions", value: "sessions" },
 ] as const;
+
+const NOUNS: Record<Tab, [string, string]> = {
+  models: ["model", "models"],
+  clients: ["agent", "agents"],
+  workspaces: ["workspace", "workspaces"],
+  sessions: ["session", "sessions"],
+};
+
+/** Expanding a row animates the list's layout once, natively. */
+const expandAnimation = LayoutAnimation.create(220, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity);
 
 export function ExploreScreen() {
   const [tab, setTab] = useState<Tab>("models");
   const [rangeId, setRangeId] = useState<UsageRangeId>("30");
+  const [expanded, setExpanded] = useState<string | null>(null);
   const windowDays = USAGE_RANGES[rangeId].days;
   const { C } = useTheme();
 
@@ -29,180 +41,302 @@ export function ExploreScreen() {
   const clients = useClientsQuery(windowDays, tab === "clients");
   const workspaces = useWorkspacesQuery(windowDays, tab === "workspaces");
   const sessions = useSessionsQuery(windowDays, tab === "sessions");
-  const breakdownData =
-    (tab === "models" ? models.data : tab === "clients" ? clients.data : workspaces.data) ?? [];
+  const breakdown = tab === "models" ? models : tab === "clients" ? clients : workspaces;
   const modelMode = tab === "models";
-  const { maxValue, totalValue } = useMemo(() => {
+  const rows = tab === "sessions" ? sessions.data : breakdown.data;
+  const loading = rows === undefined;
+
+  const { maxValue, totalValue, totalCost, totalTokens } = useMemo(() => {
+    const data = breakdown.data ?? [];
     const value = (row: BreakdownRow) => (modelMode ? eventTokens(row) : row.cost);
     return {
-      maxValue: Math.max(value(breakdownData[0] ?? EMPTY_BREAKDOWN), 0.000001),
-      totalValue: breakdownData.reduce((sum, row) => sum + value(row), 0),
+      maxValue: Math.max(0.000001, ...data.map(value)),
+      totalValue: data.reduce((sum, row) => sum + value(row), 0),
+      totalCost: data.reduce((sum, row) => sum + row.cost, 0),
+      totalTokens: data.reduce((sum, row) => sum + eventTokens(row), 0),
     };
-  }, [breakdownData, modelMode]);
+  }, [breakdown.data, modelMode]);
+
+  const toggle = useCallback((key: string) => {
+    LayoutAnimation.configureNext(expandAnimation);
+    setExpanded((current) => (current === key ? null : key));
+  }, []);
+  const changeTab = (next: Tab) => {
+    setExpanded(null);
+    setTab(next);
+  };
+
+  const count = rows?.length ?? 0;
+  const [singular, plural] = NOUNS[tab];
+  const noun = count === 1 ? singular : plural;
 
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: C.bg }]} edges={["top"]}>
-      {tab === "sessions" ? (
-        <FlatList<SessionRow>
-          key={`sessions-${rangeId}`}
-          data={sessions.data ?? []}
-          keyExtractor={(row) => row.key}
-          initialNumToRender={8}
-          maxToRenderPerBatch={8}
-          windowSize={5}
-          contentContainerStyle={{ paddingBottom: 40 }}
-          ListHeaderComponent={
-            <>
-              <Text style={[type.title, { color: C.text }, styles.title]}>Explore</Text>
-              <Segmented options={TABS} value={tab} onChange={setTab} />
-              <Segmented
-                options={EXPLORE_RANGES}
-                value={rangeId}
-                onChange={setRangeId}
-              />
-              <SectionTitle trailing="recent first">{sessions.data?.length ?? 0} sessions</SectionTitle>
-            </>
-          }
-          ListEmptyComponent={
-            <Empty message={sessions.data === undefined ? "Loading…" : "No sessions in this window."} />
-          }
-          renderItem={({ item }) => <SessionItem session={item} />}
-        />
-      ) : (
-        <FlatList<BreakdownRow>
+    <Screen
+      title="Explore"
+      renderList={(scroll) => (
+        <Animated.FlatList<BreakdownRow | SessionRow>
           key={`${tab}-${rangeId}`}
-          data={breakdownData}
+          data={(rows ?? []) as (BreakdownRow | SessionRow)[]}
           keyExtractor={(row) => row.key}
-          initialNumToRender={8}
+          extraData={expanded}
+          initialNumToRender={10}
           maxToRenderPerBatch={8}
-          windowSize={5}
-          contentContainerStyle={{ paddingBottom: 40 }}
+          windowSize={7}
+          onScroll={scroll.onScroll}
+          scrollEventThrottle={scroll.scrollEventThrottle}
+          contentContainerStyle={scroll.contentContainerStyle}
+          refreshControl={scroll.refreshControl}
+          showsVerticalScrollIndicator={false}
           ListHeaderComponent={
             <>
-              <Text style={[type.title, { color: C.text }, styles.title]}>Explore</Text>
-              <Segmented options={TABS} value={tab} onChange={setTab} />
-              <Segmented
-                options={EXPLORE_RANGES}
-                value={rangeId}
-                onChange={setRangeId}
-              />
-              <SectionTitle trailing={tab === "models" ? "by processed tokens" : "by spend"}>{humanize(tab)}</SectionTitle>
+              {scroll.largeTitle}
+              <View style={styles.controls}>
+                <Segmented options={TABS} value={tab} onChange={changeTab} />
+                <Segmented options={EXPLORE_RANGES} value={rangeId} onChange={setRangeId} size="s" />
+              </View>
+              {loading || tab === "sessions" ? (
+                <Text style={[type.muted, styles.summary, { color: C.faint }]}>
+                  {loading ? " " : `${count} ${noun} · most recent first`}
+                </Text>
+              ) : (
+                <TotalsLine lead={`${count} ${noun}`} tokens={totalTokens} cost={totalCost} />
+              )}
             </>
           }
-          ListEmptyComponent={
-            <Empty
-              message={
-                (tab === "models" ? models.data : tab === "clients" ? clients.data : workspaces.data) ===
-                undefined
-                  ? "Loading…"
-                  : "No usage in this window."
-              }
-            />
+          ListEmptyComponent={loading ? <ListSkeleton /> : <Empty message="No usage in this window." />}
+          renderItem={({ item, index }) =>
+            tab === "sessions" ? (
+              <SessionItem
+                session={item as SessionRow}
+                first={index === 0}
+                open={expanded === item.key}
+                onToggle={toggle}
+              />
+            ) : (
+              <BreakdownItem
+                row={item as BreakdownRow}
+                index={index}
+                maxValue={maxValue}
+                totalValue={totalValue}
+                modelMode={modelMode}
+                open={expanded === item.key}
+                onToggle={toggle}
+              />
+            )
           }
-          renderItem={({ item, index }) => (
-            <BreakdownItem
-              row={item}
-              index={index}
-              maxValue={maxValue}
-              modelMode={modelMode}
-              totalValue={totalValue}
-            />
-          )}
         />
       )}
-    </SafeAreaView>
+    />
   );
 }
 
-const EMPTY_BREAKDOWN: BreakdownRow = {
-  key: "",
-  title: "",
-  subtitle: null,
-  providers: [],
-  clients: [],
-  sessions: 0,
-  inputTokens: 0,
-  outputTokens: 0,
-  cacheReadTokens: 0,
-  cacheWriteTokens: 0,
-  reasoningTokens: 0,
-  messages: 0,
-  cost: 0,
-  hitRate: 0,
-  costCoverage: 0,
-};
+function ListSkeleton() {
+  const { C } = useTheme();
+  return (
+    <View style={{ paddingHorizontal: gutter, gap: 18, paddingTop: 10 }}>
+      {[0.9, 0.7, 0.55, 0.4, 0.3].map((width) => (
+        <View key={width} style={{ gap: 8 }}>
+          <Skeleton style={{ height: 14, width: `${width * 100}%`, borderRadius: 6, backgroundColor: C.panelAlt }} />
+          <Skeleton style={{ height: 4, width: `${width * 80}%`, borderRadius: 2, backgroundColor: C.panelAlt }} />
+        </View>
+      ))}
+    </View>
+  );
+}
 
-function BreakdownItem({
+const BreakdownItem = memo(function BreakdownItem({
   row,
   index,
   maxValue,
   totalValue,
   modelMode,
+  open,
+  onToggle,
 }: {
   row: BreakdownRow;
   index: number;
   maxValue: number;
   totalValue: number;
   modelMode: boolean;
+  open: boolean;
+  onToggle: (key: string) => void;
 }) {
   const { C } = useTheme();
   const processed = eventTokens(row);
   const primary = modelMode ? processed : row.cost;
-  const attribution = [...new Set([...row.providers, ...row.clients].map(humanize))].join(" · ");
+  const attribution = modelMode
+    ? [...new Set([...row.providers, ...row.clients].map(humanize))].join(" · ")
+    : humanize(row.subtitle ?? "") || `${row.sessions} sessions`;
+  const mix = [
+    { key: "Input", value: row.inputTokens },
+    { key: "Cached", value: row.cacheReadTokens },
+    { key: "Written", value: row.cacheWriteTokens },
+    { key: "Output", value: row.outputTokens },
+    { key: "Reasoning", value: row.reasoningTokens },
+  ];
   return (
-    <Card>
-      <View style={styles.rowHeader}>
-        <Text style={[type.body, { color: C.text, flex: 1, fontWeight: "600" }]} numberOfLines={1}>
-          {`${index + 1}. ${humanize(row.title)}`}
-        </Text>
-        <Text style={[type.body, { color: C.muted, fontWeight: "700" }]}>
-          {modelMode ? formatTokens(processed) : formatCost(row.cost)}
-        </Text>
+    <PressableScale
+      scaleTo={0.985}
+      accessibilityRole="button"
+      accessibilityLabel={`${humanize(row.title)}, ${modelMode ? formatTokens(processed) : formatCost(row.cost)}`}
+      accessibilityState={{ expanded: open }}
+      onPress={() => onToggle(row.key)}
+      style={[styles.item, index > 0 && { borderTopWidth: hairline, borderTopColor: C.border }]}
+    >
+      <View style={styles.itemTop}>
+        <Text style={[styles.rank, { color: C.faint }]}>{String(index + 1).padStart(2, "0")}</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={[type.body, { color: C.text, fontWeight: "600" }]} numberOfLines={1}>
+            {humanize(row.title)}
+          </Text>
+          <Text style={[type.muted, { color: C.muted, marginTop: 1 }]} numberOfLines={1}>
+            {attribution}
+          </Text>
+        </View>
+        <View style={{ alignItems: "flex-end" }}>
+          <TweenText
+            value={primary}
+            format={modelMode ? formatTokens : formatCost}
+            style={[styles.value, { color: C.text }]}
+          />
+          <TweenText
+            value={modelMode ? row.cost : processed}
+            format={modelMode ? formatCost : formatTok}
+            style={[type.muted, { color: C.faint, marginTop: 1, fontVariant: ["tabular-nums"] }]}
+          />
+        </View>
       </View>
-      <MeterBar percent={(primary / maxValue) * 100} tone={C.text} />
-      <View style={styles.rowStats}>
-        <Text style={[type.muted, { color: C.muted }]}>
-          {modelMode
-            ? `${attribution} · ${row.sessions} sessions · ${formatCost(row.cost)} · ${formatPercent(processed / (totalValue || 1))} share · cache ${formatPercent(row.hitRate)}`
-            : `${humanize(row.subtitle ?? "")} · ${formatTokens(processed)} processed · cache ${formatPercent(row.hitRate)}`}
-        </Text>
+      <View style={styles.barRow}>
+        <GrowBar fraction={primary / maxValue} color={C.text} track={C.panelAlt} height={3} delay={Math.min(index, 8) * 30} />
       </View>
-      {modelMode && (
-        <Text style={[type.muted, { color: C.faint, marginTop: 4 }]}>
-          {`${formatTokens(row.inputTokens)} in · ${formatTokens(row.cacheReadTokens)} cached · ${formatTokens(row.cacheWriteTokens)} written · ${formatTokens(row.outputTokens)} out · ${formatTokens(row.reasoningTokens)} reasoning`}
-        </Text>
+      {open && (
+        <View style={styles.detail}>
+          <ShareBar
+            height={6}
+            shares={mix.map((part, i) => ({
+              key: part.key,
+              fraction: processed === 0 ? 0 : part.value / processed,
+              color: C.chart[Math.min(i, C.chart.length - 1)]!,
+            }))}
+          />
+          <View style={styles.mixGrid}>
+            {mix.map((part, i) => (
+              <View key={part.key} style={styles.mixCell}>
+                <View style={[styles.mixSwatch, { backgroundColor: C.chart[Math.min(i, C.chart.length - 1)] }]} />
+                <Text style={[type.muted, { color: C.muted }]}>{part.key}</Text>
+                <Text style={[type.muted, { color: C.text, fontWeight: "600", fontVariant: ["tabular-nums"] }]}>
+                  {formatTokens(part.value)}
+                </Text>
+              </View>
+            ))}
+          </View>
+          <View style={styles.detailStats}>
+            <Detail label="Share" value={formatPercent(primary / (totalValue || 1))} />
+            <Detail label="Cache hit" value={formatPercent(row.hitRate)} />
+            <Detail label="Sessions" value={String(row.sessions)} />
+            <Detail label="Messages" value={row.messages.toLocaleString("en")} />
+          </View>
+        </View>
       )}
-    </Card>
+    </PressableScale>
+  );
+});
+
+function Detail({ label, value }: { label: string; value: string }) {
+  const { C } = useTheme();
+  return (
+    <View style={{ flex: 1 }}>
+      <Text style={[type.muted, { color: C.faint, fontSize: 11 }]}>{label}</Text>
+      <Text style={[type.body, { color: C.text, fontWeight: "600", fontVariant: ["tabular-nums"] }]}>{value}</Text>
+    </View>
   );
 }
 
-function SessionItem({ session }: { session: SessionRow }) {
+const SessionItem = memo(function SessionItem({
+  session,
+  first,
+  open,
+  onToggle,
+}: {
+  session: SessionRow;
+  first: boolean;
+  open: boolean;
+  onToggle: (key: string) => void;
+}) {
   const { C } = useTheme();
   return (
-    <Card>
-      <View style={styles.rowHeader}>
-        <Text style={[type.h2, { color: C.text, flex: 1 }]} numberOfLines={1}>
-          {session.title ?? session.sessionId}
-        </Text>
-        <Text style={[type.body, { color: C.muted, fontWeight: "700" }]}>{formatCost(session.cost)}</Text>
+    <PressableScale
+      scaleTo={0.985}
+      accessibilityRole="button"
+      accessibilityState={{ expanded: open }}
+      onPress={() => onToggle(session.key)}
+      style={[styles.item, !first && { borderTopWidth: hairline, borderTopColor: C.border }]}
+    >
+      <View style={styles.itemTop}>
+        <View style={{ flex: 1 }}>
+          <Text style={[type.body, { color: C.text, fontWeight: "600" }]} numberOfLines={open ? 3 : 1}>
+            {session.title ?? session.sessionId}
+          </Text>
+          <Text style={[type.muted, { color: C.muted, marginTop: 2 }]} numberOfLines={1}>
+            {`${humanize(session.client)} · ${formatRelative(new Date(session.lastActivityMs).toISOString())}`}
+          </Text>
+        </View>
+        <View style={{ alignItems: "flex-end" }}>
+          <TweenText value={session.cost} format={formatCost} style={[styles.value, { color: C.text }]} />
+          <TweenText
+            value={session.tokens}
+            format={formatTok}
+            style={[type.muted, { color: C.faint, marginTop: 1, fontVariant: ["tabular-nums"] }]}
+          />
+        </View>
       </View>
-      <View style={styles.rowStats}>
-        <Text style={[type.muted, { color: C.muted }]} numberOfLines={1}>
-          {`${humanize(session.client)} · ${session.models.map(humanize).join(", ")}`}
-        </Text>
-      </View>
-      <View style={styles.rowStats}>
-        <Text style={[type.muted, { color: C.muted }]}>
-          {`${formatTokens(session.tokens)} · ${session.messages} msgs · ${formatRelative(new Date(session.lastActivityMs).toISOString())}`}
-        </Text>
-      </View>
-    </Card>
+      {open && (
+        <View style={[styles.detail, { marginLeft: 0 }]}>
+          <View style={styles.modelChips}>
+            {session.models.map((model) => (
+              <View key={model} style={[styles.modelChip, { backgroundColor: C.panelAlt }]}>
+                <Text style={[type.muted, { color: C.text }]}>{humanize(model)}</Text>
+              </View>
+            ))}
+          </View>
+          <View style={styles.detailStats}>
+            <Detail label="Messages" value={session.messages.toLocaleString("en")} />
+            <Detail label="Tokens" value={formatTokens(session.tokens)} />
+            <Detail label="Cost" value={formatCost(session.cost)} />
+          </View>
+        </View>
+      )}
+    </PressableScale>
+  );
+});
+
+const formatTok = (n: number) => `${formatTokens(n)} tok`;
+
+/** Window totals; glides when a refresh adds usage. */
+function TotalsLine({ lead, tokens, cost }: { lead: string; tokens: number; cost: number }) {
+  const { C } = useTheme();
+  const shownTokens = useTweenedNumber(tokens, 650);
+  const shownCost = useTweenedNumber(cost, 650);
+  return (
+    <Text style={[type.muted, styles.summary, { color: C.faint }]}>
+      {`${lead} · ${formatTokens(shownTokens)} tokens · ${formatCost(shownCost)}`}
+    </Text>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1 },
-  title: { marginHorizontal: spacing.l, marginTop: spacing.m, marginBottom: spacing.s },
-  rowHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: spacing.s },
-  rowStats: { marginTop: 6 },
+  controls: { paddingHorizontal: gutter, gap: spacing.s, marginTop: spacing.xs },
+  summary: { marginHorizontal: gutter, marginTop: spacing.m, marginBottom: spacing.xs },
+  item: { marginHorizontal: gutter, paddingVertical: 14 },
+  itemTop: { flexDirection: "row", alignItems: "center", gap: spacing.m },
+  rank: { width: 20, fontSize: 12, fontWeight: "600", fontVariant: ["tabular-nums"] },
+  value: { fontSize: 15, fontWeight: "700", fontVariant: ["tabular-nums"], letterSpacing: -0.2 },
+  barRow: { marginTop: 10, marginLeft: 32 },
+  detail: { marginTop: spacing.m, marginLeft: 32, gap: spacing.m },
+  mixGrid: { flexDirection: "row", flexWrap: "wrap", rowGap: 6 },
+  mixCell: { width: "50%", flexDirection: "row", alignItems: "center", gap: 6 },
+  mixSwatch: { width: 7, height: 7, borderRadius: 2 },
+  detailStats: { flexDirection: "row", gap: spacing.s },
+  modelChips: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  modelChip: { borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 4 },
 });

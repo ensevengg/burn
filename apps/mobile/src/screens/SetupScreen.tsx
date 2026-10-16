@@ -1,10 +1,31 @@
 import { useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text } from "react-native";
+import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import Svg, { Defs, LinearGradient, Path, Stop } from "react-native-svg";
 import { useApp } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
 import { spacing, type } from "../theme";
-import { Card } from "../ui/primitives";
+import { Button } from "../ui/primitives";
+import { FadeIn } from "../ui/motion";
+
+/** Monochrome ember mark: a flame whose core is cut out of the canvas. */
+function Mark({ color, bg }: { color: string; bg: string }) {
+  return (
+    <Svg width={64} height={64} viewBox="0 0 64 64">
+      <Defs>
+        <LinearGradient id="markInk" x1="0" y1="0" x2="0" y2="1">
+          <Stop offset="0" stopColor={color} stopOpacity={0.55} />
+          <Stop offset="1" stopColor={color} stopOpacity={1} />
+        </LinearGradient>
+      </Defs>
+      <Path
+        d="M33 4c2 10 13 16 13 31 0 9-6.3 17-14 17S18 44 18 35c0-7 4-11 7-15 1 5 3 8 6 9-1-9 0-18 2-25Z"
+        fill="url(#markInk)"
+      />
+      <Path d="M32 33c4 4 6 7 6 11 0 4-2.7 7-6 7s-6-3-6-7c0-3 2-6 6-11Z" fill={bg} />
+    </Svg>
+  );
+}
 
 export function SetupScreen() {
   const { enterDemo, connectDirect } = useApp();
@@ -12,66 +33,56 @@ export function SetupScreen() {
   const [busy, setBusy] = useState<null | "demo" | "direct">(null);
   const [error, setError] = useState<string | null>(null);
 
+  const run = (which: "demo" | "direct", action: () => Promise<void>) => {
+    if (busy !== null) return;
+    setBusy(which);
+    setError(null);
+    void action()
+      .catch((err: Error) => setError(err.message))
+      .finally(() => setBusy(null));
+  };
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: C.bg }]}>
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <Text style={[type.title, { color: C.text }]}>burn</Text>
-        <Text style={[type.muted, { color: C.muted, marginBottom: spacing.xl }]}>
-          Token burn-rate tracking for AI coding agents. Connect to your machines over Tailscale and keep your history on this phone.
-        </Text>
-
-        <Card>
-          <Text style={[type.h2, { color: C.text }]}>Try it instantly</Text>
-          <Text style={[type.muted, { color: C.muted, marginVertical: spacing.s }]}>
-            Loads a bundled 120-day dataset (Codex, Z.ai, OpenCode across three machines) into the local cache.
+        <FadeIn>
+          <Mark color={C.text} bg={C.bg} />
+        </FadeIn>
+        <FadeIn delay={80}>
+          <Text style={[type.display, { color: C.text, marginTop: spacing.xl, fontSize: 52 }]}>burn</Text>
+          <Text style={[type.body, { color: C.muted, marginTop: spacing.s, lineHeight: 21 }]}>
+            Token burn for your AI coding agents — tokens, cache hits, spend and limits across every machine. Read
+            over Tailscale, kept on this phone.
           </Text>
-          {busy === "demo" ? (
-            <ActivityIndicator color={C.text} />
-          ) : (
-            <Pressable
-              accessibilityRole="button"
-              disabled={busy !== null}
-              android_ripple={{ color: C.accentInk, foreground: true, borderless: false }}
-              style={[styles.actionButton, { backgroundColor: C.accent }]}
-              onPress={() => {
-                if (busy !== null) return;
-                setBusy("demo");
-                setError(null);
-                void enterDemo().catch((err: Error) => setError(err.message)).finally(() => setBusy(null));
-              }}
-            >
-              <Text style={{ color: C.accentInk, fontWeight: "700" }}>Explore with demo data</Text>
-            </Pressable>
-          )}
-        </Card>
-
-        <Card>
-          <Text style={[type.h2, { color: C.text }]}>Connect machines directly</Text>
-          <Text style={[type.muted, { color: C.muted, marginVertical: spacing.s }]}>
-            Your phone talks to your machines over Tailscale; history lives on this device and on
-            the machines. Add machines on the Machines tab afterwards.
-          </Text>
+        </FadeIn>
+        <View style={{ flex: 1, minHeight: 48 }} />
+        <FadeIn delay={180} style={{ gap: spacing.m }}>
           {busy === "direct" ? (
-            <ActivityIndicator color={C.text} />
+            <ActivityIndicator color={C.text} style={styles.busy} />
           ) : (
-            <Pressable
-              accessibilityRole="button"
+            <Button
+              label="Connect my machines"
+              variant="solid"
               disabled={busy !== null}
-              android_ripple={{ color: C.border, foreground: true, borderless: false }}
-              style={[styles.actionButton, { borderColor: C.accent, borderWidth: 1 }]}
-              onPress={() => {
-                if (busy !== null) return;
-                setBusy("direct");
-                setError(null);
-                void connectDirect().catch((err: Error) => setError(err.message)).finally(() => setBusy(null));
-              }}
-            >
-              <Text style={{ color: C.text, fontWeight: "700" }}>Use machines directly</Text>
-            </Pressable>
+              onPress={() => run("direct", connectDirect)}
+              style={styles.cta}
+            />
           )}
-        </Card>
-
-        {error !== null && <Text style={{ color: C.err, marginTop: spacing.s }}>{error}</Text>}
+          {busy === "demo" ? (
+            <ActivityIndicator color={C.text} style={styles.busy} />
+          ) : (
+            <Button
+              label="Explore with demo data"
+              disabled={busy !== null}
+              onPress={() => run("demo", enterDemo)}
+              style={styles.cta}
+            />
+          )}
+          {error !== null && <Text style={{ color: C.err, textAlign: "center" }}>{error}</Text>}
+          <Text style={[type.muted, { color: C.faint, textAlign: "center", marginTop: spacing.s }]}>
+            No accounts, no servers, no telemetry. Add machines by URL afterwards.
+          </Text>
+        </FadeIn>
       </ScrollView>
     </SafeAreaView>
   );
@@ -79,11 +90,7 @@ export function SetupScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  content: { padding: spacing.xl, paddingBottom: 64 },
-  actionButton: {
-    borderRadius: 10,
-    alignItems: "center",
-    paddingVertical: 13,
-    marginTop: spacing.s,
-  },
+  content: { flexGrow: 1, padding: spacing.xl, paddingTop: 72, paddingBottom: 40 },
+  cta: { paddingVertical: 15 },
+  busy: { height: 50 },
 });

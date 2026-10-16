@@ -13,7 +13,7 @@ import {
 import type { SQLiteDatabase } from "expo-sqlite";
 import { invalidateEventCache } from "../data/repository";
 import { withWriteLock } from "./writelock";
-import { syncGeneration, publishMirrorChange } from "./sync-state";
+import { syncGeneration, publishMirrorChange, publishPullProgress } from "./sync-state";
 import { describeFailure, withTimeout } from "./transport";
 
 export interface DirectMachine {
@@ -382,8 +382,9 @@ async function pullDirectUnlocked(
   assertActive();
   if (machines.length === 0) return [];
 
+  publishPullProgress(db, { kind: "begin", machines: machines.map((machine) => machine.id) });
   const statuses = await Promise.all(
-    machines.map(async (machine): Promise<DirectPullStatus> => {
+    machines.map((machine) => (async (): Promise<DirectPullStatus> => {
       const started = now();
       const base: DirectPullStatus = {
         environmentId: machine.id,
@@ -760,7 +761,12 @@ async function pullDirectUnlocked(
         await persistDirectError(db, machine.id, failure.error, assertActive);
         return { ...base, ...failure, elapsedMs: now() - started };
       }
-    }),
+    })().then((status) => {
+      // Each machine settles on its own clock; the UI shows progress without
+      // waiting for the slowest (usually offline) machine.
+      publishPullProgress(db, { kind: "settled", environmentId: machine.id, state: status.state });
+      return status;
+    })),
   );
   return statuses;
 }
