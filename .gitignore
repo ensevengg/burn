@@ -1,9 +1,14 @@
 # Research clones — read-only reference material, never commit
 reference/
 
-# Agent conversation transcripts (planning interviews, agent handoffs): local only
+# Agent transcripts and reports (planning interviews, handoffs, reviews, audits):
+# local only. AGENTS.md is the public agent record.
 GLM-questionnaire.html
 sol-thoughts.html
+first-check.html
+docs/sync-latency.html
+docs/connection-transfer-audit.md
+docs/mobile-performance-audit.md
 
 # Node / Expo
 node_modules/
