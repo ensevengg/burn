@@ -172,6 +172,7 @@ function UsageHero({
           ? `${formatTokens(shown.tokens[scrub]!)} tokens`
           : `${formatCost(shown.costs[scrub]!)} API estimate`
         : `${shown.messages.toLocaleString("en")} messages · ${shown.sessions.toLocaleString("en")} sessions`;
+  const scrubValue = scrubbing ? (shown.metric === "cost" ? shown.costs[scrub]! : shown.tokens[scrub]!) : null;
 
   const onScrub = useCallback((index: number | null) => setScrub(index), []);
 
@@ -186,12 +187,8 @@ function UsageHero({
       <Dim dim={pending}>
         {shown === null ? (
           <Skeleton style={[styles.heroSkeleton, { backgroundColor: C.panelAlt }]} />
-        ) : scrubbing ? (
-          <Text style={[type.display, { color: C.text }]} numberOfLines={1} adjustsFontSizeToFit>
-            {format(shown.metric === "cost" ? shown.costs[scrub]! : shown.tokens[scrub]!)}
-          </Text>
         ) : (
-          <HeroNumber key={shown.metric} value={shown.total} format={format} />
+          <HeroNumber key={shown.metric} value={shown.total} scrubValue={scrubValue} format={format} />
         )}
         <Text style={[type.muted, { color: C.muted, marginTop: 4 }]} numberOfLines={1}>
           {sub}
@@ -215,10 +212,22 @@ function UsageHero({
   );
 }
 
-/** Counts up from zero on first paint, then glides between values on refresh. */
-function HeroNumber({ value, format }: { value: number; format: (n: number) => string }) {
+/**
+ * Counts up from zero on first paint, glides between values on refresh, and
+ * follows the finger while scrubbing. Stays mounted through a scrub so
+ * letting go glides back to the total instead of recounting from zero.
+ */
+function HeroNumber({
+  value,
+  scrubValue,
+  format,
+}: {
+  value: number;
+  scrubValue: number | null;
+  format: (n: number) => string;
+}) {
   const { C } = useTheme();
-  const shown = useTweenedNumber(value, 650, 0);
+  const shown = useTweenedNumber(scrubValue ?? value, scrubValue === null ? 650 : 0, 0);
   return (
     <Text style={[type.display, { color: C.text }]} numberOfLines={1} adjustsFontSizeToFit>
       {format(shown)}
