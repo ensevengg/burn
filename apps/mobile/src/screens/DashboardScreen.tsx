@@ -231,7 +231,9 @@ const AgentShares = memo(function AgentShares({ metric, rangeId }: { metric: Met
   const range = USAGE_RANGES[rangeId];
   const overview = useWindowOverviewQuery(range.days, metric, range.granularity);
   const clients = overview.data?.byClient ?? [];
-  if (overview.data === undefined || clients.length === 0) return null;
+  // Hold the section's space on first load so Limits doesn't paint here and get pushed down.
+  if (overview.data === undefined) return <SectionSkeleton title="Agents" height={164} corner={radius.m} />;
+  if (clients.length === 0) return null;
   const total = metric === "cost" ? overview.data.totals.cost : eventTokens(overview.data.totals);
   const rows = clients.slice(0, 5).map((client, i) => ({
     ...client,
@@ -270,7 +272,7 @@ const TokenBreakdown = memo(function TokenBreakdown({ metric, rangeId }: { metri
   const range = USAGE_RANGES[rangeId];
   const overview = useWindowOverviewQuery(range.days, metric, range.granularity);
   const totals = overview.data?.totals;
-  if (totals === undefined) return null;
+  if (totals === undefined) return <SectionSkeleton title="Tokens" height={110} corner={radius.l} />;
   const savings = overview.data?.cacheSavings ?? null;
   return (
     <>
@@ -292,6 +294,16 @@ const TokenBreakdown = memo(function TokenBreakdown({ metric, rangeId }: { metri
     </>
   );
 });
+
+function SectionSkeleton({ title, height, corner }: { title: string; height: number; corner: number }) {
+  const { C } = useTheme();
+  return (
+    <>
+      <SectionTitle>{title}</SectionTitle>
+      <Skeleton style={{ height, borderRadius: corner, marginHorizontal: gutter, backgroundColor: C.panel }} />
+    </>
+  );
+}
 
 function TokenStat({ label, value }: { label: string; value: string }) {
   const { C } = useTheme();
