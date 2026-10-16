@@ -105,7 +105,13 @@ export function SyncPill() {
     const broken = ids.some((id) => machineStates[id] === "error" || machineStates[id] === "skipped");
     const known = ids.some((id) => machineStates[id] !== undefined);
     dot = broken ? C.warn : live > 0 ? C.ok : C.faint;
-    const when = lastSync === null ? "" : ` · ${formatRelative(lastSync.toISOString()).replace(" ago", "")}`;
+    // The pill re-renders every 30s, so a seconds count would sit frozen.
+    const when =
+      lastSync === null
+        ? ""
+        : Date.now() - lastSync.getTime() < 60_000
+          ? " · now"
+          : ` · ${formatRelative(lastSync.toISOString()).replace(" ago", "")}`;
     label = !known ? "Cached" : live === 0 ? "Offline · cached" : `${live === total ? live : `${live}/${total}`} live${when}`;
   }
 
