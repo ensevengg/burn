@@ -187,12 +187,16 @@ export function UsageChart({
           )}
         </Svg>
       )}
-      {/* Gridline values sit inside the plot so the line gets the full width. */}
+      {/* Gridline values sit inside the plot so the line gets the full width;
+          a canvas-coloured backing keeps them legible where the curve crosses. */}
       {!empty &&
         [0.5, 1].map((f) => (
           <Text
             key={f}
-            style={[styles.gridLabel, { color: C.faint, top: plotBottom - (f / 1.08) * plotHeight - 15 }]}
+            style={[
+              styles.gridLabel,
+              { color: C.faint, backgroundColor: C.bg, top: plotBottom - (f / 1.08) * plotHeight - 15 },
+            ]}
           >
             {formatY(shown.ceiling * (f / 1.08))}
           </Text>
@@ -261,7 +265,15 @@ export function Sparkline({
 }
 
 const styles = StyleSheet.create({
-  gridLabel: { position: "absolute", left: PAD_X, fontSize: 10, fontVariant: ["tabular-nums"] },
+  gridLabel: {
+    position: "absolute",
+    left: PAD_X - 3,
+    paddingHorizontal: 3,
+    borderRadius: 3,
+    overflow: "hidden",
+    fontSize: 10,
+    fontVariant: ["tabular-nums"],
+  },
   emptyLabel: { position: "absolute", left: 0, right: 0, textAlign: "center", fontSize: 12 },
   xLabels: { position: "absolute", left: PAD_X, right: PAD_X, flexDirection: "row" },
   xLabel: { flex: 1, fontSize: 10.5, fontVariant: ["tabular-nums"] },
