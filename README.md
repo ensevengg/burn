@@ -20,7 +20,7 @@ bun run reporter -- doctor
 bun run reporter -- daemon             # keep running; prints the endpoint URL
 ```
 
-Start the app with `bun run mobile`, open it in Expo Go on Android, choose **Use machines directly**, then paste the reporter URL under **Machines → +**. Each Windows, WSL or dual-boot installation gets its own slug; use a shared `--host-group` for installations on one physical machine. Add as many machines as needed.
+Start the app with `bun run mobile`, open it in Expo Go on Android, choose **Connect my machines**, then paste the reporter URL under **Machines → +**. Each Windows, WSL or dual-boot installation gets its own slug; use a shared `--host-group` for installations on one physical machine. Add as many machines as needed.
 
 `burn-report serve` is an alias for the resident backend. Both commands accept `--port 8787` and `--bind <address>`. The default bind is the machine's Tailscale IPv4; without Tailscale it falls back to loopback and prints a warning. A loopback endpoint is useful for local diagnostics and cannot be reached by the phone. `burn-report usage` prints vendor quota JSON locally.
 
@@ -32,7 +32,7 @@ To explore without machines, start the app and choose **Explore with demo data**
 
 Opening the app or pulling to refresh probes registered machines. Validated usage pages, vendor quotas and system-health samples merge independently, preserving successful quotas when a vendor check fails. Interrupted history backfills resume while the app is foregrounded. Source fingerprints, content hashes, compressed pages and no-op writes reduce repeated scans and transfers.
 
-Per-machine cursors checkpoint completed scan starts with a conservative overlap. Full-history reconciliation on a foreground/refresh pull after 24 hours catches late records and parser/pricing corrections. **Machines → Reconcile full history** runs it immediately. Offline machines retain cached history and show contact/error diagnostics.
+Per-machine cursors checkpoint completed scan starts with a conservative overlap. Full-history reconciliation on a foreground/refresh pull after 24 hours catches late records and parser/pricing corrections. **Machines → Reconcile history** runs it immediately. Offline machines retain cached history and show contact/error diagnostics.
 
 The **Systems** tab shows RAM/GPU usage and available temperatures with trailing 24-hour sparklines. Resident reporters sample physical hardware every 30 seconds and on request; unsupported sensors stay unavailable. WSL uses its Windows host’s hardware and does not create a second physical system. Reporters keep a process-local 24-hour health history; the phone persists received samples and shows stale/unavailable readings when a machine cannot answer.
 
