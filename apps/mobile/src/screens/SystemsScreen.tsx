@@ -8,13 +8,14 @@ import { useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
 import { gutter, hairline, radius, spacing, type } from "../theme";
 import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
-import { FadeIn, PressableScale } from "../ui/motion";
+import { FadeIn, PressableScale, TweenText } from "../ui/motion";
 import { Sparkline } from "../ui/charts";
 import { Screen } from "../ui/screen";
 
 type MetricKey = "cpuLoadPct" | "cpuTempC" | "ramUsedPct" | "ramTempC" | "gpuUtilPct" | "gpuTempC";
 
 const STALE_AFTER_MS = 20 * 60_000;
+const formatWhole = (n: number) => String(Math.round(n));
 
 function MetricTile({
   label,
@@ -40,9 +41,11 @@ function MetricTile({
     <View style={[styles.tile, { backgroundColor: C.panelAlt }]}>
       <Text style={[type.muted, { color: C.muted }]}>{label}</Text>
       <View style={styles.tileValueRow}>
-        <Text style={[styles.tileValue, { color: latest === null ? C.faint : hot ? C.warn : C.text }]}>
-          {latest === null ? "—" : Math.round(latest)}
-        </Text>
+        {latest === null ? (
+          <Text style={[styles.tileValue, { color: C.faint }]}>—</Text>
+        ) : (
+          <TweenText value={latest} format={formatWhole} style={[styles.tileValue, { color: hot ? C.warn : C.text }]} />
+        )}
         {latest !== null && <Text style={[styles.tileUnit, { color: C.muted }]}>{unit === "°" ? "°C" : "%"}</Text>}
       </View>
       {values.length > 1 ? (

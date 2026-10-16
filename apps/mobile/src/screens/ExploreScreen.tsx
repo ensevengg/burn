@@ -6,7 +6,7 @@ import { humanize } from "../lib/labels";
 import { useTheme } from "../lib/theme-context";
 import { gutter, hairline, radius, spacing, type } from "../theme";
 import { Empty, Segmented, ShareBar } from "../ui/primitives";
-import { GrowBar, PressableScale, Skeleton } from "../ui/motion";
+import { GrowBar, PressableScale, Skeleton, TweenText, useTweenedNumber } from "../ui/motion";
 import { Screen } from "../ui/screen";
 import { eventTokens, type BreakdownRow, type SessionRow } from "../data/repository";
 import { EXPLORE_RANGES, USAGE_RANGES, type UsageRangeId } from "../lib/usage-range";
@@ -68,10 +68,7 @@ export function ExploreScreen() {
 
   const count = rows?.length ?? 0;
   const [singular, plural] = NOUNS[tab];
-  const summary =
-    tab === "sessions"
-      ? `${count} ${count === 1 ? singular : plural} · most recent first`
-      : `${count} ${count === 1 ? singular : plural} · ${formatTokens(totalTokens)} tokens · ${formatCost(totalCost)}`;
+  const noun = count === 1 ? singular : plural;
 
   return (
     <Screen
@@ -97,7 +94,13 @@ export function ExploreScreen() {
                 <Segmented options={TABS} value={tab} onChange={changeTab} />
                 <Segmented options={EXPLORE_RANGES} value={rangeId} onChange={setRangeId} size="s" />
               </View>
-              <Text style={[type.muted, styles.summary, { color: C.faint }]}>{loading ? " " : summary}</Text>
+              {loading || tab === "sessions" ? (
+                <Text style={[type.muted, styles.summary, { color: C.faint }]}>
+                  {loading ? " " : `${count} ${noun} · most recent first`}
+                </Text>
+              ) : (
+                <TotalsLine lead={`${count} ${noun}`} tokens={totalTokens} cost={totalCost} />
+              )}
             </>
           }
           ListEmptyComponent={loading ? <ListSkeleton /> : <Empty message="No usage in this window." />}
@@ -191,12 +194,16 @@ const BreakdownItem = memo(function BreakdownItem({
           </Text>
         </View>
         <View style={{ alignItems: "flex-end" }}>
-          <Text style={[styles.value, { color: C.text }]}>
-            {modelMode ? formatTokens(processed) : formatCost(row.cost)}
-          </Text>
-          <Text style={[type.muted, { color: C.faint, marginTop: 1, fontVariant: ["tabular-nums"] }]}>
-            {modelMode ? formatCost(row.cost) : `${formatTokens(processed)} tok`}
-          </Text>
+          <TweenText
+            value={primary}
+            format={modelMode ? formatTokens : formatCost}
+            style={[styles.value, { color: C.text }]}
+          />
+          <TweenText
+            value={modelMode ? row.cost : processed}
+            format={modelMode ? formatCost : formatTok}
+            style={[type.muted, { color: C.faint, marginTop: 1, fontVariant: ["tabular-nums"] }]}
+          />
         </View>
       </View>
       <View style={styles.barRow}>
@@ -275,10 +282,12 @@ const SessionItem = memo(function SessionItem({
           </Text>
         </View>
         <View style={{ alignItems: "flex-end" }}>
-          <Text style={[styles.value, { color: C.text }]}>{formatCost(session.cost)}</Text>
-          <Text style={[type.muted, { color: C.faint, marginTop: 1, fontVariant: ["tabular-nums"] }]}>
-            {`${formatTokens(session.tokens)} tok`}
-          </Text>
+          <TweenText value={session.cost} format={formatCost} style={[styles.value, { color: C.text }]} />
+          <TweenText
+            value={session.tokens}
+            format={formatTok}
+            style={[type.muted, { color: C.faint, marginTop: 1, fontVariant: ["tabular-nums"] }]}
+          />
         </View>
       </View>
       {open && (
@@ -300,6 +309,20 @@ const SessionItem = memo(function SessionItem({
     </PressableScale>
   );
 });
+
+const formatTok = (n: number) => `${formatTokens(n)} tok`;
+
+/** Window totals; glides when a refresh adds usage. */
+function TotalsLine({ lead, tokens, cost }: { lead: string; tokens: number; cost: number }) {
+  const { C } = useTheme();
+  const shownTokens = useTweenedNumber(tokens, 650);
+  const shownCost = useTweenedNumber(cost, 650);
+  return (
+    <Text style={[type.muted, styles.summary, { color: C.faint }]}>
+      {`${lead} · ${formatTokens(shownTokens)} tokens · ${formatCost(shownCost)}`}
+    </Text>
+  );
+}
 
 const styles = StyleSheet.create({
   controls: { paddingHorizontal: gutter, gap: spacing.s, marginTop: spacing.xs },
