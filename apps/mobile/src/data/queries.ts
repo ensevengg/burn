@@ -70,12 +70,12 @@ function useDbQuery<T>(
 }
 
 /** Historical peak bucket for the granularity — the fixed Y ceiling (user direction). */
-export function useGranularityMaxQuery(granularity: Granularity, metric: "cost" | "tokens" = "tokens") {
+export function useGranularityMaxQuery(granularity: Granularity, metric: "cost" | "tokens" = "tokens", enabled = true) {
   const { reportingTimezone } = useApp();
   return useDbQuery(
     ["granularity-max", reportingTimezone, granularity, metric],
     (db, signal) => queryGranularityMax(db, reportingTimezone, granularity, metric, signal),
-    { keepPrevious: true },
+    { keepPrevious: true, enabled },
   );
 }
 

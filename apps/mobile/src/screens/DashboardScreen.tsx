@@ -136,21 +136,20 @@ function UsageHero({
   const { reportingTimezone } = useApp();
   const range = USAGE_RANGES[rangeId];
   const overview = useWindowOverviewQuery(range.days, metric, range.granularity);
-  const peak = useGranularityMaxQuery(range.granularity, metric);
+  // The peak scans all history; start it only once the window has painted
+  // so first paint never queues behind it.
+  const overviewData = overview.data !== undefined && !overview.isPlaceholderData ? overview.data : undefined;
+  const peak = useGranularityMaxQuery(range.granularity, metric, overviewData !== undefined && range.days !== null);
   const [scrub, setScrub] = useState<number | null>(null);
 
-  // Placeholder rows belong to the previous selection (and the previous
-  // granularity's peak): keep showing the last consistent snapshot, dimmed,
-  // until both reads for the new selection land — then morph into it.
-  const overviewData = overview.data !== undefined && !overview.isPlaceholderData ? overview.data : undefined;
-  const peakReady = range.days === null || (peak.data !== undefined && !peak.isPlaceholderData);
-  const peakData = peakReady ? peak.data : undefined;
+  // Placeholder rows belong to the previous selection: keep showing the last
+  // consistent snapshot, dimmed, until the new window lands. The ceiling
+  // starts from the window's own peak and morphs to the historical one; a
+  // placeholder peak from another granularity is never used.
+  const peakData = peak.data !== undefined && !peak.isPlaceholderData ? peak.data : undefined;
   const fresh = useMemo(
-    () =>
-      overviewData === undefined || !peakReady
-        ? null
-        : buildSnapshot(overviewData, metric, rangeId, reportingTimezone, peakData),
-    [overviewData, peakReady, peakData, metric, rangeId, reportingTimezone],
+    () => (overviewData === undefined ? null : buildSnapshot(overviewData, metric, rangeId, reportingTimezone, peakData)),
+    [overviewData, peakData, metric, rangeId, reportingTimezone],
   );
   const last = useRef<HeroSnapshot | null>(null);
   if (fresh !== null) last.current = fresh;
