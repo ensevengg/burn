@@ -73,7 +73,12 @@ export function MachinesScreen() {
 }
 
 /** Friendly one-line state; the raw error lives behind "Details". */
-function describe(machine: EnvironmentRow, live: DirectPullStatus | undefined): { text: string; tone: "ok" | "muted" | "warn" } {
+function describe(
+  machine: EnvironmentRow,
+  live: DirectPullStatus | undefined,
+  demo: boolean,
+): { text: string; tone: "ok" | "muted" | "warn" } {
+  if (demo) return { text: `Demo machine · last report ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
   if (live === undefined) return { text: `Not checked yet · last contact ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
   if (live.state === "offline") return { text: `Unreachable · showing cached history · seen ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
   if (live.state === "skipped") return { text: "Endpoint answered as a different machine", tone: "warn" };
@@ -92,7 +97,7 @@ function MachineCard({ machine }: { machine: EnvironmentRow }) {
   const [details, setDetails] = useState(false);
   const live = liveMachines.find((status) => status.slug === machine.slug);
   const issue = reporterIssue(machine, live);
-  const summary = describe(machine, live);
+  const summary = describe(machine, live, mode === "demo");
   const pending = pass !== null && pass.ids.includes(machine.id) && pass.settled[machine.id] === undefined;
   const dot = pending ? C.text : summary.tone === "ok" ? C.ok : summary.tone === "warn" ? C.warn : C.faint;
   const toneColor = summary.tone === "ok" ? C.ok : summary.tone === "warn" ? C.warn : C.muted;
@@ -133,7 +138,13 @@ function MachineCard({ machine }: { machine: EnvironmentRow }) {
           .join(" · ")}
       </Text>
       <Text style={[type.muted, styles.meta, { color: C.faint }]} numberOfLines={1}>
-        {`reporter ${machine.reporterVersion ?? "?"} · tokscale ${machine.tokscaleVersion ?? "?"} · pulled ${formatRelative(machine.lastSuccessAt)}`}
+        {[
+          machine.reporterVersion === null ? null : `reporter ${machine.reporterVersion}`,
+          machine.tokscaleVersion === null ? null : `tokscale ${machine.tokscaleVersion}`,
+          `pulled ${formatRelative(machine.lastSuccessAt)}`,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
       </Text>
       <View style={[styles.statusLine, { backgroundColor: C.panelAlt }]}>
         <Text style={[type.muted, { color: pending ? C.text : toneColor, flex: 1 }]} numberOfLines={2}>
