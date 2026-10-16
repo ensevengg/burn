@@ -116,15 +116,23 @@ export function formatCostCompact(cost: number): string {
   return "$0";
 }
 
+/**
+ * Whole number with thousands separators. Skips Intl (slow on Hermes)
+ * because tweened numbers format on every animation frame.
+ */
+export function formatCount(n: number): string {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
 export function formatTokens(n: number): string {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`;
-  return String(n);
+  return String(Math.round(n));
 }
 
 export function formatCost(cost: number): string {
-  if (cost >= 1000) return `$${Math.round(cost).toLocaleString("en")}`;
+  if (cost >= 1000) return `$${formatCount(cost)}`;
   if (cost >= 1) return `$${cost.toFixed(2)}`;
   if (cost >= 0.01) return `$${cost.toFixed(3)}`;
   if (cost > 0) return `$${cost.toFixed(4)}`;

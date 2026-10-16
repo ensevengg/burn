@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bucketKey, bucketLabel, calendarParts, formatCost, formatPercent, formatTokens, formatUntil } from "../src/lib/format";
+import { bucketKey, bucketLabel, calendarParts, formatCost, formatCount, formatPercent, formatTokens, formatUntil } from "../src/lib/format";
 import { humanize } from "../src/lib/labels";
 
 // 2026-09-05 12:30 IST == 07:00 UTC. IST day buckets must not depend on the
@@ -36,6 +36,15 @@ describe("formatting", () => {
     expect(formatTokens(999)).toBe("999");
     expect(formatTokens(12_345)).toBe("12k");
     expect(formatTokens(1_234_567)).toBe("1.2M");
+    // Tweens pass fractional in-between values.
+    expect(formatTokens(734.6)).toBe("735");
+  });
+
+  test("counts group thousands without Intl", () => {
+    expect(formatCount(0)).toBe("0");
+    expect(formatCount(999.4)).toBe("999");
+    expect(formatCount(12_486)).toBe("12,486");
+    expect(formatCount(1_234_567)).toBe("1,234,567");
   });
 
   test("cost never renders as $0 for nonzero decimal strings", () => {
@@ -43,6 +52,7 @@ describe("formatting", () => {
     expect(formatCost(0)).toBe("$0");
     expect(formatCost(4.5)).toBe("$4.50");
     expect(formatCost(1234)).toBe("$1,234");
+    expect(formatCost(1234567.4)).toBe("$1,234,567");
   });
 
   test("percent one decimal", () => {
