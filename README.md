@@ -12,16 +12,12 @@ Track your AI coding agents across Windows, WSL, Linux and macOS:
 No servers. No accounts. No telemetry.
 
 <p align="center">
-  <img src="docs/screenshots/overview.webp" width="250" alt="Overview: 30-day spend, usage chart and agent shares">
-  <img src="docs/screenshots/scrub.webp" width="250" alt="Dragging the chart to read a single day">
-  <img src="docs/screenshots/limits.webp" width="250" alt="Token breakdown with cache hit rate, and vendor limits">
+  <img src="assets/overview.webp" width="190" alt="Overview: 30-day spend, usage chart and agent shares">
+  <img src="assets/limits.webp" width="190" alt="Token breakdown with cache hit rate, and vendor limits">
+  <img src="assets/explore.webp" width="190" alt="Explore: models ranked by tokens, one expanded to its token mix">
+  <img src="assets/systems.webp" width="190" alt="Systems: RAM and GPU usage and temperatures per machine">
 </p>
-<p align="center">
-  <img src="docs/screenshots/explore.webp" width="250" alt="Explore: models ranked by tokens, one expanded to its token mix">
-  <img src="docs/screenshots/systems.webp" width="250" alt="Systems: RAM and GPU usage and temperatures per machine">
-  <img src="docs/screenshots/light.webp" width="250" alt="Overview in light mode">
-</p>
-<p align="center"><sub>Built-in demo data. The machines, usage and prices are made up.</sub></p>
+<p align="center"><sub>Demo data. Machines, usage and prices are made up.</sub></p>
 
 ## How it works
 
