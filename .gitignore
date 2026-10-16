@@ -1,6 +1,10 @@
 # Research clones — read-only reference material, never commit
 reference/
 
+# Agent conversation transcripts (planning interviews, agent handoffs): local only
+GLM-questionnaire.html
+sol-thoughts.html
+
 # Node / Expo
 node_modules/
 .expo/
