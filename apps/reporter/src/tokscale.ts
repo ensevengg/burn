@@ -97,7 +97,7 @@ export function tokscaleQuotaInputs(
 const npxBin = platform() === "win32" ? "npx.cmd" : "npx";
 
 /**
- * Runner resolution probes once and caches (first-check finding: on machines
+ * Runner resolution probes once and caches (on machines
  * where npx/npm resolve to wrapper shims — e.g. AppImage profiles — the npx
  * spawn rejects flags, while `bun x` works). Order: bun x → npx → bare binary.
  */

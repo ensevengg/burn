@@ -266,7 +266,7 @@ export interface DayAgg {
 }
 
 /**
- * The one day-bucketing implementation (first-check: was written 4×). Buckets
+ * The one day-bucketing implementation (it used to be written four times). Buckets
  * events by calendar key in the reporting timezone at the given granularity.
  * Pure — tests feed it synthetic rows directly.
  */

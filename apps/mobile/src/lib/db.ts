@@ -149,7 +149,7 @@ export async function kvSet(db: SQLite.SQLiteDatabase, key: string, value: strin
 
 /**
  * Wipes synced data + sync state. Preference keys (reporting_timezone,
- * theme_mode) survive — they are user settings, not data (B2, first-check);
+ * theme_mode) survive — they are user settings, not data;
  * callers set `mode` explicitly after a reset.
  */
 export function resetDb(db: SQLite.SQLiteDatabase): Promise<void> {
