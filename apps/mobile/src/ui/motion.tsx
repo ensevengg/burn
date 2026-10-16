@@ -1,16 +1,18 @@
 /**
  * Motion primitives. Everything that can run on the UI thread does
- * (useNativeDriver: opacity/transform only); the one JS-driven piece is
- * number tweening, which touches a single Text.
+ * (useNativeDriver: opacity/transform only); the JS-driven piece is number
+ * tweening, where each tween re-renders only its own Text.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Animated,
   Easing,
   Pressable,
+  Text,
   type GestureResponderEvent,
   type PressableProps,
   type StyleProp,
+  type TextProps,
   type ViewStyle,
 } from "react-native";
 import { motion } from "../theme";
@@ -20,12 +22,20 @@ export const easeOut = Easing.bezier(0.16, 1, 0.3, 1);
 
 /**
  * Tween toward `target` on the JS thread (rAF). Retargeting mid-flight starts
- * from the currently displayed value, so rapid refreshes never jump.
+ * from the currently displayed value, so rapid refreshes never jump. A
+ * duration of 0 follows the target exactly (e.g. under a finger); the next
+ * timed target then glides from wherever that left off.
  */
 export function useTweenedNumber(target: number, duration = 520, from?: number): number {
   const [value, setValue] = useState(from ?? target);
   const shown = useRef(from ?? target);
+  const instant = duration <= 0;
   useEffect(() => {
+    if (instant) {
+      shown.current = target;
+      setValue(target);
+      return;
+    }
     const start = shown.current;
     if (start === target) return;
     const began = performance.now();
@@ -39,8 +49,22 @@ export function useTweenedNumber(target: number, duration = 520, from?: number):
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [target, duration]);
-  return value;
+  }, [target, duration, instant]);
+  return instant ? target : value;
+}
+
+/**
+ * Text for a number that glides to new values (refreshes, range switches)
+ * instead of snapping. Key it by unit when the format changes meaning.
+ */
+export function TweenText({
+  value,
+  format,
+  duration = 650,
+  ...props
+}: Omit<TextProps, "children"> & { value: number; format: (n: number) => string; duration?: number }) {
+  const shown = useTweenedNumber(value, duration);
+  return <Text {...props}>{format(shown)}</Text>;
 }
 
 /** Mount-in: fade + 10dp rise. `delay` staggers sections. Runs once per mount. */
