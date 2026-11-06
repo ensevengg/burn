@@ -1347,6 +1347,54 @@ test("a partly retained session keeps old rows that have no content-equal replac
   }
 });
 
+test("a reconciliation that finishes after a re-registration keeps the newer pin pending", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  const sinces: string[] = [];
+  let reRegister: (() => Promise<unknown>) | null = null;
+  const endpoint = (version: string): LiveApi => ({
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => {
+      sinces.push(`${version}:${since}`);
+      // The phone re-registers the upgraded endpoint while this scan is in flight.
+      const pending = reRegister;
+      reRegister = null;
+      if (pending) await pending();
+      return {
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        events: [
+          version === "4.15.1"
+            ? ingestRow({ dedupKey: "v1:pi:s1:2", occurredAtMs: 2 })
+            : ingestRow({ dedupKey: "pi:response:r2", occurredAtMs: 2, parserVersion: "tokscale-4.21.0" }),
+        ],
+      };
+    },
+  });
+  const apiFor = (url: string) => endpoint(url === "http://win.next" ? "4.21.0" : "4.15.1");
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => clock });
+    clock += 60_000;
+    reRegister = () => addDirectMachine(fx.db, "http://win.next", { apiFor, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => clock, full: true });
+    expect(
+      await fx.db.getFirstAsync("select value from kv where key = 'direct_reparse_direct-win'"),
+    ).toEqual({ value: "4.21.0" });
+
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => clock });
+    expect(sinces).toEqual(["4.15.1:0", "4.15.1:0", "4.21.0:0"]);
+    expect(await fx.db.getAllAsync("select parser_version from usage_events")).toEqual([
+      { parser_version: "tokscale-4.21.0" },
+    ]);
+  } finally {
+    fx.native.close();
+  }
+});
+
 describe("a reconciliation restarted after an expired cursor", () => {
   // Session x spans pages: its newest row reached the phone from the expired
   // snapshot, its older old-parser row did not, and the replacement snapshot no

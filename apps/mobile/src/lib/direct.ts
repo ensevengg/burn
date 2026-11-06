@@ -108,6 +108,11 @@ function reparseKey(envId: string): string {
   return `direct_reparse_${envId}`;
 }
 
+/** Event rows name their parser `tokscale-<pin>`; /ping reports the bare pin. */
+function pinParser(pin: string): string {
+  return `tokscale-${pin}`;
+}
+
 /** Caller owns the transaction and runs this before storing the ping's
  * tokscale version, so the comparison sees the previously stored pin. */
 async function notePinChange(
@@ -582,11 +587,12 @@ async function pullDirectUnlocked(
                   [progressKey],
                 )
               )?.value;
-          const reparse =
+          const pendingPin =
             (await db.getFirstAsync<{ value: string }>(
               "select value from kv where key=?",
               [reparseKey(machine.id)],
-            )) !== null;
+            ))?.value ?? null;
+          const reparse = pendingPin !== null;
           const saved: {
             since: number;
             cursor: string;
@@ -598,8 +604,14 @@ async function pullDirectUnlocked(
           } | null = progressRaw ? JSON.parse(progressRaw) : null;
           // After a pin change only a completed reconciliation retires re-keyed
           // rows. Full history covers any unfinished incremental window, so
-          // that window restarts as the reconciliation instead of finishing first.
-          const progress = reparse && saved?.reconciliation === false ? null : saved;
+          // that window restarts as the reconciliation instead of finishing
+          // first; so does a reconciliation that was parsing an older pin.
+          const progress =
+            reparse &&
+            (saved?.reconciliation === false ||
+              (saved?.parserVersion !== undefined && saved.parserVersion !== pinParser(pendingPin)))
+              ? null
+              : saved;
           const lastFull = await kvGetNumber(
             db,
             `direct_full_at_${machine.id}`,
@@ -735,7 +747,14 @@ async function pullDirectUnlocked(
                       `direct_full_at_${machine.id}`,
                       String(now()),
                     );
-                    await kvDelete(db, reparseKey(machine.id));
+                    // A re-registration may have recorded a newer pin while this
+                    // pass ran; only the pin this snapshot parsed is satisfied.
+                    const pending = await db.getFirstAsync<{ value: string }>(
+                      "select value from kv where key=?",
+                      [reparseKey(machine.id)],
+                    );
+                    if (pending === null || pinParser(pending.value) === parserVersion)
+                      await kvDelete(db, reparseKey(machine.id));
                   }
                   await kvDelete(db, progressKey);
                 } else {
