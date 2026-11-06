@@ -1215,6 +1215,61 @@ test("an empty snapshot after a pin change keeps reconciliation pending until ro
   }
 });
 
+test("a pin change replaces unfinished incremental progress with full reconciliation", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  let incremental = false;
+  const requests: string[] = [];
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since, _signal, request) => {
+      requests.push(`${since}${request?.cursor ? `@${request.cursor}` : ""}`);
+      const page = (events: MachineEventInput[], nextCursor: string | null) => ({
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        snapshotId: version,
+        events,
+        nextCursor,
+      });
+      if (version === "4.21.0")
+        return page([ingestRow({ sessionId: "s1", dedupKey: "pi:response:r2", occurredAtMs: 2, parserVersion: "tokscale-4.21.0" })], null);
+      // The incremental window spans two pages; only the first is fetched.
+      return page([ingestRow({ sessionId: "s1", dedupKey: "v1:pi:s1:2", occurredAtMs: 2 })], incremental ? "inc-2" : null);
+    },
+  };
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    incremental = true;
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock, maxPages: 1 });
+    expect(
+      JSON.parse((await fx.db.getFirstAsync<{ value: string }>(
+        "select value from kv where key = 'direct_backfill_direct-win'",
+      ))!.value).reconciliation,
+    ).toBe(false);
+
+    version = "4.21.0";
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock, continuation: true });
+    // The saved incremental cursor is never resumed: the pass starts from full history.
+    expect(requests.slice(2)).toEqual(["0"]);
+    expect(await fx.db.getAllAsync("select parser_version from usage_events")).toEqual([
+      { parser_version: "tokscale-4.21.0" },
+    ]);
+    expect(
+      await fx.db.getFirstAsync(
+        "select count(*) as n from kv where key in ('direct_backfill_direct-win', 'direct_reparse_direct-win')",
+      ),
+    ).toEqual({ n: 0 });
+  } finally {
+    fx.native.close();
+  }
+});
+
 describe("a reconciliation restarted after an expired cursor", () => {
   // Session x spans pages: its newest row reached the phone from the expired
   // snapshot, its older old-parser row did not, and the replacement snapshot no

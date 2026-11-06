@@ -565,7 +565,12 @@ async function pullDirectUnlocked(
                   [progressKey],
                 )
               )?.value;
-          const progress: {
+          const reparse =
+            (await db.getFirstAsync<{ value: string }>(
+              "select value from kv where key=?",
+              [reparseKey(machine.id)],
+            )) !== null;
+          const saved: {
             since: number;
             cursor: string;
             scanStartedAtMs: number;
@@ -574,15 +579,14 @@ async function pullDirectUnlocked(
             reconciliation: boolean;
             parserVersion?: string;
           } | null = progressRaw ? JSON.parse(progressRaw) : null;
+          // After a pin change only a completed reconciliation retires re-keyed
+          // rows. Full history covers any unfinished incremental window, so
+          // that window restarts as the reconciliation instead of finishing first.
+          const progress = reparse && saved?.reconciliation === false ? null : saved;
           const lastFull = await kvGetNumber(
             db,
             `direct_full_at_${machine.id}`,
           );
-          const reparse =
-            (await db.getFirstAsync<{ value: string }>(
-              "select value from kv where key=?",
-              [reparseKey(machine.id)],
-            )) !== null;
           const reconciliation =
             progress?.reconciliation ??
             (options.full === true ||
