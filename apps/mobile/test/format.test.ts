@@ -31,6 +31,8 @@ describe("formatting", () => {
   test("known OpenAI and current model ids preserve product casing", () => {
     expect(humanize("openai-codex")).toBe("OpenAI Codex");
     expect(humanize("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
+    expect(humanize("muse")).toBe("Muse Code");
+    expect(humanize("muse-wonder-1.0")).toBe("Muse Wonder 1.0");
   });
   test("tokens compact", () => {
     expect(formatTokens(999)).toBe("999");
