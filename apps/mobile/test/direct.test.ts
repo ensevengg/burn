@@ -1270,6 +1270,45 @@ test("a pin change replaces unfinished incremental progress with full reconcilia
   }
 });
 
+test("re-adding a cached machine after a pin change still forces reconciliation", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  const sinces: (number | null)[] = [];
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => {
+      sinces.push(since);
+      return {
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        events: [
+          version === "4.15.1"
+            ? ingestRow({ sessionId: "s1", dedupKey: "v1:pi:s1:2", occurredAtMs: 2 })
+            : ingestRow({ sessionId: "s1", dedupKey: "pi:response:r2", occurredAtMs: 2, parserVersion: "tokscale-4.21.0" }),
+        ],
+      };
+    },
+  };
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    version = "4.21.0";
+    clock += 60_000;
+    // A new endpoint for the same machine stores the new pin at registration.
+    await addDirectMachine(fx.db, "http://win.tailnet", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces).toEqual([0, 0]);
+    expect(await fx.db.getAllAsync("select parser_version from usage_events")).toEqual([
+      { parser_version: "tokscale-4.21.0" },
+    ]);
+  } finally {
+    fx.native.close();
+  }
+});
+
 describe("a reconciliation restarted after an expired cursor", () => {
   // Session x spans pages: its newest row reached the phone from the expired
   // snapshot, its older old-parser row did not, and the replacement snapshot no

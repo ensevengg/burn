@@ -108,6 +108,22 @@ function reparseKey(envId: string): string {
   return `direct_reparse_${envId}`;
 }
 
+/** Caller owns the transaction and runs this before storing the ping's
+ * tokscale version, so the comparison sees the previously stored pin. */
+async function notePinChange(
+  db: SQLiteDatabase,
+  envId: string,
+  reported: string | null,
+): Promise<void> {
+  if (reported === null) return;
+  const previous = await db.getFirstAsync<{ v: string | null }>(
+    "select tokscale_version as v from environments where id=?",
+    [envId],
+  );
+  if (previous !== null && previous.v !== reported)
+    await kvSetString(db, reparseKey(envId), reported);
+}
+
 async function kvGetNumber(
   db: SQLiteDatabase,
   key: string,
@@ -229,6 +245,8 @@ export async function addDirectMachine(
         ],
       );
       assertActive();
+      // Re-adding a cached machine must not absorb a pin change silently.
+      await notePinChange(db, id, ping.tokscaleVersion);
       // The card exists immediately, even before the first pull.
       await db.runAsync(
         `insert into environments
@@ -454,12 +472,7 @@ async function pullDirectUnlocked(
               "update direct_machines set last_ping_at=?,last_error=null where id=?",
               [new Date(now()).toISOString(), machine.id],
             );
-            const previous = await db.getFirstAsync<{ v: string | null }>(
-              "select tokscale_version as v from environments where id=?",
-              [machine.id],
-            );
-            if (ping.tokscaleVersion !== null && previous?.v !== ping.tokscaleVersion)
-              await kvSetString(db, reparseKey(machine.id), ping.tokscaleVersion);
+            await notePinChange(db, machine.id, ping.tokscaleVersion);
             await db.runAsync(
               `update environments set reporter_version=?,tokscale_version=?,export_schema=?,reporting_timezone=?,host_group=coalesce(?,host_group),last_heartbeat_at=? where id=?`,
               [
