@@ -1309,6 +1309,44 @@ test("re-adding a cached machine after a pin change still forces reconciliation"
   }
 });
 
+test("a partly retained session keeps old rows that have no content-equal replacement", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => ({
+      sinceMs: since,
+      generatedAt: new Date(clock).toISOString(),
+      scanStartedAtMs: clock,
+      events:
+        version === "4.15.1"
+          ? [
+              ingestRow({ dedupKey: "v1:pi:s1:1", occurredAtMs: 1, inputTokens: 10 }),
+              ingestRow({ dedupKey: "v1:pi:s1:2", occurredAtMs: 2, inputTokens: 20 }),
+            ]
+          : // The client compacted s1: only its re-keyed first message remains.
+            [ingestRow({ dedupKey: "pi:response:r1", occurredAtMs: 1, inputTokens: 10, parserVersion: "tokscale-4.21.0" })],
+    }),
+  };
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    version = "4.21.0";
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(
+      await fx.db.getAllAsync("select input_tokens, parser_version from usage_events order by input_tokens"),
+    ).toEqual([
+      { input_tokens: 10, parser_version: "tokscale-4.21.0" },
+      { input_tokens: 20, parser_version: "tokscale-4.15.1" },
+    ]);
+  } finally {
+    fx.native.close();
+  }
+});
+
 describe("a reconciliation restarted after an expired cursor", () => {
   // Session x spans pages: its newest row reached the phone from the expired
   // snapshot, its older old-parser row did not, and the replacement snapshot no

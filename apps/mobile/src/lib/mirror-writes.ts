@@ -92,7 +92,10 @@ export async function trackReconciledSessions(
  * with a provider id), leaving the old-key rows orphaned and double-counted.
  * Rows from another parser version are dropped only inside sessions the
  * completed snapshot itself reported (not ones an expired partial snapshot
- * committed), so history whose source the machine has since pruned is kept. */
+ * committed), and only when that session holds a current-parser row with the
+ * same token buckets: a content-equal replacement. History whose source the
+ * machine pruned (whole sessions, or messages a client removed or compacted)
+ * is kept, at the cost of keeping rows whose tokens a new parser also changed. */
 export async function dropSupersededEvents(
   db: SQLiteDatabase,
   environmentId: string,
@@ -105,7 +108,18 @@ export async function dropSupersededEvents(
          select 1 from reconcile_sessions as reported
          where reported.environment_id = ?1
            and reported.client = usage_events.client
-           and reported.session_id = usage_events.session_id)`,
+           and reported.session_id = usage_events.session_id)
+       and exists (
+         select 1 from usage_events as replacement
+         where replacement.environment_id = ?1
+           and replacement.client = usage_events.client
+           and replacement.session_id = usage_events.session_id
+           and replacement.parser_version = ?2
+           and replacement.input_tokens = usage_events.input_tokens
+           and replacement.output_tokens = usage_events.output_tokens
+           and replacement.cache_read_tokens = usage_events.cache_read_tokens
+           and replacement.cache_write_tokens = usage_events.cache_write_tokens
+           and replacement.reasoning_tokens = usage_events.reasoning_tokens)`,
     [environmentId, parserVersion],
   );
   await resetReconciledSessions(db, environmentId);
