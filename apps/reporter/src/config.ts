@@ -27,8 +27,25 @@ export const configSchema = z
     osKind: z.enum(["windows", "wsl", "linux", "macos"]).default("linux"),
     /** Timezone evidence attached to rows; bucketing happens on the phone (D8). */
     reportingTimezone: z.string().default("Asia/Kolkata"),
-    tokscalePin: z.string().default(TOKSCALE_PIN),
+    tokscalePin: z.string().default(TOKSCALE_PIN).transform(atLeastCheckoutPin),
   });
+
+/**
+ * `init` saves the pin it ran with, but a checkout builds burn-events at one
+ * pin, so a saved pin older than the checkout's would only make the reporter
+ * reject its own exporter after an upgrade. Older pins move forward on load;
+ * a newer saved pin (checkout rolled back) is kept and still fails loudly.
+ */
+function atLeastCheckoutPin(saved: string): string {
+  const parts = (version: string) => version.split(".").map(Number);
+  const [a, b] = [parts(saved), parts(TOKSCALE_PIN)];
+  if (a.some(Number.isNaN)) return saved;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const delta = (a[i] ?? 0) - (b[i] ?? 0);
+    if (delta !== 0) return delta < 0 ? TOKSCALE_PIN : saved;
+  }
+  return saved;
+}
 
 export type BurnConfig = z.infer<typeof configSchema>;
 
