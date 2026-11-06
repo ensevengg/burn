@@ -1,4 +1,11 @@
-import { dropSupersededEvents, mergePeerEvents, mergeQuota, mergeMetrics } from "./mirror-writes";
+import {
+  dropSupersededEvents,
+  mergePeerEvents,
+  mergeQuota,
+  mergeMetrics,
+  resetReconciledSessions,
+  trackReconciledSessions,
+} from "./mirror-writes";
 /** Machines are the backend (ADR 0003). Each registry endpoint supplies
  * validated event pages and independent quotas. The phone stores per-machine
  * scan-start cursors, atomically commits page continuation, and periodically
@@ -289,6 +296,7 @@ export async function removeDirectMachine(
         reparseKey(environmentId),
       ])
         await kvDelete(db, key);
+      await resetReconciledSessions(db, environmentId);
     });
     invalidateEventCache(db);
   });
@@ -644,6 +652,8 @@ async function pullDirectUnlocked(
                 cursor = undefined;
                 scanStartedAtMs = null;
                 snapshotId = undefined;
+                // The replacement snapshot alone decides what is superseded.
+                parserVersion = undefined;
                 seenCursors.clear();
                 pageNumber--;
                 continue;
@@ -665,6 +675,7 @@ async function pullDirectUnlocked(
             contentHash = page.contentHash;
             parserVersion = page.events[0]?.parserVersion ?? parserVersion;
             const done = !page.nextCursor;
+            const firstSnapshotPage = cursor === undefined;
             if (page.nextCursor && seenCursors.has(page.nextCursor))
               throw new LiveError("Repeated event page cursor");
             let changed = 0;
@@ -678,6 +689,10 @@ async function pullDirectUnlocked(
                   page.events,
                   assertActive,
                 );
+                if (reconciliation) {
+                  if (firstSnapshotPage) await resetReconciledSessions(db, machine.id);
+                  await trackReconciledSessions(db, machine.id, page.events);
+                }
                 if (done) {
                   await kvSetString(
                     db,

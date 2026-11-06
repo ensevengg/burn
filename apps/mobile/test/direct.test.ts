@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   LIVE_OVERLAP_MS,
   liveEventId,
+  LiveError,
   LiveUnreachableError,
   type MachineEventInput,
   type LiveApi,
@@ -1212,6 +1213,75 @@ test("an empty snapshot after a pin change keeps reconciliation pending until ro
   } finally {
     fx.native.close();
   }
+});
+
+describe("a reconciliation restarted after an expired cursor", () => {
+  // Session x spans pages: its newest row reached the phone from the expired
+  // snapshot, its older old-parser row did not, and the replacement snapshot no
+  // longer has x at all (source pruned in between). Only y is superseded.
+  async function run(replacement: MachineEventInput[]) {
+    const fx = mirrorFixture();
+    const env = directEnvId("win");
+    let clock = Date.parse("2026-10-01T00:00:00Z");
+    let version = "4.15.1";
+    let expired = false;
+    const sinces: (number | null)[] = [];
+    const v21 = { parserVersion: "tokscale-4.21.0" };
+    const api: LiveApi = {
+      ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+      quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+      events: async (since, _signal, request) => {
+        if (!request?.cursor) sinces.push(since);
+        const page = (events: MachineEventInput[], snapshotId: string, nextCursor: string | null) => ({
+          sinceMs: since,
+          generatedAt: new Date(clock).toISOString(),
+          scanStartedAtMs: clock,
+          snapshotId,
+          events,
+          nextCursor,
+        });
+        if (version === "4.15.1")
+          return page([
+            ingestRow({ sessionId: "x", dedupKey: "x-new", occurredAtMs: 30 }),
+            ingestRow({ sessionId: "x", dedupKey: "v1:x:10", occurredAtMs: 10 }),
+            ingestRow({ sessionId: "y", dedupKey: "v1:y:20", occurredAtMs: 20 }),
+          ], "old", null);
+        if (request?.cursor === "a2") throw new LiveError("expired", 410);
+        if (!expired) {
+          expired = true;
+          return page([ingestRow({ sessionId: "x", dedupKey: "x-new", occurredAtMs: 30, ...v21 })], "a", "a2");
+        }
+        return page(replacement.map((row) => ({ ...row, ...v21 })), "b", null);
+      },
+    };
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    version = "4.21.0";
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    const rows = (await fx.db.getAllAsync<{ dedup: string; v: string }>(
+      "select session_id || ':' || occurred_at_ms as dedup, parser_version as v from usage_events order by session_id, occurred_at_ms",
+    )).map((row) => `${row.dedup}@${row.v.slice("tokscale-".length)}`);
+    const pending = await fx.db.getFirstAsync("select value from kv where key = ?", [`direct_reparse_${env}`]);
+    const tracked = await fx.db.getFirstAsync("select count(*) as n from reconcile_sessions");
+    fx.native.close();
+    return { rows, pending, tracked, sinces };
+  }
+
+  test("a nonempty replacement retires only sessions it reported", async () => {
+    const result = await run([ingestRow({ sessionId: "y", dedupKey: "pi:response:y", occurredAtMs: 20 })]);
+    expect(result.rows).toEqual(["x:10@4.15.1", "x:30@4.21.0", "y:20@4.21.0"]);
+    expect(result.pending).toBeNull();
+    expect(result.tracked).toEqual({ n: 0 });
+  });
+
+  test("an empty replacement deletes nothing and keeps the reparse pending", async () => {
+    const result = await run([]);
+    expect(result.rows).toEqual(["x:10@4.15.1", "x:30@4.21.0", "y:20@4.15.1"]);
+    expect(result.pending).toEqual({ value: "4.21.0" });
+    // First pull, the reconciliation, and its restart all start from full history.
+    expect(result.sinces).toEqual([0, 0, 0]);
+  });
 });
 
 test("continuation passes resume pending machines only and reuse their quota and health results", async () => {

@@ -8,7 +8,11 @@ import type { CostSource } from "./types";
  * replace content under the same event id during full reconciliation. A pin
  * bump can change a dedup key (tokscale 4.21 replaced derived Pi keys with
  * provider response ids); a completed full reconciliation therefore retires
- * other-parser rows within the client sessions it re-reported.
+ * other-parser rows within the client sessions its snapshot re-reported.
+ *
+ * reconcile_sessions = environment/client/session_id, tracked per page of the
+ * in-progress reconciliation snapshot (insert-or-ignore) and cleared when a
+ * snapshot starts, restarts after an expired cursor, or completes.
  *
  * quota_snapshots = environment/provider/account/metric/status. Preserve the
  * source collection time; newer samples replace older samples, and success

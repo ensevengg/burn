@@ -58,12 +58,41 @@ export async function mergePeerEvents(
   );
 }
 
+/** Caller owns transaction and write lock. The first page of a full
+ * reconciliation snapshot (including one restarted after an expired cursor)
+ * forgets the sessions an earlier snapshot reported. */
+export async function resetReconciledSessions(
+  db: SQLiteDatabase,
+  environmentId: string,
+): Promise<void> {
+  await db.runAsync("delete from reconcile_sessions where environment_id = ?", [environmentId]);
+}
+
+/** Caller owns transaction and write lock; runs with the page's row merge so
+ * the tracked set always matches committed pages of the current snapshot. */
+export async function trackReconciledSessions(
+  db: SQLiteDatabase,
+  environmentId: string,
+  events: MachineEventInput[],
+): Promise<void> {
+  const sessions = [...new Map(events.map((e) => [`${e.client}\u0000${e.sessionId}`, e])).values()];
+  for (let i = 0; i < sessions.length; i += 32) {
+    const chunk = sessions.slice(i, i + 32);
+    await db.runAsync(
+      `insert or ignore into reconcile_sessions (environment_id, client, session_id)
+       values ${chunk.map(() => "(?, ?, ?)").join(",")}`,
+      chunk.flatMap((e) => [environmentId, e.client, e.sessionId]),
+    );
+  }
+}
+
 /** Caller owns transaction and write lock, and calls this only after a
  * completed full-history pass whose rows all carry `parserVersion`. A parser
  * pin bump can re-key the same usage (tokscale replacing a derived dedup key
  * with a provider id), leaving the old-key rows orphaned and double-counted.
- * Rows from another parser version are dropped only inside sessions this pass
- * re-reported, so history whose source the machine has since pruned is kept. */
+ * Rows from another parser version are dropped only inside sessions the
+ * completed snapshot itself reported (not ones an expired partial snapshot
+ * committed), so history whose source the machine has since pruned is kept. */
 export async function dropSupersededEvents(
   db: SQLiteDatabase,
   environmentId: string,
@@ -73,13 +102,13 @@ export async function dropSupersededEvents(
     `delete from usage_events
      where environment_id = ?1 and parser_version <> ?2
        and exists (
-         select 1 from usage_events as kept
-         where kept.environment_id = usage_events.environment_id
-           and kept.session_id = usage_events.session_id
-           and kept.client = usage_events.client
-           and kept.parser_version = ?2)`,
+         select 1 from reconcile_sessions as reported
+         where reported.environment_id = ?1
+           and reported.client = usage_events.client
+           and reported.session_id = usage_events.session_id)`,
     [environmentId, parserVersion],
   );
+  await resetReconciledSessions(db, environmentId);
   return result.changes;
 }
 
