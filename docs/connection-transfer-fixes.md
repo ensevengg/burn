@@ -29,7 +29,7 @@ Current architecture: [ADR 0003 — Tailscale-only backend](adr/0003-tailscale-o
 
 ## Upgrade
 
-Restart resident reporters. Their configs retain identity/pin and lose obsolete destination credentials. The pin remains 4.15.1; retain main’s exporter fingerprint capability. If `burn-events --capabilities` lacks `fingerprint-v1`, rebuild with `cargo install --path crates/burn-events` before running the reporter.
+Restart resident reporters. Their configs retain identity/pin and lose obsolete destination credentials. The tokscale pin is 4.21.0; saved configs with an older pin move forward on load. Retain main’s exporter fingerprint capability. If `burn-events --capabilities` lacks `fingerprint-v1`, rebuild with `cargo install --path crates/burn-events` before running the reporter.
 
 The phone's legacy cloud mode upgrades locally to direct mode, retaining cached history/preferences. Saved machine endpoint URLs become direct registrations; existing registrations take precedence. A machine without a saved URL stays visible through its cached history and needs its reporter URL added manually. One corrective full reconciliation runs after upgrading, then normal per-machine cursors resume.
 
@@ -50,3 +50,7 @@ An in-place package/signature-compatible upgrade preserved all three machine IDs
 `--since-ms` still filters after upstream result construction. The pinned core caches parsed source messages; avoiding cold full-history work needs a genuine source index or upstream incremental API at the D2 seam. Resident caching and unchanged-transfer avoidance do not eliminate that work.
 
 Accurate model-price reference transport remains deferred and must preserve tokscale provider/alias/tier semantics. Event costs remain priced by tokscale. Compact/dictionary delta formats and a combined snapshot endpoint are optional protocol follow-ups.
+
+## Parser pin changes
+
+`/ping` reports the reporter's tokscale pin. When a machine reports a different pin than the phone last stored, the phone persists `direct_reparse_<environment>` and runs full reconciliation until one completes, even inside the daily window. A completed full reconciliation drops rows with another `parser_version` only in (client, session) pairs it re-reported at the pass's parser version: pin bumps can re-key the same usage (4.21 replaced derived Pi keys with provider response ids and added a day suffix to Hermes keys), while sessions the machine no longer has keep their cached history.
