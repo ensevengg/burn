@@ -1108,6 +1108,64 @@ test("unchanged reconciliation pages neither evict caches nor refetch event scre
   }
 });
 
+test("a tokscale pin change reconciles and replaces re-keyed rows without dropping pruned history", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  // A pin bump re-keys session s1 (derived ordinal -> provider response id).
+  // Session s0 is history whose transcript the machine has since pruned.
+  const rows = () =>
+    version === "4.15.1"
+      ? [
+          ingestRow({ sessionId: "s0", dedupKey: "v1:pi:s0:1", occurredAtMs: 1 }),
+          ingestRow({ sessionId: "s1", dedupKey: "v1:pi:s1:2", occurredAtMs: 2 }),
+        ]
+      : [
+          ingestRow({ sessionId: "s1", dedupKey: "pi:response:r2", occurredAtMs: 2, parserVersion: "tokscale-4.21.0" }),
+          ingestRow({ sessionId: "s2", dedupKey: "muse:s2:1", occurredAtMs: 3, parserVersion: "tokscale-4.21.0" }),
+        ];
+  const sinces: (number | null)[] = [];
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => {
+      sinces.push(since);
+      return {
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        events: version === "4.15.1" ? rows() : rows().filter((row) => row.occurredAtMs >= (since ?? 0)),
+      };
+    },
+  };
+  const sessions = async () =>
+    (await fx.db.getAllAsync<{ session_id: string; parser_version: string }>(
+      "select session_id, parser_version from usage_events order by session_id",
+    )).map((row) => `${row.session_id}@${row.parser_version}`);
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    clock += 60_000;
+    // Same pin, recent pass: incremental, nothing to reconcile.
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces[1]).toBeGreaterThan(0);
+
+    version = "4.21.0";
+    clock += 60_000;
+    // Well inside the daily reconciliation window, the pin change alone
+    // forces a full-history pass and retires the old s1 key.
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces[2]).toBe(0);
+    expect(await sessions()).toEqual(["s0@tokscale-4.15.1", "s1@tokscale-4.21.0", "s2@tokscale-4.21.0"]);
+
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces[3]).toBeGreaterThan(0);
+  } finally {
+    fx.native.close();
+  }
+});
+
 test("continuation passes resume pending machines only and reuse their quota and health results", async () => {
   const fx = mirrorFixture();
   const now = Date.now();

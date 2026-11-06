@@ -5,7 +5,10 @@ import type { CostSource } from "./types";
  * usage_events.event_id = sha256(environment_slug | client | dedup_key).
  * Tokscale's dedup key is authoritative. Where absent, the D2 exporter derives
  * v1:<client>:<session_id>:<source_ts_ms>:<ordinal>. Parser/pricing corrections
- * replace content under the same event id during full reconciliation.
+ * replace content under the same event id during full reconciliation. A pin
+ * bump can change a dedup key (tokscale 4.21 replaced derived Pi keys with
+ * provider response ids); a completed full reconciliation therefore retires
+ * other-parser rows within the client sessions it re-reported.
  *
  * quota_snapshots = environment/provider/account/metric/status. Preserve the
  * source collection time; newer samples replace older samples, and success

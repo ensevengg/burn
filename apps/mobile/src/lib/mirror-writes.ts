@@ -58,6 +58,31 @@ export async function mergePeerEvents(
   );
 }
 
+/** Caller owns transaction and write lock, and calls this only after a
+ * completed full-history pass whose rows all carry `parserVersion`. A parser
+ * pin bump can re-key the same usage (tokscale replacing a derived dedup key
+ * with a provider id), leaving the old-key rows orphaned and double-counted.
+ * Rows from another parser version are dropped only inside sessions this pass
+ * re-reported, so history whose source the machine has since pruned is kept. */
+export async function dropSupersededEvents(
+  db: SQLiteDatabase,
+  environmentId: string,
+  parserVersion: string,
+): Promise<number> {
+  const result = await db.runAsync(
+    `delete from usage_events
+     where environment_id = ?1 and parser_version <> ?2
+       and exists (
+         select 1 from usage_events as kept
+         where kept.environment_id = usage_events.environment_id
+           and kept.session_id = usage_events.session_id
+           and kept.client = usage_events.client
+           and kept.parser_version = ?2)`,
+    [environmentId, parserVersion],
+  );
+  return result.changes;
+}
+
 function eventBindings(e: UsageEvent) {
   return [
     e.eventId,

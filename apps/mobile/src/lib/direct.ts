@@ -1,4 +1,4 @@
-import { mergePeerEvents, mergeQuota, mergeMetrics } from "./mirror-writes";
+import { dropSupersededEvents, mergePeerEvents, mergeQuota, mergeMetrics } from "./mirror-writes";
 /** Machines are the backend (ADR 0003). Each registry endpoint supplies
  * validated event pages and independent quotas. The phone stores per-machine
  * scan-start cursors, atomically commits page continuation, and periodically
@@ -92,6 +92,13 @@ function cursorKey(envId: string): string {
 
 function legacyCursorKey(envId: string): string {
   return `direct_since_${envId}`;
+}
+
+/** Set when a machine reports a different tokscale pin; a parser change can
+ * re-key or reprice old rows, so it forces full reconciliation until one
+ * completes. */
+function reparseKey(envId: string): string {
+  return `direct_reparse_${envId}`;
 }
 
 async function kvGetNumber(
@@ -279,6 +286,7 @@ export async function removeDirectMachine(
         `direct_hash_${environmentId}`,
         `direct_backfill_${environmentId}`,
         `direct_full_at_${environmentId}`,
+        reparseKey(environmentId),
       ])
         await kvDelete(db, key);
     });
@@ -438,6 +446,12 @@ async function pullDirectUnlocked(
               "update direct_machines set last_ping_at=?,last_error=null where id=?",
               [new Date(now()).toISOString(), machine.id],
             );
+            const previous = await db.getFirstAsync<{ v: string | null }>(
+              "select tokscale_version as v from environments where id=?",
+              [machine.id],
+            );
+            if (ping.tokscaleVersion !== null && previous?.v !== ping.tokscaleVersion)
+              await kvSetString(db, reparseKey(machine.id), ping.tokscaleVersion);
             await db.runAsync(
               `update environments set reporter_version=?,tokscale_version=?,export_schema=?,reporting_timezone=?,host_group=coalesce(?,host_group),last_heartbeat_at=? where id=?`,
               [
@@ -550,14 +564,21 @@ async function pullDirectUnlocked(
             snapshotId?: string;
             contentHash?: string;
             reconciliation: boolean;
+            parserVersion?: string;
           } | null = progressRaw ? JSON.parse(progressRaw) : null;
           const lastFull = await kvGetNumber(
             db,
             `direct_full_at_${machine.id}`,
           );
+          const reparse =
+            (await db.getFirstAsync<{ value: string }>(
+              "select value from kv where key=?",
+              [reparseKey(machine.id)],
+            )) !== null;
           const reconciliation =
             progress?.reconciliation ??
             (options.full === true ||
+              reparse ||
               (stored !== null && ping.serverNowMs < stored) ||
               stored === null ||
               lastFull === null ||
@@ -580,6 +601,8 @@ async function pullDirectUnlocked(
             progress?.scanStartedAtMs ?? null;
           let snapshotId = progress?.snapshotId;
           let contentHash = progress?.contentHash;
+          // One snapshot serves the whole pass, so its rows share one parser.
+          let parserVersion = progress?.parserVersion;
           let pulled = 0;
           let scanMs: number | null = null;
           let restarted = false;
@@ -640,6 +663,7 @@ async function pullDirectUnlocked(
               Math.min(ping.serverNowMs, Date.parse(page.generatedAt));
             scanMs = page.scanMs ?? null;
             contentHash = page.contentHash;
+            parserVersion = page.events[0]?.parserVersion ?? parserVersion;
             const done = !page.nextCursor;
             if (page.nextCursor && seenCursors.has(page.nextCursor))
               throw new LiveError("Repeated event page cursor");
@@ -665,12 +689,16 @@ async function pullDirectUnlocked(
                     ),
                   );
                   if (contentHash) await kvSetString(db, hashKey, contentHash);
-                  if (reconciliation)
+                  if (reconciliation) {
+                    if (parserVersion !== undefined)
+                      changed += await dropSupersededEvents(db, machine.id, parserVersion);
                     await kvSetString(
                       db,
                       `direct_full_at_${machine.id}`,
                       String(now()),
                     );
+                    await kvDelete(db, reparseKey(machine.id));
+                  }
                   await kvDelete(db, progressKey);
                 } else {
                   await kvSetString(
@@ -683,6 +711,7 @@ async function pullDirectUnlocked(
                       snapshotId,
                       contentHash,
                       reconciliation,
+                      parserVersion,
                     }),
                   );
                 }
