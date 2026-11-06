@@ -18,6 +18,8 @@ export function seedDemoData(db: SQLiteDatabase): Promise<void> {
   return withWriteLock(() => seedDemoDataUnlocked(db));
 }
 
+/** Caller holds the write lock: replaces the mirror with the bundled demo
+ * environments, events and quotas, stamped with the current tokscale pin. */
 async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
   const dataset = generateDemoDataset();
   await wipeForReseed(db);

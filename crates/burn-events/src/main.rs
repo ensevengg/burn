@@ -241,8 +241,9 @@ async fn run(since_ms: Option<i64>) -> Result<(), String> {
     Ok(())
 }
 
-/// Scanner settings live on the `scanner` key of tokscale's settings.json;
-/// unreadable or absent config degrades to defaults, exactly like the CLI.
+/// Cheap change detector for `--fingerprint`: hashes the metadata (size,
+/// mtime) of every source tokscale would scan plus the settings and pricing
+/// files, so the reporter can reuse a snapshot without re-parsing.
 fn source_fingerprint() -> Result<String, String> {
     let home = tokscale_core::get_home_dir_string(&None)?;
     let settings = load_scanner_settings();
@@ -339,6 +340,8 @@ fn fingerprint_paths(paths: &[PathBuf]) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+/// Scanner settings live on the `scanner` key of tokscale's settings.json;
+/// unreadable or absent config degrades to defaults, exactly like the CLI.
 fn load_scanner_settings() -> ScannerSettings {
     let path = paths::get_config_dir().join("settings.json");
     let Ok(text) = std::fs::read_to_string(&path) else {

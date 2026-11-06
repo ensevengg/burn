@@ -77,6 +77,8 @@ export function atomicJson(path: string, data: unknown): void {
   }
 }
 
+/** Read and validate the saved config, rewriting it in place when the schema
+ * normalizes it (legacy credentials removed, an older tokscale pin advanced). */
 export function loadConfig(): BurnConfig {
   const path = configPath();
   if (!existsSync(path)) {

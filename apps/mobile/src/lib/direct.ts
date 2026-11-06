@@ -391,6 +391,10 @@ export function pullDirectFromMachines(
   return pending;
 }
 
+/** One pass over the registered machines (or the continuation's pending
+ * ones): ping, then quotas, health and paged events in parallel per machine.
+ * Event windows pick incremental or full reconciliation (pin change, first
+ * sync, clock rollback, daily) and checkpoint progress page by page. */
 async function pullDirectUnlocked(
   db: SQLiteDatabase,
   options: DirectPullOptions,
