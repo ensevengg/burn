@@ -689,9 +689,11 @@ async function pullDirectUnlocked(
                     ),
                   );
                   if (contentHash) await kvSetString(db, hashKey, contentHash);
-                  if (reconciliation) {
-                    if (parserVersion !== undefined)
-                      changed += await dropSupersededEvents(db, machine.id, parserVersion);
+                  // An empty snapshot (sources unreadable, not yet scanned) proves
+                  // nothing and deletes nothing: reconciliation stays pending so
+                  // it reruns from full history once rows return.
+                  if (reconciliation && parserVersion !== undefined) {
+                    changed += await dropSupersededEvents(db, machine.id, parserVersion);
                     await kvSetString(
                       db,
                       `direct_full_at_${machine.id}`,

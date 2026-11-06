@@ -1166,6 +1166,54 @@ test("a tokscale pin change reconciles and replaces re-keyed rows without droppi
   }
 });
 
+test("an empty snapshot after a pin change keeps reconciliation pending until rows return", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  let empty = false;
+  const sinces: (number | null)[] = [];
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => {
+      sinces.push(since);
+      return {
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        events: empty
+          ? []
+          : version === "4.15.1"
+            ? [ingestRow({ sessionId: "s1", dedupKey: "v1:pi:s1:2", occurredAtMs: 2 })]
+            : [ingestRow({ sessionId: "s1", dedupKey: "pi:response:r2", occurredAtMs: 2, parserVersion: "tokscale-4.21.0" })],
+      };
+    },
+  };
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+
+    // The upgraded reporter answers before its sources are readable.
+    version = "4.21.0";
+    empty = true;
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces[1]).toBe(0);
+    // Nothing is deleted on the strength of an empty snapshot.
+    expect(await fx.db.getFirstAsync("select count(*) as n from usage_events")).toEqual({ n: 1 });
+
+    empty = false;
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces[2]).toBe(0);
+    expect(
+      await fx.db.getAllAsync("select parser_version from usage_events"),
+    ).toEqual([{ parser_version: "tokscale-4.21.0" }]);
+  } finally {
+    fx.native.close();
+  }
+});
+
 test("continuation passes resume pending machines only and reuse their quota and health results", async () => {
   const fx = mirrorFixture();
   const now = Date.now();
