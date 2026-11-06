@@ -103,6 +103,13 @@ export function openDb(): Promise<SQLite.SQLiteDatabase> {
           session_id text not null,
           primary key (environment_id, client, session_id)
         ) without rowid;
+        -- Rows a full reconciliation inserted (new event ids): the only rows
+        -- that can stand in for a re-keyed older-parser row.
+        create table if not exists reconcile_new_events (
+          environment_id text not null,
+          event_id text not null,
+          primary key (environment_id, event_id)
+        ) without rowid;
         create table if not exists direct_machines (
           id text primary key,
           slug text not null unique,
@@ -179,6 +186,7 @@ export async function wipeForReseed(db: SQLite.SQLiteDatabase): Promise<void> {
     await db.runAsync("delete from direct_machines");
     await db.runAsync("delete from model_prices");
     await db.runAsync("delete from reconcile_sessions");
+    await db.runAsync("delete from reconcile_new_events");
     await db.runAsync(
       "delete from kv where key not in ('reporting_timezone', 'theme_mode')",
     );

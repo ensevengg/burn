@@ -1347,6 +1347,52 @@ test("a partly retained session keeps old rows that have no content-equal replac
   }
 });
 
+test("equal-token events are retired one-to-one against rows the reconciliation inserted", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  const v21 = { parserVersion: "tokscale-4.21.0" };
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => ({
+      sinceMs: since,
+      generatedAt: new Date(clock).toISOString(),
+      scanStartedAtMs: clock,
+      events:
+        version === "4.15.1"
+          ? [
+              ingestRow({ sessionId: "s1", dedupKey: "v1:s1:1", occurredAtMs: 1 }),
+              ingestRow({ sessionId: "s1", dedupKey: "v1:s1:2", occurredAtMs: 2 }),
+              ingestRow({ sessionId: "s2", dedupKey: "s2-kept", occurredAtMs: 3 }),
+              ingestRow({ sessionId: "s2", dedupKey: "v1:s2:4", occurredAtMs: 4 }),
+            ]
+          : [
+              // s1: one message re-keyed, its equal-token sibling compacted away.
+              ingestRow({ sessionId: "s1", dedupKey: "pi:response:r1", occurredAtMs: 1, ...v21 }),
+              // s2: an unchanged key (updated in place) and a compacted sibling.
+              ingestRow({ sessionId: "s2", dedupKey: "s2-kept", occurredAtMs: 3, ...v21 }),
+            ],
+    }),
+  };
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    version = "4.21.0";
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    const rows = (await fx.db.getAllAsync<{ s: string; at: number; v: string }>(
+      "select session_id as s, occurred_at_ms as at, parser_version as v from usage_events order by s, at",
+    )).map((row) => `${row.s}:${row.at}@${row.v.slice("tokscale-".length)}`);
+    // One replacement retires exactly one equal-token old row; an in-place
+    // update is no replacement, so the compacted s2 message keeps its history.
+    expect(rows).toEqual(["s1:1@4.21.0", "s1:2@4.15.1", "s2:3@4.21.0", "s2:4@4.15.1"]);
+    expect(await fx.db.getFirstAsync("select count(*) as n from reconcile_new_events")).toEqual({ n: 0 });
+  } finally {
+    fx.native.close();
+  }
+});
+
 test("a reconciliation that finishes after a re-registration keeps the newer pin pending", async () => {
   const fx = mirrorFixture();
   let clock = Date.parse("2026-10-01T00:00:00Z");

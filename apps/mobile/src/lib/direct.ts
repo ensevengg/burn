@@ -1,5 +1,6 @@
 import {
   dropSupersededEvents,
+  forgetReconciliation,
   mergePeerEvents,
   mergeQuota,
   mergeMetrics,
@@ -319,7 +320,7 @@ export async function removeDirectMachine(
         reparseKey(environmentId),
       ])
         await kvDelete(db, key);
-      await resetReconciledSessions(db, environmentId);
+      await forgetReconciliation(db, environmentId);
     });
     invalidateEventCache(db);
   });
@@ -721,6 +722,7 @@ async function pullDirectUnlocked(
                   machine.slug,
                   page.events,
                   assertActive,
+                  reconciliation,
                 );
                 if (reconciliation) {
                   if (firstSnapshotPage) await resetReconciledSessions(db, machine.id);

@@ -39,13 +39,15 @@ const columns = [
 ];
 const contentColumns = columns.slice(1);
 /** Caller owns transaction and write lock. Changed count excludes overlap
- * duplicates. Machine corrections replace existing content in place. */
+ * duplicates. Machine corrections replace existing content in place. During a
+ * full reconciliation, `trackInserted` records rows whose event id is new. */
 export async function mergePeerEvents(
   db: SQLiteDatabase,
   environmentId: string,
   slug: string,
   events: MachineEventInput[],
   assertActive: () => void,
+  trackInserted = false,
 ): Promise<number> {
   return writeEvents(
     db,
@@ -55,6 +57,7 @@ export async function mergePeerEvents(
       environmentId,
     })),
     assertActive,
+    trackInserted ? environmentId : null,
   );
 }
 
@@ -66,6 +69,18 @@ export async function resetReconciledSessions(
   environmentId: string,
 ): Promise<void> {
   await db.runAsync("delete from reconcile_sessions where environment_id = ?", [environmentId]);
+}
+
+/** Caller owns transaction and write lock. Forgets all reconciliation
+ * tracking for a machine: after a completed pass, on removal and on reset.
+ * Inserted rows survive a cursor-expiry restart on purpose: the replacement
+ * snapshot only updates them, and they remain valid one-to-one replacements. */
+export async function forgetReconciliation(
+  db: SQLiteDatabase,
+  environmentId: string,
+): Promise<void> {
+  await resetReconciledSessions(db, environmentId);
+  await db.runAsync("delete from reconcile_new_events where environment_id = ?", [environmentId]);
 }
 
 /** Caller owns transaction and write lock; runs with the page's row merge so
@@ -92,37 +107,43 @@ export async function trackReconciledSessions(
  * with a provider id), leaving the old-key rows orphaned and double-counted.
  * Rows from another parser version are dropped only inside sessions the
  * completed snapshot itself reported (not ones an expired partial snapshot
- * committed), and only when that session holds a current-parser row with the
- * same token buckets: a content-equal replacement. History whose source the
- * machine pruned (whole sessions, or messages a client removed or compacted)
- * is kept, at the cost of keeping rows whose tokens a new parser also changed. */
+ * committed), and only one-to-one against rows the reconciliation inserted
+ * with the same model and token buckets: each deletion consumes a distinct
+ * content-equal replacement. History whose source the machine pruned (whole
+ * sessions, or messages a client removed or compacted) is kept, at the cost of
+ * keeping rows whose model or tokens a new parser also changed. */
 export async function dropSupersededEvents(
   db: SQLiteDatabase,
   environmentId: string,
   parserVersion: string,
 ): Promise<number> {
+  const content = `client, session_id, model_id, input_tokens, output_tokens,
+    cache_read_tokens, cache_write_tokens, reasoning_tokens`;
   const result = await db.runAsync(
-    `delete from usage_events
-     where environment_id = ?1 and parser_version <> ?2
-       and exists (
-         select 1 from reconcile_sessions as reported
-         where reported.environment_id = ?1
-           and reported.client = usage_events.client
-           and reported.session_id = usage_events.session_id)
-       and exists (
-         select 1 from usage_events as replacement
-         where replacement.environment_id = ?1
-           and replacement.client = usage_events.client
-           and replacement.session_id = usage_events.session_id
-           and replacement.parser_version = ?2
-           and replacement.input_tokens = usage_events.input_tokens
-           and replacement.output_tokens = usage_events.output_tokens
-           and replacement.cache_read_tokens = usage_events.cache_read_tokens
-           and replacement.cache_write_tokens = usage_events.cache_write_tokens
-           and replacement.reasoning_tokens = usage_events.reasoning_tokens)`,
+    `with stale as (
+       select event_id, ${content},
+         row_number() over (partition by ${content} order by occurred_at_ms, event_id) as nth
+       from usage_events
+       where environment_id = ?1 and parser_version <> ?2
+         and exists (
+           select 1 from reconcile_sessions as reported
+           where reported.environment_id = ?1
+             and reported.client = usage_events.client
+             and reported.session_id = usage_events.session_id)
+     ),
+     replacements as (
+       select ${content.split(",").map((c) => `u.${c.trim()}`).join(", ")}, count(*) as available
+       from reconcile_new_events as inserted
+       join usage_events as u on u.event_id = inserted.event_id
+       where inserted.environment_id = ?1 and u.environment_id = ?1 and u.parser_version = ?2
+       group by ${content}
+     )
+     delete from usage_events where event_id in (
+       select stale.event_id from stale join replacements using (${content})
+       where stale.nth <= replacements.available)`,
     [environmentId, parserVersion],
   );
-  await resetReconciledSessions(db, environmentId);
+  await forgetReconciliation(db, environmentId);
   return result.changes;
 }
 
@@ -162,12 +183,24 @@ async function writeEvents(
   db: SQLiteDatabase,
   events: UsageEvent[],
   assertActive: () => void,
+  trackInsertedFor: string | null = null,
 ): Promise<number> {
   let changed = 0;
   // 32 × 27 bindings stays below the classic 999-parameter SQLite limit.
   for (let i = 0; i < events.length; i += 32) {
     assertActive();
     const chunk = events.slice(i, i + 32);
+    const known =
+      trackInsertedFor === null
+        ? null
+        : new Set(
+            (
+              await db.getAllAsync<{ event_id: string }>(
+                `select event_id from usage_events where event_id in (${chunk.map(() => "?").join(",")})`,
+                chunk.map((e) => e.eventId),
+              )
+            ).map((row) => row.event_id),
+          );
     const conflict = `
       on conflict(event_id) do update set ${contentColumns
         .map((c) => `${c}=excluded.${c}`)
@@ -179,6 +212,13 @@ async function writeEvents(
       chunk.flatMap(eventBindings),
     );
     changed += result.changes;
+    const inserted = known === null ? [] : chunk.filter((e) => !known.has(e.eventId));
+    if (inserted.length > 0)
+      await db.runAsync(
+        `insert or ignore into reconcile_new_events (environment_id, event_id)
+         values ${inserted.map(() => "(?, ?)").join(",")}`,
+        inserted.flatMap((e) => [trackInsertedFor, e.eventId]),
+      );
   }
   assertActive();
   return changed;
