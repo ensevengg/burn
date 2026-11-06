@@ -5,6 +5,8 @@
  * the mobile mirror seed writer.
  */
 
+import { TOKSCALE_PIN } from "@burn/sync-api";
+
 export interface DemoEvent {
   eventId: string;
   environmentSlug: string;
@@ -237,7 +239,7 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
               rand() < model.providerReportedChance ? "provider_reported" : "estimated",
             costIsComplete: true,
             modelAttributionConflicted: false,
-            parserVersion: "tokscale-4.15.1",
+            parserVersion: `tokscale-${TOKSCALE_PIN}`,
             dedupKey: `v1:${model.client}:${sessionId}:${cursorMs}:${m}`,
             revision,
           });

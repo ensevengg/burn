@@ -1,5 +1,5 @@
 /** Bundled demo seeding uses the same local mirror as machine sync. */
-import { machineMetricId, quotaMirrorKey } from "@burn/sync-api";
+import { machineMetricId, quotaMirrorKey, TOKSCALE_PIN } from "@burn/sync-api";
 import { invalidateEventCache } from "../data/repository";
 import { kvSet, wipeForReseed, type SQLiteDatabase } from "./db";
 import { withWriteLock } from "./writelock";
@@ -29,13 +29,14 @@ async function seedDemoDataUnlocked(db: SQLiteDatabase): Promise<void> {
       await db.runAsync(
         `insert or replace into environments
            (id, slug, display_name, host_group, os_kind, tokscale_version, export_schema, reporting_timezone, last_heartbeat_at, last_success_at)
-         values (?, ?, ?, ?, ?, '4.15.1', 1, ?, ?, ?)`,
+         values (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
         [
           id,
           env.slug,
           env.displayName,
           env.hostGroup,
           env.osKind,
+          TOKSCALE_PIN,
           env.reportingTimezone,
           new Date(dataset.now - 5 * 60_000).toISOString(),
           new Date(dataset.now - 5 * 60_000).toISOString(),
