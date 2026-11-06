@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   LIVE_OVERLAP_MS,
   liveEventId,
+  LiveError,
   LiveUnreachableError,
   type MachineEventInput,
   type LiveApi,
@@ -1106,6 +1107,416 @@ test("unchanged reconciliation pages neither evict caches nor refetch event scre
     unsubscribe();
     fx.native.close();
   }
+});
+
+test("a tokscale pin change reconciles and replaces re-keyed rows without dropping pruned history", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  // A pin bump re-keys session s1 (derived ordinal -> provider response id).
+  // Session s0 is history whose transcript the machine has since pruned.
+  const rows = () =>
+    version === "4.15.1"
+      ? [
+          ingestRow({ sessionId: "s0", dedupKey: "v1:pi:s0:1", occurredAtMs: 1 }),
+          ingestRow({ sessionId: "s1", dedupKey: "v1:pi:s1:2", occurredAtMs: 2 }),
+        ]
+      : [
+          ingestRow({ sessionId: "s1", dedupKey: "pi:response:r2", occurredAtMs: 2, parserVersion: "tokscale-4.21.0" }),
+          ingestRow({ sessionId: "s2", dedupKey: "muse:s2:1", occurredAtMs: 3, parserVersion: "tokscale-4.21.0" }),
+        ];
+  const sinces: (number | null)[] = [];
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => {
+      sinces.push(since);
+      return {
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        events: version === "4.15.1" ? rows() : rows().filter((row) => row.occurredAtMs >= (since ?? 0)),
+      };
+    },
+  };
+  const sessions = async () =>
+    (await fx.db.getAllAsync<{ session_id: string; parser_version: string }>(
+      "select session_id, parser_version from usage_events order by session_id",
+    )).map((row) => `${row.session_id}@${row.parser_version}`);
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    clock += 60_000;
+    // Same pin, recent pass: incremental, nothing to reconcile.
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces[1]).toBeGreaterThan(0);
+
+    version = "4.21.0";
+    clock += 60_000;
+    // Well inside the daily reconciliation window, the pin change alone
+    // forces a full-history pass and retires the old s1 key.
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces[2]).toBe(0);
+    expect(await sessions()).toEqual(["s0@tokscale-4.15.1", "s1@tokscale-4.21.0", "s2@tokscale-4.21.0"]);
+
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces[3]).toBeGreaterThan(0);
+  } finally {
+    fx.native.close();
+  }
+});
+
+test("an empty snapshot after a pin change keeps reconciliation pending until rows return", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  let empty = false;
+  const sinces: (number | null)[] = [];
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => {
+      sinces.push(since);
+      return {
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        events: empty
+          ? []
+          : version === "4.15.1"
+            ? [ingestRow({ sessionId: "s1", dedupKey: "v1:pi:s1:2", occurredAtMs: 2 })]
+            : [ingestRow({ sessionId: "s1", dedupKey: "pi:response:r2", occurredAtMs: 2, parserVersion: "tokscale-4.21.0" })],
+      };
+    },
+  };
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+
+    // The upgraded reporter answers before its sources are readable.
+    version = "4.21.0";
+    empty = true;
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces[1]).toBe(0);
+    // Nothing is deleted on the strength of an empty snapshot.
+    expect(await fx.db.getFirstAsync("select count(*) as n from usage_events")).toEqual({ n: 1 });
+
+    empty = false;
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces[2]).toBe(0);
+    expect(
+      await fx.db.getAllAsync("select parser_version from usage_events"),
+    ).toEqual([{ parser_version: "tokscale-4.21.0" }]);
+  } finally {
+    fx.native.close();
+  }
+});
+
+test("a pin change replaces unfinished incremental progress with full reconciliation", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  let incremental = false;
+  const requests: string[] = [];
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since, _signal, request) => {
+      requests.push(`${since}${request?.cursor ? `@${request.cursor}` : ""}`);
+      const page = (events: MachineEventInput[], nextCursor: string | null) => ({
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        snapshotId: version,
+        events,
+        nextCursor,
+      });
+      if (version === "4.21.0")
+        return page([ingestRow({ sessionId: "s1", dedupKey: "pi:response:r2", occurredAtMs: 2, parserVersion: "tokscale-4.21.0" })], null);
+      // The incremental window spans two pages; only the first is fetched.
+      return page([ingestRow({ sessionId: "s1", dedupKey: "v1:pi:s1:2", occurredAtMs: 2 })], incremental ? "inc-2" : null);
+    },
+  };
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    incremental = true;
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock, maxPages: 1 });
+    expect(
+      JSON.parse((await fx.db.getFirstAsync<{ value: string }>(
+        "select value from kv where key = 'direct_backfill_direct-win'",
+      ))!.value).reconciliation,
+    ).toBe(false);
+
+    version = "4.21.0";
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock, continuation: true });
+    // The saved incremental cursor is never resumed: the pass starts from full history.
+    expect(requests.slice(2)).toEqual(["0"]);
+    expect(await fx.db.getAllAsync("select parser_version from usage_events")).toEqual([
+      { parser_version: "tokscale-4.21.0" },
+    ]);
+    expect(
+      await fx.db.getFirstAsync(
+        "select count(*) as n from kv where key in ('direct_backfill_direct-win', 'direct_reparse_direct-win')",
+      ),
+    ).toEqual({ n: 0 });
+  } finally {
+    fx.native.close();
+  }
+});
+
+test("re-adding a cached machine after a pin change still forces reconciliation", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  const sinces: (number | null)[] = [];
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => {
+      sinces.push(since);
+      return {
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        events: [
+          version === "4.15.1"
+            ? ingestRow({ sessionId: "s1", dedupKey: "v1:pi:s1:2", occurredAtMs: 2 })
+            : ingestRow({ sessionId: "s1", dedupKey: "pi:response:r2", occurredAtMs: 2, parserVersion: "tokscale-4.21.0" }),
+        ],
+      };
+    },
+  };
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    version = "4.21.0";
+    clock += 60_000;
+    // A new endpoint for the same machine stores the new pin at registration.
+    await addDirectMachine(fx.db, "http://win.tailnet", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(sinces).toEqual([0, 0]);
+    expect(await fx.db.getAllAsync("select parser_version from usage_events")).toEqual([
+      { parser_version: "tokscale-4.21.0" },
+    ]);
+  } finally {
+    fx.native.close();
+  }
+});
+
+test("a partly retained session keeps old rows that have no content-equal replacement", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => ({
+      sinceMs: since,
+      generatedAt: new Date(clock).toISOString(),
+      scanStartedAtMs: clock,
+      events:
+        version === "4.15.1"
+          ? [
+              ingestRow({ dedupKey: "v1:pi:s1:1", occurredAtMs: 1, inputTokens: 10 }),
+              ingestRow({ dedupKey: "v1:pi:s1:2", occurredAtMs: 2, inputTokens: 20 }),
+            ]
+          : // The client compacted s1: only its re-keyed first message remains.
+            [ingestRow({ dedupKey: "pi:response:r1", occurredAtMs: 1, inputTokens: 10, parserVersion: "tokscale-4.21.0" })],
+    }),
+  };
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    version = "4.21.0";
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    expect(
+      await fx.db.getAllAsync("select input_tokens, parser_version from usage_events order by input_tokens"),
+    ).toEqual([
+      { input_tokens: 10, parser_version: "tokscale-4.21.0" },
+      { input_tokens: 20, parser_version: "tokscale-4.15.1" },
+    ]);
+  } finally {
+    fx.native.close();
+  }
+});
+
+test("equal-token events are retired one-to-one against rows the reconciliation inserted", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  let version = "4.15.1";
+  const v21 = { parserVersion: "tokscale-4.21.0" };
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => ({
+      sinceMs: since,
+      generatedAt: new Date(clock).toISOString(),
+      scanStartedAtMs: clock,
+      events:
+        version === "4.15.1"
+          ? [
+              ingestRow({ sessionId: "s1", dedupKey: "v1:s1:1", occurredAtMs: 1 }),
+              ingestRow({ sessionId: "s1", dedupKey: "v1:s1:2", occurredAtMs: 2 }),
+              ingestRow({ sessionId: "s2", dedupKey: "s2-kept", occurredAtMs: 3 }),
+              ingestRow({ sessionId: "s2", dedupKey: "v1:s2:4", occurredAtMs: 4 }),
+              ingestRow({ sessionId: "s3", dedupKey: "v1:s3:5", occurredAtMs: 5 }),
+              ingestRow({ sessionId: "s3", dedupKey: "v1:s3:6", occurredAtMs: 6 }),
+            ]
+          : [
+              // s1: one message re-keyed, its equal-token sibling compacted away.
+              ingestRow({ sessionId: "s1", dedupKey: "pi:response:r1", occurredAtMs: 1, ...v21 }),
+              // s2: an unchanged key (updated in place) and a compacted sibling.
+              ingestRow({ sessionId: "s2", dedupKey: "s2-kept", occurredAtMs: 3, ...v21 }),
+              // s3: the reverse of s1, the earlier sibling compacted and the later re-keyed.
+              ingestRow({ sessionId: "s3", dedupKey: "pi:response:r6", occurredAtMs: 6, ...v21 }),
+            ],
+    }),
+  };
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    version = "4.21.0";
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    const rows = (await fx.db.getAllAsync<{ s: string; at: number; v: string }>(
+      "select session_id as s, occurred_at_ms as at, parser_version as v from usage_events order by s, at",
+    )).map((row) => `${row.s}:${row.at}@${row.v.slice("tokscale-".length)}`);
+    // One replacement retires exactly one equal-token old row; an in-place
+    // update is no replacement, so the compacted s2 message keeps its history.
+    // The same-instant sibling is the one retired, whichever order they arrived in.
+    expect(rows).toEqual([
+      "s1:1@4.21.0", "s1:2@4.15.1",
+      "s2:3@4.21.0", "s2:4@4.15.1",
+      "s3:5@4.15.1", "s3:6@4.21.0",
+    ]);
+    expect(await fx.db.getFirstAsync("select count(*) as n from reconcile_new_events")).toEqual({ n: 0 });
+  } finally {
+    fx.native.close();
+  }
+});
+
+test("a reconciliation that finishes after a re-registration keeps the newer pin pending", async () => {
+  const fx = mirrorFixture();
+  let clock = Date.parse("2026-10-01T00:00:00Z");
+  const sinces: string[] = [];
+  let reRegister: (() => Promise<unknown>) | null = null;
+  const endpoint = (version: string): LiveApi => ({
+    ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+    quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+    events: async (since) => {
+      sinces.push(`${version}:${since}`);
+      // The phone re-registers the upgraded endpoint while this scan is in flight.
+      const pending = reRegister;
+      reRegister = null;
+      if (pending) await pending();
+      return {
+        sinceMs: since,
+        generatedAt: new Date(clock).toISOString(),
+        scanStartedAtMs: clock,
+        events: [
+          version === "4.15.1"
+            ? ingestRow({ dedupKey: "v1:pi:s1:2", occurredAtMs: 2 })
+            : ingestRow({ dedupKey: "pi:response:r2", occurredAtMs: 2, parserVersion: "tokscale-4.21.0" }),
+        ],
+      };
+    },
+  });
+  const apiFor = (url: string) => endpoint(url === "http://win.next" ? "4.21.0" : "4.15.1");
+  try {
+    await addDirectMachine(fx.db, "http://win", { apiFor, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => clock });
+    clock += 60_000;
+    reRegister = () => addDirectMachine(fx.db, "http://win.next", { apiFor, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => clock, full: true });
+    expect(
+      await fx.db.getFirstAsync("select value from kv where key = 'direct_reparse_direct-win'"),
+    ).toEqual({ value: "4.21.0" });
+
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => clock });
+    expect(sinces).toEqual(["4.15.1:0", "4.15.1:0", "4.21.0:0"]);
+    expect(await fx.db.getAllAsync("select parser_version from usage_events")).toEqual([
+      { parser_version: "tokscale-4.21.0" },
+    ]);
+  } finally {
+    fx.native.close();
+  }
+});
+
+describe("a reconciliation restarted after an expired cursor", () => {
+  // Session x spans pages: its newest row reached the phone from the expired
+  // snapshot, its older old-parser row did not, and the replacement snapshot no
+  // longer has x at all (source pruned in between). Only y is superseded.
+  async function run(replacement: MachineEventInput[]) {
+    const fx = mirrorFixture();
+    const env = directEnvId("win");
+    let clock = Date.parse("2026-10-01T00:00:00Z");
+    let version = "4.15.1";
+    let expired = false;
+    const sinces: (number | null)[] = [];
+    const v21 = { parserVersion: "tokscale-4.21.0" };
+    const api: LiveApi = {
+      ping: async () => ping({ serverNowMs: clock, tokscaleVersion: version }),
+      quotas: async () => ({ generatedAt: new Date(clock).toISOString(), quotas: [] }),
+      events: async (since, _signal, request) => {
+        if (!request?.cursor) sinces.push(since);
+        const page = (events: MachineEventInput[], snapshotId: string, nextCursor: string | null) => ({
+          sinceMs: since,
+          generatedAt: new Date(clock).toISOString(),
+          scanStartedAtMs: clock,
+          snapshotId,
+          events,
+          nextCursor,
+        });
+        if (version === "4.15.1")
+          return page([
+            ingestRow({ sessionId: "x", dedupKey: "x-new", occurredAtMs: 30 }),
+            ingestRow({ sessionId: "x", dedupKey: "v1:x:10", occurredAtMs: 10 }),
+            ingestRow({ sessionId: "y", dedupKey: "v1:y:20", occurredAtMs: 20 }),
+          ], "old", null);
+        if (request?.cursor === "a2") throw new LiveError("expired", 410);
+        if (!expired) {
+          expired = true;
+          return page([ingestRow({ sessionId: "x", dedupKey: "x-new", occurredAtMs: 30, ...v21 })], "a", "a2");
+        }
+        return page(replacement.map((row) => ({ ...row, ...v21 })), "b", null);
+      },
+    };
+    await addDirectMachine(fx.db, "http://win", { apiFor: () => api, now: () => clock });
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    version = "4.21.0";
+    clock += 60_000;
+    await pullDirectFromMachines(fx.db, { apiFor: () => api, now: () => clock });
+    const rows = (await fx.db.getAllAsync<{ dedup: string; v: string }>(
+      "select session_id || ':' || occurred_at_ms as dedup, parser_version as v from usage_events order by session_id, occurred_at_ms",
+    )).map((row) => `${row.dedup}@${row.v.slice("tokscale-".length)}`);
+    const pending = await fx.db.getFirstAsync("select value from kv where key = ?", [`direct_reparse_${env}`]);
+    const tracked = await fx.db.getFirstAsync("select count(*) as n from reconcile_sessions");
+    fx.native.close();
+    return { rows, pending, tracked, sinces };
+  }
+
+  test("a nonempty replacement retires only sessions it reported", async () => {
+    const result = await run([ingestRow({ sessionId: "y", dedupKey: "pi:response:y", occurredAtMs: 20 })]);
+    expect(result.rows).toEqual(["x:10@4.15.1", "x:30@4.21.0", "y:20@4.21.0"]);
+    expect(result.pending).toBeNull();
+    expect(result.tracked).toEqual({ n: 0 });
+  });
+
+  test("an empty replacement deletes nothing and keeps the reparse pending", async () => {
+    const result = await run([]);
+    expect(result.rows).toEqual(["x:10@4.15.1", "x:30@4.21.0", "y:20@4.15.1"]);
+    expect(result.pending).toEqual({ value: "4.21.0" });
+    // First pull, the reconciliation, and its restart all start from full history.
+    expect(result.sinces).toEqual([0, 0, 0]);
+  });
 });
 
 test("continuation passes resume pending machines only and reuse their quota and health results", async () => {

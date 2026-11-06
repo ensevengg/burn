@@ -5,7 +5,7 @@ export const SYNC_SCHEMA_VERSION = 1;
  * Tokscale version the reporter pins to (D2). Bumped via Renovate weekly;
  * fixtures in apps/reporter/fixtures gate every bump.
  */
-export const TOKSCALE_PIN = "4.15.1";
+export const TOKSCALE_PIN = "4.21.0";
 
 /**
  * Exporter contract version (D2): the JSONL shape the `burn-events` exporter

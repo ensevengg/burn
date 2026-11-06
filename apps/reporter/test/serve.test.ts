@@ -86,6 +86,8 @@ describe("live server", () => {
     expect(body.osKind).toBe("windows");
     expect(body.reportingTimezone).toBe("Asia/Kolkata");
     expect(body.exportSchema).toBe(1);
+    // Phones reconcile full history when this changes (parser re-keys rows).
+    expect(body.tokscaleVersion).toBe("4.15.1");
     expect(body.sinceMs).toBe(0);
     expect(body.serverNowMs).toBe(Date.parse("2026-09-07T10:05:00.000Z"));
   });

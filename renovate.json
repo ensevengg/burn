@@ -1,0 +1,36 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "D2: bump the tokscale pin weekly. Only the pin is managed here; other dependencies are updated by hand.",
+  "timezone": "Asia/Kolkata",
+  "enabledManagers": ["custom.regex"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The tokscale-core git tag, burn-events' crate version and TOKSCALE_PIN move in lockstep (Renovate's cargo manager skips git dependencies).",
+      "fileMatch": [
+        "^crates/burn-events/Cargo\\.toml$",
+        "^packages/sync-api/src/version\\.ts$"
+      ],
+      "matchStrings": [
+        "name = \"burn-events\"[\\s\\S]*?\\nversion = \"(?<currentValue>[^\"]+)\"",
+        "tokscale-core = \\{ git = \"https://github\\.com/junhoyeo/tokscale\", tag = \"v(?<currentValue>[^\"]+)\" \\}",
+        "TOKSCALE_PIN = \"(?<currentValue>[^\"]+)\""
+      ],
+      "depNameTemplate": "tokscale",
+      "packageNameTemplate": "https://github.com/junhoyeo/tokscale",
+      "datasourceTemplate": "git-tags",
+      "extractVersionTemplate": "^v(?<version>\\d+\\.\\d+\\.\\d+)$",
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchDepNames": ["tokscale"],
+      "groupName": "tokscale pin",
+      "schedule": ["before 9am on monday"],
+      "prBodyNotes": [
+        "Before merging: run `cargo update -p tokscale-core` in `crates/burn-events` (Renovate does not update the lockfile for git dependencies) and `cargo install --path crates/burn-events`. Diff the `(client, dedup_key)` sets of the old and new `burn-events` output on a real machine: phones retire changed keys at the next full reconciliation, but only inside re-reported sessions. New source kinds must join `source_fingerprint` (its exhaustive `ScanResult` destructure fails to compile until they do). Then tag `burn-events-v<version>` to publish binaries."
+      ]
+    }
+  ]
+}

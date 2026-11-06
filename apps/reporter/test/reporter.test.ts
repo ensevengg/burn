@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "no
 import { tmpdir } from "node:os";
 import { platform } from "node:os";
 import { join } from "node:path";
+import { TOKSCALE_PIN } from "@burn/sync-api";
 import { configSchema, loadConfig, saveConfig, configPath } from "../src/config.js";
 import { usageReportSchema } from "../src/tokscale.js";
 import { detectOsKind, tokscaleQuotaInputs, runInit } from "../src/commands.js";
@@ -24,7 +25,7 @@ const baseConfig = {
   hostGroup: "nerve",
   osKind: "linux" as const,
   reportingTimezone: "Asia/Kolkata",
-  tokscalePin: "4.15.1",
+  tokscalePin: TOKSCALE_PIN,
 };
 
 describe("config", () => {
@@ -32,7 +33,7 @@ describe("config", () => {
     saveConfig(configSchema.parse(baseConfig));
     const loaded = loadConfig();
     expect(loaded.environmentSlug).toBe("cachyos");
-    expect(loaded.tokscalePin).toBe("4.15.1");
+    expect(loaded.tokscalePin).toBe(TOKSCALE_PIN);
   });
 
   test("rejects a bad slug", () => {
@@ -42,6 +43,17 @@ describe("config", () => {
 
   test("loadConfig throws with guidance when missing", () => {
     expect(() => loadConfig()).toThrow(/burn-report init/);
+  });
+
+  test("an older saved pin moves forward to the checkout's exporter pin", () => {
+    writeFileSync(configPath(), JSON.stringify({ ...baseConfig, tokscalePin: "4.9.12" }));
+    expect(loadConfig().tokscalePin).toBe(TOKSCALE_PIN);
+    expect(JSON.parse(readFileSync(configPath(), "utf8")).tokscalePin).toBe(TOKSCALE_PIN);
+  });
+
+  test("a newer saved pin is kept so a rolled-back checkout still fails loudly", () => {
+    writeFileSync(configPath(), JSON.stringify({ ...baseConfig, tokscalePin: "99.0.0" }));
+    expect(loadConfig().tokscalePin).toBe("99.0.0");
   });
 });
 

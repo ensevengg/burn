@@ -1,4 +1,12 @@
-import { mergePeerEvents, mergeQuota, mergeMetrics } from "./mirror-writes";
+import {
+  dropSupersededEvents,
+  forgetReconciliation,
+  mergePeerEvents,
+  mergeQuota,
+  mergeMetrics,
+  resetReconciledSessions,
+  trackReconciledSessions,
+} from "./mirror-writes";
 /** Machines are the backend (ADR 0003). Each registry endpoint supplies
  * validated event pages and independent quotas. The phone stores per-machine
  * scan-start cursors, atomically commits page continuation, and periodically
@@ -92,6 +100,34 @@ function cursorKey(envId: string): string {
 
 function legacyCursorKey(envId: string): string {
   return `direct_since_${envId}`;
+}
+
+/** Set when a machine reports a different tokscale pin; a parser change can
+ * re-key or reprice old rows, so it forces full reconciliation until one
+ * completes. */
+function reparseKey(envId: string): string {
+  return `direct_reparse_${envId}`;
+}
+
+/** Event rows name their parser `tokscale-<pin>`; /ping reports the bare pin. */
+function pinParser(pin: string): string {
+  return `tokscale-${pin}`;
+}
+
+/** Caller owns the transaction and runs this before storing the ping's
+ * tokscale version, so the comparison sees the previously stored pin. */
+async function notePinChange(
+  db: SQLiteDatabase,
+  envId: string,
+  reported: string | null,
+): Promise<void> {
+  if (reported === null) return;
+  const previous = await db.getFirstAsync<{ v: string | null }>(
+    "select tokscale_version as v from environments where id=?",
+    [envId],
+  );
+  if (previous !== null && previous.v !== reported)
+    await kvSetString(db, reparseKey(envId), reported);
 }
 
 async function kvGetNumber(
@@ -215,6 +251,8 @@ export async function addDirectMachine(
         ],
       );
       assertActive();
+      // Re-adding a cached machine must not absorb a pin change silently.
+      await notePinChange(db, id, ping.tokscaleVersion);
       // The card exists immediately, even before the first pull.
       await db.runAsync(
         `insert into environments
@@ -279,8 +317,10 @@ export async function removeDirectMachine(
         `direct_hash_${environmentId}`,
         `direct_backfill_${environmentId}`,
         `direct_full_at_${environmentId}`,
+        reparseKey(environmentId),
       ])
         await kvDelete(db, key);
+      await forgetReconciliation(db, environmentId);
     });
     invalidateEventCache(db);
   });
@@ -357,6 +397,10 @@ export function pullDirectFromMachines(
   return pending;
 }
 
+/** One pass over the registered machines (or the continuation's pending
+ * ones): ping, then quotas, health and paged events in parallel per machine.
+ * Event windows pick incremental or full reconciliation (pin change, first
+ * sync, clock rollback, daily) and checkpoint progress page by page. */
 async function pullDirectUnlocked(
   db: SQLiteDatabase,
   options: DirectPullOptions,
@@ -438,6 +482,7 @@ async function pullDirectUnlocked(
               "update direct_machines set last_ping_at=?,last_error=null where id=?",
               [new Date(now()).toISOString(), machine.id],
             );
+            await notePinChange(db, machine.id, ping.tokscaleVersion);
             await db.runAsync(
               `update environments set reporter_version=?,tokscale_version=?,export_schema=?,reporting_timezone=?,host_group=coalesce(?,host_group),last_heartbeat_at=? where id=?`,
               [
@@ -543,14 +588,31 @@ async function pullDirectUnlocked(
                   [progressKey],
                 )
               )?.value;
-          const progress: {
+          const pendingPin =
+            (await db.getFirstAsync<{ value: string }>(
+              "select value from kv where key=?",
+              [reparseKey(machine.id)],
+            ))?.value ?? null;
+          const reparse = pendingPin !== null;
+          const saved: {
             since: number;
             cursor: string;
             scanStartedAtMs: number;
             snapshotId?: string;
             contentHash?: string;
             reconciliation: boolean;
+            parserVersion?: string;
           } | null = progressRaw ? JSON.parse(progressRaw) : null;
+          // After a pin change only a completed reconciliation retires re-keyed
+          // rows. Full history covers any unfinished incremental window, so
+          // that window restarts as the reconciliation instead of finishing
+          // first; so does a reconciliation that was parsing an older pin.
+          const progress =
+            reparse &&
+            (saved?.reconciliation === false ||
+              (saved?.parserVersion !== undefined && saved.parserVersion !== pinParser(pendingPin)))
+              ? null
+              : saved;
           const lastFull = await kvGetNumber(
             db,
             `direct_full_at_${machine.id}`,
@@ -558,6 +620,7 @@ async function pullDirectUnlocked(
           const reconciliation =
             progress?.reconciliation ??
             (options.full === true ||
+              reparse ||
               (stored !== null && ping.serverNowMs < stored) ||
               stored === null ||
               lastFull === null ||
@@ -580,6 +643,8 @@ async function pullDirectUnlocked(
             progress?.scanStartedAtMs ?? null;
           let snapshotId = progress?.snapshotId;
           let contentHash = progress?.contentHash;
+          // One snapshot serves the whole pass, so its rows share one parser.
+          let parserVersion = progress?.parserVersion;
           let pulled = 0;
           let scanMs: number | null = null;
           let restarted = false;
@@ -621,6 +686,8 @@ async function pullDirectUnlocked(
                 cursor = undefined;
                 scanStartedAtMs = null;
                 snapshotId = undefined;
+                // The replacement snapshot alone decides what is superseded.
+                parserVersion = undefined;
                 seenCursors.clear();
                 pageNumber--;
                 continue;
@@ -640,7 +707,9 @@ async function pullDirectUnlocked(
               Math.min(ping.serverNowMs, Date.parse(page.generatedAt));
             scanMs = page.scanMs ?? null;
             contentHash = page.contentHash;
+            parserVersion = page.events[0]?.parserVersion ?? parserVersion;
             const done = !page.nextCursor;
+            const firstSnapshotPage = cursor === undefined;
             if (page.nextCursor && seenCursors.has(page.nextCursor))
               throw new LiveError("Repeated event page cursor");
             let changed = 0;
@@ -653,7 +722,12 @@ async function pullDirectUnlocked(
                   machine.slug,
                   page.events,
                   assertActive,
+                  reconciliation,
                 );
+                if (reconciliation) {
+                  if (firstSnapshotPage) await resetReconciledSessions(db, machine.id);
+                  await trackReconciledSessions(db, machine.id, page.events);
+                }
                 if (done) {
                   await kvSetString(
                     db,
@@ -665,12 +739,25 @@ async function pullDirectUnlocked(
                     ),
                   );
                   if (contentHash) await kvSetString(db, hashKey, contentHash);
-                  if (reconciliation)
+                  // An empty snapshot (sources unreadable, not yet scanned) proves
+                  // nothing and deletes nothing: reconciliation stays pending so
+                  // it reruns from full history once rows return.
+                  if (reconciliation && parserVersion !== undefined) {
+                    changed += await dropSupersededEvents(db, machine.id, parserVersion);
                     await kvSetString(
                       db,
                       `direct_full_at_${machine.id}`,
                       String(now()),
                     );
+                    // A re-registration may have recorded a newer pin while this
+                    // pass ran; only the pin this snapshot parsed is satisfied.
+                    const pending = await db.getFirstAsync<{ value: string }>(
+                      "select value from kv where key=?",
+                      [reparseKey(machine.id)],
+                    );
+                    if (pending === null || pinParser(pending.value) === parserVersion)
+                      await kvDelete(db, reparseKey(machine.id));
+                  }
                   await kvDelete(db, progressKey);
                 } else {
                   await kvSetString(
@@ -683,6 +770,7 @@ async function pullDirectUnlocked(
                       snapshotId,
                       contentHash,
                       reconciliation,
+                      parserVersion,
                     }),
                   );
                 }

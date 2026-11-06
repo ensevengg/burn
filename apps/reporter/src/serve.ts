@@ -139,7 +139,8 @@ export function createLiveFetch(
       hostGroup: deps.config.hostGroup,
       osKind: deps.config.osKind,
       reporterVersion: REPORTER_VERSION,
-      tokscaleVersion: null,
+      // The exporter is checked against this pin before any page is served.
+      tokscaleVersion: deps.config.tokscalePin,
       exportSchema: EVENT_EXPORT_SCHEMA,
       reportingTimezone: deps.config.reportingTimezone,
       sinceMs: 0,

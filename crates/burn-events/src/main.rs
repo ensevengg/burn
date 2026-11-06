@@ -24,7 +24,7 @@ use std::time::{Instant, UNIX_EPOCH};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokscale_core::pricing::PricingService;
-use tokscale_core::scanner::{scan_all_clients_with_scanner_settings, ScannerSettings};
+use tokscale_core::scanner::{scan_all_clients_with_scanner_settings, ScanResult, ScannerSettings};
 use tokscale_core::{paths, LocalParseOptions, UnifiedMessage, WorkspaceLabeler};
 
 const USAGE: &str = "burn-events — emit tokscale UnifiedMessage records as JSONL (burn D2 seam)
@@ -241,27 +241,52 @@ async fn run(since_ms: Option<i64>) -> Result<(), String> {
     Ok(())
 }
 
-/// Scanner settings live on the `scanner` key of tokscale's settings.json;
-/// unreadable or absent config degrades to defaults, exactly like the CLI.
+/// Cheap change detector for `--fingerprint`: hashes the metadata (size,
+/// mtime) of every source tokscale would scan plus the settings and pricing
+/// files, so the reporter can reuse a snapshot without re-parsing.
 fn source_fingerprint() -> Result<String, String> {
     let home = tokscale_core::get_home_dir_string(&None)?;
     let settings = load_scanner_settings();
-    let scan = scan_all_clients_with_scanner_settings(&home, &[], true, &settings);
-    let mut sources: Vec<PathBuf> = scan.files.iter().flatten().cloned().collect();
-    sources.extend(scan.opencode_dbs);
-    sources.extend(scan.copilot_desktop_db);
-    sources.extend(scan.synthetic_db);
-    sources.extend(scan.kilo_db);
-    sources.extend(scan.hermes_db);
-    sources.extend(scan.goose_db);
-    sources.extend(scan.zed_db);
-    sources.extend(scan.kiro_db);
-    sources.extend(scan.crush_dbs.into_iter().map(|source| source.db_path));
-    sources.extend(scan.zcode_db);
-    sources.extend(scan.micode_dbs);
-    sources.extend(scan.opencode_json_dir);
-    sources.extend(scan.devin_dbs);
-    sources.extend(scan.copilot_vscode_sessions);
+    // Exhaustive on purpose (no `..`): a pin bump that adds a source kind must
+    // fail to compile here, or that source's edits would never refresh rows.
+    let ScanResult {
+        files,
+        opencode_dbs,
+        copilot_desktop_db,
+        copilot_session_store_db,
+        synthetic_db,
+        kilo_db,
+        hermes_db,
+        goose_db,
+        zed_db,
+        kiro_db,
+        crush_dbs,
+        zcode_db,
+        cherrystudio_db,
+        openclaw_dbs,
+        micode_dbs,
+        opencode_json_dir,
+        devin_dbs,
+        copilot_vscode_sessions,
+    } = scan_all_clients_with_scanner_settings(&home, &[], true, &settings);
+    let mut sources: Vec<PathBuf> = files.into_iter().flatten().collect();
+    sources.extend(opencode_dbs);
+    sources.extend(copilot_desktop_db);
+    sources.extend(copilot_session_store_db);
+    sources.extend(synthetic_db);
+    sources.extend(kilo_db);
+    sources.extend(hermes_db);
+    sources.extend(goose_db);
+    sources.extend(zed_db);
+    sources.extend(kiro_db);
+    sources.extend(crush_dbs.into_iter().map(|source| source.db_path));
+    sources.extend(zcode_db);
+    sources.extend(cherrystudio_db);
+    sources.extend(openclaw_dbs);
+    sources.extend(micode_dbs);
+    sources.extend(opencode_json_dir);
+    sources.extend(devin_dbs);
+    sources.extend(copilot_vscode_sessions);
 
     // Scanner behavior and pricing affect normalized rows even when transcript
     // files are unchanged. Their cache/config files are therefore sources too.
@@ -315,6 +340,8 @@ fn fingerprint_paths(paths: &[PathBuf]) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+/// Scanner settings live on the `scanner` key of tokscale's settings.json;
+/// unreadable or absent config degrades to defaults, exactly like the CLI.
 fn load_scanner_settings() -> ScannerSettings {
     let path = paths::get_config_dir().join("settings.json");
     let Ok(text) = std::fs::read_to_string(&path) else {

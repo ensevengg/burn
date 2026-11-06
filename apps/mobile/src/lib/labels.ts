@@ -20,6 +20,7 @@ const EXACT: Record<string, string> = {
   zcode: "ZCode",
   opencode: "OpenCode",
   lmstudio: "LM Studio",
+  muse: "Muse Code",
   "5h": "5-hour",
   "30d": "30-day",
   "7d": "7-day",
