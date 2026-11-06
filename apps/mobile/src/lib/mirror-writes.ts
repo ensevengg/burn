@@ -109,7 +109,7 @@ export async function trackReconciledSessions(
  * completed snapshot itself reported (not ones an expired partial snapshot
  * committed), and only one-to-one against rows the reconciliation inserted
  * with the same model and token buckets: each deletion consumes a distinct
- * content-equal replacement. History whose source the machine pruned (whole
+ * content-equal replacement, preferring an old row at the replacement's instant. History whose source the machine pruned (whole
  * sessions, or messages a client removed or compacted) is kept, at the cost of
  * keeping rows whose model or tokens a new parser also changed. */
 export async function dropSupersededEvents(
@@ -117,26 +117,46 @@ export async function dropSupersededEvents(
   environmentId: string,
   parserVersion: string,
 ): Promise<number> {
-  const content = `client, session_id, model_id, input_tokens, output_tokens,
-    cache_read_tokens, cache_write_tokens, reasoning_tokens`;
+  const fields = [
+    "client", "session_id", "model_id", "input_tokens", "output_tokens",
+    "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
+  ];
+  const content = fields.join(", ");
+  const same = (a: string, b: string) => fields.map((f) => `${a}.${f} = ${b}.${f}`).join(" and ");
+  // Within a content group, old rows sharing an inserted row's instant are
+  // paired first (re-keys that keep their timestamp), then the rest in time
+  // order (re-keys that shift every timestamp alike), so the compacted sibling
+  // is the one kept whichever order the two events had.
   const result = await db.runAsync(
-    `with stale as (
-       select event_id, ${content},
-         row_number() over (partition by ${content} order by occurred_at_ms, event_id) as nth
-       from usage_events
-       where environment_id = ?1 and parser_version <> ?2
+    `with inserted as (
+       select u.event_id, u.occurred_at_ms, ${fields.map((f) => `u.${f}`).join(", ")}
+       from reconcile_new_events as tracked
+       join usage_events as u on u.event_id = tracked.event_id
+       where tracked.environment_id = ?1 and u.environment_id = ?1 and u.parser_version = ?2
+     ),
+     candidates as (
+       select old.event_id, old.occurred_at_ms, ${fields.map((f) => `old.${f}`).join(", ")},
+         exists (
+           select 1 from inserted
+           where ${same("inserted", "old")} and inserted.occurred_at_ms = old.occurred_at_ms
+         ) as same_instant
+       from usage_events as old
+       where old.environment_id = ?1 and old.parser_version <> ?2
          and exists (
            select 1 from reconcile_sessions as reported
            where reported.environment_id = ?1
-             and reported.client = usage_events.client
-             and reported.session_id = usage_events.session_id)
+             and reported.client = old.client
+             and reported.session_id = old.session_id)
+     ),
+     stale as (
+       select event_id, ${content},
+         row_number() over (
+           partition by ${content}
+           order by same_instant desc, occurred_at_ms, event_id) as nth
+       from candidates
      ),
      replacements as (
-       select ${content.split(",").map((c) => `u.${c.trim()}`).join(", ")}, count(*) as available
-       from reconcile_new_events as inserted
-       join usage_events as u on u.event_id = inserted.event_id
-       where inserted.environment_id = ?1 and u.environment_id = ?1 and u.parser_version = ?2
-       group by ${content}
+       select ${content}, count(*) as available from inserted group by ${content}
      )
      delete from usage_events where event_id in (
        select stale.event_id from stale join replacements using (${content})

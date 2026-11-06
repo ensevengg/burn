@@ -1366,12 +1366,16 @@ test("equal-token events are retired one-to-one against rows the reconciliation 
               ingestRow({ sessionId: "s1", dedupKey: "v1:s1:2", occurredAtMs: 2 }),
               ingestRow({ sessionId: "s2", dedupKey: "s2-kept", occurredAtMs: 3 }),
               ingestRow({ sessionId: "s2", dedupKey: "v1:s2:4", occurredAtMs: 4 }),
+              ingestRow({ sessionId: "s3", dedupKey: "v1:s3:5", occurredAtMs: 5 }),
+              ingestRow({ sessionId: "s3", dedupKey: "v1:s3:6", occurredAtMs: 6 }),
             ]
           : [
               // s1: one message re-keyed, its equal-token sibling compacted away.
               ingestRow({ sessionId: "s1", dedupKey: "pi:response:r1", occurredAtMs: 1, ...v21 }),
               // s2: an unchanged key (updated in place) and a compacted sibling.
               ingestRow({ sessionId: "s2", dedupKey: "s2-kept", occurredAtMs: 3, ...v21 }),
+              // s3: the reverse of s1, the earlier sibling compacted and the later re-keyed.
+              ingestRow({ sessionId: "s3", dedupKey: "pi:response:r6", occurredAtMs: 6, ...v21 }),
             ],
     }),
   };
@@ -1386,7 +1390,12 @@ test("equal-token events are retired one-to-one against rows the reconciliation 
     )).map((row) => `${row.s}:${row.at}@${row.v.slice("tokscale-".length)}`);
     // One replacement retires exactly one equal-token old row; an in-place
     // update is no replacement, so the compacted s2 message keeps its history.
-    expect(rows).toEqual(["s1:1@4.21.0", "s1:2@4.15.1", "s2:3@4.21.0", "s2:4@4.15.1"]);
+    // The same-instant sibling is the one retired, whichever order they arrived in.
+    expect(rows).toEqual([
+      "s1:1@4.21.0", "s1:2@4.15.1",
+      "s2:3@4.21.0", "s2:4@4.15.1",
+      "s3:5@4.15.1", "s3:6@4.21.0",
+    ]);
     expect(await fx.db.getFirstAsync("select count(*) as n from reconcile_new_events")).toEqual({ n: 0 });
   } finally {
     fx.native.close();
