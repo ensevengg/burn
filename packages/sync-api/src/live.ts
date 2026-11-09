@@ -15,6 +15,13 @@ import {
 } from "./validation";
 import type { MachineEventInput, MachineQuotaInput, MachineMetricInput } from "./payloads";
 import type { OsKind } from "./types";
+import {
+  CONTROL_HEADER,
+  POWER_MODE_PATH,
+  parsePowerModeState,
+  powerModeId,
+  type PowerModeState,
+} from "./controls";
 
 /** Read-only machine transport over the user's tailnet. Tailscale membership
  * authorizes access. Every response is schema-validated before phone writes;
@@ -83,6 +90,10 @@ export interface LiveApi {
   ): Promise<LiveEventsPage>;
   quotas(signal?: AbortSignal): Promise<LiveQuotasPage>;
   metrics?(sinceMs: number, signal?: AbortSignal): Promise<LiveMetricsPage>;
+  /** Opt-in control (ADR 0004); only machines advertising it answer. */
+  powerMode?(signal?: AbortSignal): Promise<PowerModeState>;
+  /** Apply a mode; resolves with the state read back after the change. */
+  setPowerMode?(mode: string, signal?: AbortSignal): Promise<PowerModeState>;
 }
 
 type LiveTransport = {
@@ -104,6 +115,15 @@ export function validateLiveApi(transport: LiveTransport): LiveApi {
     const metrics = transport.metrics;
     api.metrics = async (...args) => parseLiveMetricsPage(await metrics(...args));
   }
+  if (transport.powerMode) {
+    const read = transport.powerMode;
+    api.powerMode = async (...args) => parsePowerModeState(await read(...args));
+  }
+  if (transport.setPowerMode) {
+    const write = transport.setPowerMode;
+    api.setPowerMode = async (mode, signal) =>
+      parsePowerModeState(await write(powerModeId(mode, "mode"), signal));
+  }
   validatedApis.add(api);
   return api;
 }
@@ -112,22 +132,8 @@ export function validateLiveApi(transport: LiveTransport): LiveApi {
  * completed just after a scan is caught by the next pull's overlap. */
 export const LIVE_OVERLAP_MS = 60 * 60_000;
 
-export class LiveError extends Error {
-  constructor(
-    message: string,
-    readonly status?: number,
-  ) {
-    super(message);
-    this.name = "LiveError";
-  }
-}
-
-export class LiveUnreachableError extends LiveError {
-  constructor(message: string) {
-    super(message);
-    this.name = "LiveUnreachableError";
-  }
-}
+export { LiveError, LiveUnreachableError } from "./errors";
+import { LiveError, LiveUnreachableError } from "./errors";
 
 /**
  * Default LiveApi over HTTP. Works in Bun, Node 18+, and React Native
@@ -144,6 +150,7 @@ export function httpLiveApiFor(
     path: string,
     signal?: AbortSignal,
     knownHash?: string,
+    payload?: unknown,
   ): Promise<unknown> {
     let response: Response;
     try {
@@ -152,8 +159,13 @@ export function httpLiveApiFor(
         "accept-encoding": "gzip",
       };
       if (knownHash) headers["if-none-match"] = `"${knownHash}"`;
+      if (payload !== undefined) {
+        headers["content-type"] = "application/json";
+        headers[CONTROL_HEADER] = "1";
+      }
       response = await fetchImpl(`${base}${path}`, {
         headers,
+        ...(payload === undefined ? {} : { method: "POST", body: JSON.stringify(payload) }),
         ...(signal ? { signal } : {}),
       });
     } catch (err) {
@@ -213,6 +225,8 @@ export function httpLiveApiFor(
     },
     quotas: async (signal) => call("/live/quotas", signal),
     metrics: async (sinceMs, signal) => call(`/live/metrics?since=${Math.floor(sinceMs)}`, signal),
+    powerMode: async (signal) => call(POWER_MODE_PATH, signal),
+    setPowerMode: async (mode, signal) => call(POWER_MODE_PATH, signal, undefined, { mode }),
   });
 }
 
