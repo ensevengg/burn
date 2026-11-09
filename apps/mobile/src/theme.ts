@@ -29,6 +29,9 @@ export interface ThemeColors {
   chrome: string;
   /** Selected segment / tab highlight. */
   selection: string;
+  /** Power-mode tints: quiet/low-power modes and performance modes. */
+  modeCool: string;
+  modeHot: string;
   statusBar: "light-content" | "dark-content";
 }
 
@@ -48,6 +51,8 @@ export const darkColors: ThemeColors = {
   chart: ["#f3f4f6", "#b3b8bf", "#868c95", "#626870", "#454a51", "#30343a"],
   chrome: "#131417",
   selection: "#26292e",
+  modeCool: "#5aa9ff",
+  modeHot: "#ff5a52",
   statusBar: "light-content",
 };
 
@@ -67,6 +72,8 @@ export const lightColors: ThemeColors = {
   chart: ["#0d0e10", "#43474d", "#6a7078", "#8d939a", "#b0b5bb", "#cfd3d7"],
   chrome: "#ffffff",
   selection: "#ffffff",
+  modeCool: "#1f6fd1",
+  modeHot: "#d4372f",
   statusBar: "dark-content",
 };
 

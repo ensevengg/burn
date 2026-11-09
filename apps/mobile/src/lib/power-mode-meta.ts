@@ -78,3 +78,14 @@ export function controlFailure(err: unknown, machineName: string): string {
   if (error?.status === 403 || error?.status === 404 || error?.status === 409) return text;
   return `Couldn't switch: ${text}`;
 }
+
+export type ModeTint = "cool" | "neutral" | "hot";
+
+/** Quiet modes read blue, balanced neutral, performance red. */
+export function modeTint(mode: string | null): ModeTint {
+  if (mode === null) return "neutral";
+  const { heat } = modeMeta(mode);
+  if (heat <= 0.3) return "cool";
+  if (heat >= 0.8) return "hot";
+  return "neutral";
+}

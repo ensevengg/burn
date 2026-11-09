@@ -14,13 +14,14 @@ import {
   fanFraction,
   formatRpm,
   modeMeta,
+  modeTint,
   orderModes,
   rotorPeriodMs,
   type ModeGlyph,
 } from "../lib/power-mode-meta";
 import { useTheme } from "../lib/theme-context";
 import { hairline, motion, radius, spacing, type } from "../theme";
-import { easeOut, Pulse, Skeleton } from "./motion";
+import { easeOut, Pulse, Skeleton, useTweenedColor } from "./motion";
 import { Ring } from "./primitives";
 
 function Glyph({ glyph, color, size = 18 }: { glyph: ModeGlyph; color: string; size?: number }) {
@@ -81,22 +82,25 @@ function useSpin(periodMs: number | null) {
   return Animated.modulo(turn, 1).interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] });
 }
 
-function FanRotor({ fan, size = 64 }: { fan: MachineFan; size?: number }) {
+/** `tint` follows the selected mode (blue quiet, neutral balanced, red
+ * performance) and fades on change; a stopped fan stays faint. */
+function FanRotor({ fan, tint, size = 64 }: { fan: MachineFan; tint: string; size?: number }) {
   const { C } = useTheme();
+  const ink = useTweenedColor(fan.rpm > 0 ? tint : C.faint);
   const rotate = useSpin(rotorPeriodMs(fan.rpm, fan.maxRpm));
   const fraction = fanFraction(fan.rpm, fan.maxRpm);
   const loud = fraction >= 0.85;
   const inner = size - 16;
   return (
     <View style={styles.fan} accessible accessibilityLabel={`${fan.label}: ${formatRpm(fan.rpm)}`}>
-      <Ring fraction={fraction} size={size} stroke={3} color={loud ? C.warn : C.text}>
+      <Ring fraction={fraction} size={size} stroke={3} color={ink}>
         <Animated.View style={{ width: inner, height: inner, transform: [{ rotate }] }}>
           <Svg width={inner} height={inner} viewBox="-50 -50 100 100">
             <G>
               {[0, 72, 144, 216, 288].map((angle) => (
-                <Path key={angle} d={BLADE} fill={fan.rpm > 0 ? C.text : C.faint} opacity={0.92} transform={`rotate(${angle})`} />
+                <Path key={angle} d={BLADE} fill={ink} opacity={0.92} transform={`rotate(${angle})`} />
               ))}
-              <Circle r={12} fill={C.panelAlt} stroke={fan.rpm > 0 ? C.text : C.faint} strokeWidth={3} />
+              <Circle r={12} fill={C.panelAlt} stroke={ink} strokeWidth={3} />
             </G>
           </Svg>
         </Animated.View>
@@ -295,6 +299,8 @@ export function PowerModePanel({
     machineName,
   );
   const toneColor = { ok: C.ok, err: C.err, muted: C.muted, warn: C.warn };
+  // data.mode is already the optimistic target while a switch is pending.
+  const tint = { cool: C.modeCool, neutral: C.text, hot: C.modeHot }[modeTint(data.mode)];
 
   return (
     <View style={[styles.panel, { borderTopColor: C.border }]}>
@@ -315,7 +321,7 @@ export function PowerModePanel({
           <View style={styles.fans}>
             {/* Index keys: labels come from drivers and may repeat. */}
             {data.fans.slice(0, 2).map((fan, index) => (
-              <FanRotor key={index} fan={fan} />
+              <FanRotor key={index} fan={fan} tint={tint} />
             ))}
             {data.fans.length > 2 && (
               <Text style={[styles.fanLabel, { color: C.faint, alignSelf: "center" }]}>{`+${data.fans.length - 2} fans`}</Text>

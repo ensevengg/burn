@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { LiveError, LiveUnreachableError } from "@burn/sync-api";
-import { controlFailure, fanFraction, formatRpm, modeMeta, orderModes, rotorPeriodMs } from "../src/lib/power-mode-meta";
+import { controlFailure, fanFraction, formatRpm, modeMeta, modeTint, orderModes, rotorPeriodMs } from "../src/lib/power-mode-meta";
+import { mixHex } from "../src/lib/color";
 
 test("mode ids never render raw", () => {
   expect(modeMeta("power-saver").label).toBe("Power Saver");
@@ -50,4 +51,18 @@ test("control failures read as plain language", () => {
   const refused = new LiveError("http://x/controls/power-mode: The machine refused the change. Sign in…", 403);
   expect(controlFailure(refused, "CachyOS")).toBe("The machine refused the change. Sign in…");
   expect(controlFailure(new LiveError("http://x/controls/power-mode: boom", 500), "CachyOS")).toBe("Couldn't switch: boom");
+});
+
+test("fan tint follows the mode: blue quiet, neutral balanced, red performance", () => {
+  expect(["power-saver", "low-power", "quiet", "cool"].map(modeTint)).toEqual(["cool", "cool", "cool", "cool"]);
+  expect(["balanced", "balanced-performance", "turbo", null].map(modeTint)).toEqual(["neutral", "neutral", "neutral", "neutral"]);
+  expect(["performance", "max-power"].map(modeTint)).toEqual(["hot", "hot"]);
+});
+
+test("colors blend in rgb and clamp", () => {
+  expect(mixHex("#000000", "#ffffff", 0.5)).toBe("#808080");
+  expect(mixHex("#5aa9ff", "#ff5a52", 0)).toBe("#5aa9ff");
+  expect(mixHex("#5aa9ff", "#ff5a52", 2)).toBe("#ff5a52");
+  expect(mixHex("red", "#ffffff", 0.5)).toBe("red");
+  expect(mixHex("red", "#ffffff", 1)).toBe("#ffffff");
 });
