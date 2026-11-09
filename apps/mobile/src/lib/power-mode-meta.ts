@@ -67,3 +67,14 @@ export function rotorPeriodMs(rpm: number, maxRpm: number | null): number | null
 export function formatRpm(rpm: number): string {
   return `${Math.round(rpm).toLocaleString("en-US")} rpm`;
 }
+
+/** Plain-language reason a control request failed. Reporter refusals are
+ * already written for people; transport failures are not. */
+export function controlFailure(err: unknown, machineName: string): string {
+  const error = err as (Error & { status?: number }) | null | undefined;
+  const text = (error?.message ?? String(err)).replace(/^https?:\/\/\S+: /, "");
+  if (/timed out|aborted|cancel/i.test(text)) return `${machineName} didn't answer in time. Showing its mode as it reports it.`;
+  if (error?.name === "LiveUnreachableError") return `Couldn't reach ${machineName}. Try again once it's back online.`;
+  if (error?.status === 403 || error?.status === 404 || error?.status === 409) return text;
+  return `Couldn't switch: ${text}`;
+}

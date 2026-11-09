@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { fanFraction, formatRpm, modeMeta, orderModes, rotorPeriodMs } from "../src/lib/power-mode-meta";
+import { LiveError, LiveUnreachableError } from "@burn/sync-api";
+import { controlFailure, fanFraction, formatRpm, modeMeta, orderModes, rotorPeriodMs } from "../src/lib/power-mode-meta";
 
 test("mode ids never render raw", () => {
   expect(modeMeta("power-saver").label).toBe("Power Saver");
@@ -39,4 +40,14 @@ test("rotor speed stays readable and stops with the fan", () => {
 test("rpm formatting groups thousands", () => {
   expect(formatRpm(4300)).toBe("4,300 rpm");
   expect(formatRpm(812.6)).toBe("813 rpm");
+});
+
+test("control failures read as plain language", () => {
+  expect(controlFailure(new LiveUnreachableError("http://100.1.2.3:8787/controls/power-mode: Network request failed"), "CachyOS"))
+    .toBe("Couldn't reach CachyOS. Try again once it's back online.");
+  expect(controlFailure(new LiveUnreachableError("http://x/controls/power-mode: timed out after 12000ms"), "CachyOS"))
+    .toContain("didn't answer in time");
+  const refused = new LiveError("http://x/controls/power-mode: The machine refused the change. Sign in…", 403);
+  expect(controlFailure(refused, "CachyOS")).toBe("The machine refused the change. Sign in…");
+  expect(controlFailure(new LiveError("http://x/controls/power-mode: boom", 500), "CachyOS")).toBe("Couldn't switch: boom");
 });

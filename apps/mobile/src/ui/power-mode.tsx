@@ -10,6 +10,7 @@ import Svg, { Circle, G, Path } from "react-native-svg";
 import { humanize } from "../lib/labels";
 import { usePowerMode, useSetPowerMode, type ControlledMachine } from "../lib/power-mode";
 import {
+  controlFailure,
   fanFraction,
   formatRpm,
   modeMeta,
@@ -258,7 +259,7 @@ export function PowerModePanel({
     write.mutate(mode, {
       onSuccess: (result) => setConfirmed(result.mode),
       onError: (err) => {
-        setFailure(`Couldn't switch: ${(err as Error).message.replace(/^https?:\/\/\S+: /, "")}`);
+        setFailure(controlFailure(err, machineName));
         Animated.sequence(
           [10, -8, 6, -3, 0].map((toValue) => Animated.timing(shake, { toValue, duration: 55, easing: easeOut, useNativeDriver: true })),
         ).start();
@@ -273,7 +274,7 @@ export function PowerModePanel({
         <Text style={[type.eyebrow, { color: C.muted }]}>Power mode</Text>
         {state.isError ? (
           <Text style={[type.muted, { color: C.warn, marginTop: spacing.s }]} numberOfLines={2}>
-            {`Unavailable: ${(state.error as Error).message.replace(/^https?:\/\/\S+: /, "")}`}
+            {controlFailure(state.error, machineName)}
           </Text>
         ) : (
           <Skeleton style={[styles.skeleton, { backgroundColor: C.panelAlt }]} />
