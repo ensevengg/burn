@@ -313,14 +313,6 @@ export function PowerModePanel({
     <View style={[styles.panel, { borderTopColor: C.border }]}>
       <View style={styles.header}>
         <Text style={[type.eyebrow, { color: C.muted }]}>Power mode</Text>
-        {online && !state.isError && message === null && (
-          <View style={styles.liveBadge}>
-            <Pulse active>
-              <View style={[styles.liveDot, { backgroundColor: C.ok }]} />
-            </Pulse>
-            <Text style={[type.muted, { color: C.muted }]}>live</Text>
-          </View>
-        )}
       </View>
 
       <View style={styles.hero}>
@@ -379,8 +371,6 @@ export function PowerModePanel({
 const styles = StyleSheet.create({
   panel: { marginTop: spacing.m, paddingTop: spacing.m, borderTopWidth: hairline },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  liveBadge: { flexDirection: "row", alignItems: "center", gap: 6 },
-  liveDot: { width: 6, height: 6, borderRadius: 3 },
   hero: { flexDirection: "row", alignItems: "center", gap: spacing.m, marginTop: spacing.s, marginBottom: spacing.m },
   fans: { flexDirection: "row", gap: spacing.s },
   fan: { alignItems: "center", width: 58 },
