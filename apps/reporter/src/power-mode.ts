@@ -102,7 +102,7 @@ export function sortModes(modes: readonly string[]): string[] {
 function deniedMessage(err: unknown): string | null {
   const text = (err as Error).message ?? String(err);
   if (!/AccessDenied|NotAuthorized|not authorized|Permission denied|EACCES|EPERM/i.test(text)) return null;
-  return "The machine refused the change. Sign in to its desktop session, or run `burn-report controls polkit-rule` there once to allow it while signed out.";
+  return "Refused: nobody is signed in on this machine. To allow changes while signed out, run `burn-report controls polkit-rule` on it once.";
 }
 
 export function powerProfilesDaemon(run: CommandRunner = runCommand): PowerModeDriver {
@@ -144,7 +144,7 @@ export function platformProfile(root = "/sys"): PowerModeDriver {
         const denied = deniedMessage(err);
         throw denied
           ? new ControlError(
-              "The machine refused the change: its platform_profile is root-only and power-profiles-daemon is not running.",
+              "Refused: this machine needs power-profiles-daemon running to change modes.",
               403,
             )
           : err;
