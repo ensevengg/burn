@@ -272,9 +272,11 @@ export function PowerModePanel({
     return (
       <View style={[styles.panel, { borderTopColor: C.border }]}>
         <Text style={[type.eyebrow, { color: C.muted }]}>Power mode</Text>
-        {state.isError ? (
+        {state.isError || !online ? (
           <Text style={[type.muted, { color: C.warn, marginTop: spacing.s }]} numberOfLines={2}>
-            {controlFailure(state.error, machineName)}
+            {state.isError
+              ? controlFailure(state.error, machineName)
+              : `${machineName} is offline. Its power mode appears when it answers again.`}
           </Text>
         ) : (
           <Skeleton style={[styles.skeleton, { backgroundColor: C.panelAlt }]} />
@@ -311,9 +313,13 @@ export function PowerModePanel({
       <View style={styles.hero}>
         {data.fans.length > 0 && (
           <View style={styles.fans}>
-            {data.fans.slice(0, 2).map((fan) => (
-              <FanRotor key={fan.label} fan={fan} />
+            {/* Index keys: labels come from drivers and may repeat. */}
+            {data.fans.slice(0, 2).map((fan, index) => (
+              <FanRotor key={index} fan={fan} />
             ))}
+            {data.fans.length > 2 && (
+              <Text style={[styles.fanLabel, { color: C.faint, alignSelf: "center" }]}>{`+${data.fans.length - 2} fans`}</Text>
+            )}
           </View>
         )}
         <View style={{ flex: 1, minWidth: 0 }}>
