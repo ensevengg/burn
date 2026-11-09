@@ -6,7 +6,7 @@ import { formatRelative } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
-import { gutter, hairline, radius, spacing, type } from "../theme";
+import { hairline, radius, spacing, type } from "../theme";
 import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
 import { FadeIn, PressableScale, TweenText } from "../ui/motion";
 import { Sparkline } from "../ui/charts";
@@ -91,9 +91,6 @@ export function SystemsScreen() {
 
   return (
     <Screen title="Systems">
-      <Text style={[type.muted, styles.subtitle, { color: C.muted }]}>
-        Sampled every 30 seconds. Ranges and trends cover the last 24 hours.
-      </Text>
       {systems.data !== undefined && systems.data.length === 0 && <Empty message="No machines have reported yet." />}
       {reporting.map((system, index) => {
         const state = machineState(system, now);
@@ -192,7 +189,6 @@ export function SystemsScreen() {
 }
 
 const styles = StyleSheet.create({
-  subtitle: { marginHorizontal: gutter, marginBottom: spacing.m, lineHeight: 18 },
   cardHeader: { flexDirection: "row", alignItems: "center", gap: spacing.s },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: spacing.s, marginTop: spacing.m },
   tile: { width: "48.6%", borderRadius: radius.m - 2, paddingHorizontal: spacing.m, paddingTop: 10, paddingBottom: 10 },
