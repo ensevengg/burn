@@ -138,7 +138,9 @@ function ModeSelector({
   }, [index, position, visible]);
   const inset = 4;
   const segment = width === 0 ? 0 : (width - inset * 2) / modes.length;
-  const height = 44;
+  // Up to three modes fit icon-beside-label; more stack, so labels never truncate.
+  const stacked = modes.length > 3;
+  const height = stacked ? 54 : 44;
   return (
     <Animated.View
       accessibilityRole="radiogroup"
@@ -185,7 +187,7 @@ function ModeSelector({
         const label = (
           <>
             <Glyph glyph={meta.glyph} color={ink} size={14} />
-            <Text numberOfLines={1} style={[styles.segmentLabel, { color: ink, fontSize: modes.length > 3 ? 11.5 : 12.5 }]}>
+            <Text numberOfLines={1} style={[styles.segmentLabel, { color: ink, fontSize: modes.length > 3 ? 11 : 12.5 }]}>
               {meta.label}
             </Text>
           </>
@@ -205,7 +207,7 @@ function ModeSelector({
             style={styles.segment}
           >
             <Pulse active={pending === mode} style={styles.segmentFill}>
-              <View style={styles.segmentInner}>{label}</View>
+              <View style={[styles.segmentInner, stacked && styles.segmentStacked]}>{label}</View>
             </Pulse>
           </Pressable>
         );
@@ -301,6 +303,9 @@ export function PowerModePanel({
     machineName,
   );
   const toneColor = { ok: C.ok, err: C.err, muted: C.muted, warn: C.warn };
+  // Errors can carry an instruction, so they get the full width below the
+  // selector; short statuses replace the description and keep the panel still.
+  const inline = message?.tone === "err" ? null : message;
   // data.mode is already the optimistic target while a switch is pending.
   const tint = { cool: C.modeCool, neutral: C.text, hot: C.modeHot }[modeTint(data.mode)];
 
@@ -337,11 +342,11 @@ export function PowerModePanel({
           {/* Status takes the description's place, so the panel never grows. */}
           <Text
             accessibilityLiveRegion="polite"
-            style={[type.muted, styles.modeLine, { color: message === null ? C.muted : toneColor[message.tone] }]}
+            style={[type.muted, styles.modeLine, { color: inline === null ? C.muted : toneColor[inline.tone] }]}
             numberOfLines={3}
           >
-            {message !== null
-              ? message.text
+            {inline !== null
+              ? inline.text
               : data.mode !== null && !data.modes.includes(data.mode)
                 ? "Selected on the machine itself; pick a mode to take over."
                 : (meta?.description ?? "The machine did not report its current mode.")}
@@ -362,6 +367,11 @@ export function PowerModePanel({
         onSelect={select}
         shake={shake}
       />
+      {message?.tone === "err" && (
+        <Text accessibilityLiveRegion="assertive" style={[type.muted, styles.error, { color: C.err }]}>
+          {message.text}
+        </Text>
+      )}
     </View>
   );
 }
@@ -377,12 +387,14 @@ const styles = StyleSheet.create({
   fanRpm: { fontSize: 10.5, fontWeight: "600", marginTop: 4, fontVariant: ["tabular-nums"] },
   modeTitle: { fontSize: 17, fontWeight: "700", letterSpacing: -0.3 },
   modeLine: { marginTop: 2, lineHeight: 17 },
+  error: { marginTop: spacing.s, lineHeight: 17 },
   fanLabel: { fontSize: 10.5, marginTop: 1 },
   track: { flexDirection: "row", borderRadius: radius.m, borderWidth: hairline },
   thumb: { position: "absolute", borderRadius: radius.m - 4 },
   segment: { flex: 1 },
   segmentFill: { flex: 1 },
   segmentInner: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingHorizontal: 4 },
+  segmentStacked: { flexDirection: "column", gap: 3, paddingHorizontal: 2 },
   segmentLabel: { fontWeight: "600" },
   skeleton: { height: 112, borderRadius: radius.m, marginTop: spacing.s },
 });
