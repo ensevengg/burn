@@ -84,13 +84,13 @@ function useSpin(periodMs: number | null) {
 
 /** `tint` follows the selected mode (blue quiet, neutral balanced, red
  * performance) and fades on change; a stopped fan stays faint. */
-function FanRotor({ fan, tint, size = 64 }: { fan: MachineFan; tint: string; size?: number }) {
+function FanRotor({ fan, tint, size = 48 }: { fan: MachineFan; tint: string; size?: number }) {
   const { C } = useTheme();
   const ink = useTweenedColor(fan.rpm > 0 ? tint : C.faint);
   const rotate = useSpin(rotorPeriodMs(fan.rpm, fan.maxRpm));
   const fraction = fanFraction(fan.rpm, fan.maxRpm);
   const loud = fraction >= 0.85;
-  const inner = size - 16;
+  const inner = size - 12;
   return (
     <View style={styles.fan} accessible accessibilityLabel={`${fan.label}: ${formatRpm(fan.rpm)}`}>
       <Ring fraction={fraction} size={size} stroke={3} color={ink}>
@@ -105,10 +105,7 @@ function FanRotor({ fan, tint, size = 64 }: { fan: MachineFan; tint: string; siz
           </Svg>
         </Animated.View>
       </Ring>
-      <Text style={[styles.fanRpm, { color: loud ? C.warn : C.text }]}>{fan.rpm > 0 ? formatRpm(fan.rpm) : "stopped"}</Text>
-      <Text style={[styles.fanLabel, { color: C.faint }]} numberOfLines={1}>
-        {fan.label}
-      </Text>
+      <Text style={[styles.fanRpm, { color: loud ? C.warn : C.muted }]}>{fan.rpm > 0 ? formatRpm(fan.rpm) : "stopped"}</Text>
     </View>
   );
 }
@@ -139,7 +136,7 @@ function ModeSelector({
   }, [index, position, visible]);
   const inset = 4;
   const segment = width === 0 ? 0 : (width - inset * 2) / modes.length;
-  const height = 66;
+  const height = 44;
   return (
     <Animated.View
       accessibilityRole="radiogroup"
@@ -185,7 +182,7 @@ function ModeSelector({
         const ink = active ? C.accentInk : C.muted;
         const label = (
           <>
-            <Glyph glyph={meta.glyph} color={ink} />
+            <Glyph glyph={meta.glyph} color={ink} size={14} />
             <Text numberOfLines={1} style={[styles.segmentLabel, { color: ink, fontSize: modes.length > 3 ? 11.5 : 12.5 }]}>
               {meta.label}
             </Text>
@@ -329,13 +326,20 @@ export function PowerModePanel({
           </View>
         )}
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={[type.stat, { color: C.text }]} numberOfLines={1}>
+          <Text style={[styles.modeTitle, { color: C.text }]} numberOfLines={1}>
             {meta?.label ?? "Unknown"}
           </Text>
-          <Text style={[type.muted, { color: C.muted, marginTop: 3, lineHeight: 17 }]} numberOfLines={3}>
-            {data.mode !== null && !data.modes.includes(data.mode)
-              ? "Selected on the machine itself; pick a mode below to take over."
-              : (meta?.description ?? "The machine did not report its current mode.")}
+          {/* Status takes the description's place, so the panel never grows. */}
+          <Text
+            accessibilityLiveRegion="polite"
+            style={[type.muted, styles.modeLine, { color: message === null ? C.muted : toneColor[message.tone] }]}
+            numberOfLines={3}
+          >
+            {message !== null
+              ? message.text
+              : data.mode !== null && !data.modes.includes(data.mode)
+                ? "Selected on the machine itself; pick a mode to take over."
+                : (meta?.description ?? "The machine did not report its current mode.")}
           </Text>
           {data.degraded !== null && (
             <Text style={[type.muted, { color: C.warn, marginTop: 4 }]} numberOfLines={2}>
@@ -353,34 +357,27 @@ export function PowerModePanel({
         onSelect={select}
         shake={shake}
       />
-
-      <View style={styles.footer}>
-        {message !== null && (
-          <Text accessibilityLiveRegion="polite" style={[type.muted, { color: toneColor[message.tone], flex: 1 }]} numberOfLines={2}>
-            {message.text}
-          </Text>
-        )}
-      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  panel: { marginTop: spacing.l, paddingTop: spacing.l, borderTopWidth: hairline },
+  panel: { marginTop: spacing.m, paddingTop: spacing.m, borderTopWidth: hairline },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   liveBadge: { flexDirection: "row", alignItems: "center", gap: 6 },
   liveDot: { width: 6, height: 6, borderRadius: 3 },
-  hero: { flexDirection: "row", alignItems: "center", gap: spacing.l, marginTop: spacing.m, marginBottom: spacing.l },
-  fans: { flexDirection: "row", gap: spacing.m },
-  fan: { alignItems: "center", width: 72 },
-  fanRpm: { fontSize: 11.5, fontWeight: "600", marginTop: 6, fontVariant: ["tabular-nums"] },
+  hero: { flexDirection: "row", alignItems: "center", gap: spacing.m, marginTop: spacing.s, marginBottom: spacing.m },
+  fans: { flexDirection: "row", gap: spacing.s },
+  fan: { alignItems: "center", width: 58 },
+  fanRpm: { fontSize: 10.5, fontWeight: "600", marginTop: 4, fontVariant: ["tabular-nums"] },
+  modeTitle: { fontSize: 17, fontWeight: "700", letterSpacing: -0.3 },
+  modeLine: { marginTop: 2, lineHeight: 17 },
   fanLabel: { fontSize: 10.5, marginTop: 1 },
   track: { flexDirection: "row", borderRadius: radius.m, borderWidth: hairline },
   thumb: { position: "absolute", borderRadius: radius.m - 4 },
   segment: { flex: 1 },
   segmentFill: { flex: 1 },
-  segmentInner: { flex: 1, alignItems: "center", justifyContent: "center", gap: 5 },
+  segmentInner: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingHorizontal: 4 },
   segmentLabel: { fontWeight: "600" },
-  footer: { minHeight: 20, marginTop: spacing.s, flexDirection: "row", alignItems: "center" },
-  skeleton: { height: 150, borderRadius: radius.m, marginTop: spacing.m },
+  skeleton: { height: 112, borderRadius: radius.m, marginTop: spacing.s },
 });
