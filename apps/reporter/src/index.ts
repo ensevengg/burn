@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { runDaemon, runDoctor, runInit, runUsage } from "./commands.js";
+import { runControls, runDaemon, runDoctor, runInit, runUsage } from "./commands.js";
 import { runServe } from "./serve.js";
 
 function usage(): void {
@@ -12,8 +12,10 @@ Usage: npx burn-report <command> [flags]
             [--tokscale-pin version]
   doctor    Verify config, tokscale pin, burn-events exporter and Tailscale
   usage     Print vendor quota JSON from tokscale for local diagnostics
-  daemon    Resident read-only machine backend [--port 8787] [--bind ip]
+  daemon    Resident machine backend [--port 8787] [--bind ip]
   serve     Alias for daemon
+  controls  Opt-in machine controls: status | enable power-mode |
+            disable power-mode | polkit-rule
   help      This text
 
 Add the server's printed URL on the phone's Machines tab.
@@ -27,7 +29,8 @@ try {
     ? ["slug", "name", "os", "host-group", "tz", "tokscale-pin", "direct"]
     : command === "daemon" || command === "serve" ? ["bind", "port"] : [];
   const args = new Map<string, string>();
-  for (let i = 1; i < argv.length; i++) {
+  // `controls` takes positional words, not flags.
+  for (let i = 1; command !== "controls" && i < argv.length; i++) {
     const arg = argv[i]!;
     if (!arg.startsWith("--") || !allowed.includes(arg.slice(2)))
       throw new Error(`Unknown argument: ${arg} (try 'npx burn-report help')`);
@@ -44,6 +47,10 @@ try {
     case "usage": process.exitCode = await runUsage(); break;
     case "daemon": await runDaemon(args); break;
     case "serve": await runServe(args); break;
+    case "controls":
+      if (argv.length > 3) throw new Error("usage: burn-report controls [status|enable|disable|polkit-rule] [power-mode]");
+      process.exitCode = await runControls(argv[1] ?? "status", argv[2]);
+      break;
     case "help": case "--help": case "-h": usage(); break;
     default: throw new Error(`Unknown command: ${command} (try 'npx burn-report help')`);
   }

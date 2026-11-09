@@ -28,6 +28,9 @@ export const configSchema = z
     /** Timezone evidence attached to rows; bucketing happens on the phone (D8). */
     reportingTimezone: z.string().default("Asia/Kolkata"),
     tokscalePin: z.string().default(TOKSCALE_PIN).transform(atLeastCheckoutPin),
+    /** Opt-in machine controls (ADR 0004). Absent means every control is off;
+     * optional so configs without it are not rewritten on load. */
+    controls: z.object({ powerMode: z.boolean().optional() }).optional(),
   });
 
 /**
