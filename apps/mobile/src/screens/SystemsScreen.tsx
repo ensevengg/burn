@@ -11,6 +11,8 @@ import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
 import { FadeIn, PressableScale, TweenText } from "../ui/motion";
 import { Sparkline } from "../ui/charts";
 import { Screen } from "../ui/screen";
+import { PowerModePanel } from "../ui/power-mode";
+import { supportsPowerMode } from "@burn/sync-api";
 
 type MetricKey = "cpuLoadPct" | "cpuTempC" | "ramUsedPct" | "ramTempC" | "gpuUtilPct" | "gpuTempC";
 
@@ -122,6 +124,13 @@ export function SystemsScreen() {
                 <MetricTile label="RAM temp" unit="°" samples={system.metrics} field="ramTempC" warnAt={85} />
                 <MetricTile label="GPU temp" unit="°" samples={system.metrics} field="gpuTempC" warnAt={85} />
               </View>
+              {probe !== undefined && supportsPowerMode(probe.capabilities) && (
+                <PowerModePanel
+                  machine={{ environmentId: system.id, endpoint: probe.endpoint }}
+                  online={probe.state === "live"}
+                  machineName={system.displayName}
+                />
+              )}
             </Card>
           </FadeIn>
         );

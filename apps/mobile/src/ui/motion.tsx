@@ -146,7 +146,7 @@ export function PressableScale({
 }
 
 /** Breathing opacity loop for "in progress" dots. */
-export function Pulse({ active, children }: { active: boolean; children: ReactNode }) {
+export function Pulse({ active, children, style }: { active: boolean; children: ReactNode; style?: StyleProp<ViewStyle> }) {
   const value = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     if (!active) {
@@ -163,7 +163,7 @@ export function Pulse({ active, children }: { active: boolean; children: ReactNo
     loop.start();
     return () => loop.stop();
   }, [active, value]);
-  return <Animated.View style={{ opacity: value }}>{children}</Animated.View>;
+  return <Animated.View style={[style, { opacity: value }]}>{children}</Animated.View>;
 }
 
 /** Shimmer-free skeleton block: a slow opacity breath reads as "loading" without strobing. */

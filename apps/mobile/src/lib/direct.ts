@@ -50,6 +50,8 @@ export interface DirectPullStatus {
   initialSyncComplete?: boolean;
   scanMs?: number | null;
   hasMore?: boolean;
+  /** From the latest /ping; gates opt-in controls such as power mode. */
+  capabilities?: string[];
 }
 
 export interface DirectPullOptions {
@@ -473,6 +475,7 @@ async function pullDirectUnlocked(
           };
         }
         const clockSkewMs = Math.abs(ping.serverNowMs - now());
+        base.capabilities = ping.capabilities ?? [];
         base.initialSyncComplete = (await kvGetNumber(db, cursorKey(machine.id))) !== null;
 
         await withWriteLock(async () => {
