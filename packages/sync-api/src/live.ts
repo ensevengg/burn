@@ -197,6 +197,11 @@ export function httpLiveApiFor(
     try {
       body = JSON.parse(text);
     } catch {
+      // A proxy in front of a stopped reporter (e.g. `tailscale serve`)
+      // answers 502/503/504 without a JSON body: the machine is unreachable.
+      if ([502, 503, 504].includes(response.status))
+        throw new LiveUnreachableError(`${base}${path}: reporter not answering (HTTP ${response.status})`);
+      if (!response.ok) throw new LiveError(`${base}${path}: HTTP ${response.status}`, response.status);
       throw new LiveError(`${base}${path}: response was not valid JSON`);
     }
     if (!response.ok) {
