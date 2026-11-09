@@ -83,11 +83,13 @@ function useSpin(periodMs: number | null) {
 }
 
 /** `tint` follows the selected mode (blue quiet, neutral balanced, red
- * performance) and fades on change; a stopped fan stays faint. */
-function FanRotor({ fan, tint, size = 48 }: { fan: MachineFan; tint: string; size?: number }) {
+ * performance) and fades on change. A stopped fan stays faint; a `stale`
+ * reading (machine unreachable) coasts to a stop and greys out, so a
+ * spinning rotor always means live data. */
+function FanRotor({ fan, tint, stale, size = 48 }: { fan: MachineFan; tint: string; stale: boolean; size?: number }) {
   const { C } = useTheme();
-  const ink = useTweenedColor(fan.rpm > 0 ? tint : C.faint);
-  const rotate = useSpin(rotorPeriodMs(fan.rpm, fan.maxRpm));
+  const ink = useTweenedColor(fan.rpm > 0 && !stale ? tint : C.faint);
+  const rotate = useSpin(stale ? null : rotorPeriodMs(fan.rpm, fan.maxRpm));
   const fraction = fanFraction(fan.rpm, fan.maxRpm);
   const loud = fraction >= 0.85;
   const inner = size - 12;
@@ -105,7 +107,7 @@ function FanRotor({ fan, tint, size = 48 }: { fan: MachineFan; tint: string; siz
           </Svg>
         </Animated.View>
       </Ring>
-      <Text style={[styles.fanRpm, { color: loud ? C.warn : C.muted }]}>{fan.rpm > 0 ? formatRpm(fan.rpm) : "stopped"}</Text>
+      <Text style={[styles.fanRpm, { color: stale ? C.faint : loud ? C.warn : C.muted }]}>{fan.rpm > 0 ? formatRpm(fan.rpm) : "stopped"}</Text>
     </View>
   );
 }
@@ -228,18 +230,21 @@ function notice(
   return null;
 }
 
-/** Shown inside a live machine's Systems card when it advertises power-mode. */
+/** Shown inside a Systems card when the machine advertises power-mode.
+ * `reachable` is null until this launch's first probe answers: the panel
+ * then tries a read rather than claiming the machine is offline. */
 export function PowerModePanel({
   machine,
-  online,
+  online: reachable,
   machineName,
 }: {
   machine: ControlledMachine;
-  online: boolean;
+  online: boolean | null;
   machineName: string;
 }) {
   const { C } = useTheme();
-  const state = usePowerMode(machine, online);
+  const state = usePowerMode(machine, reachable !== false);
+  const online = reachable ?? (state.isSuccess && !state.isError);
   const write = useSetPowerMode(machine);
   const shake = useRef(new Animated.Value(0)).current;
   const [confirmed, setConfirmed] = useState<string | null>(null);
@@ -273,7 +278,7 @@ export function PowerModePanel({
     return (
       <View style={[styles.panel, { borderTopColor: C.border }]}>
         <Text style={[type.eyebrow, { color: C.muted }]}>Power mode</Text>
-        {state.isError || !online ? (
+        {state.isError || reachable === false ? (
           <Text style={[type.muted, { color: C.warn, marginTop: spacing.s }]} numberOfLines={2}>
             {state.isError
               ? controlFailure(state.error, machineName)
@@ -318,7 +323,7 @@ export function PowerModePanel({
           <View style={styles.fans}>
             {/* Index keys: labels come from drivers and may repeat. */}
             {data.fans.slice(0, 2).map((fan, index) => (
-              <FanRotor key={index} fan={fan} tint={tint} />
+              <FanRotor key={index} fan={fan} tint={tint} stale={!online || state.isError} />
             ))}
             {data.fans.length > 2 && (
               <Text style={[styles.fanLabel, { color: C.faint, alignSelf: "center" }]}>{`+${data.fans.length - 2} fans`}</Text>

@@ -126,10 +126,12 @@ export function SystemsScreen() {
                 <MetricTile label="RAM temp" unit="°" samples={system.metrics} field="ramTempC" warnAt={85} />
                 <MetricTile label="GPU temp" unit="°" samples={system.metrics} field="gpuTempC" warnAt={85} />
               </View>
-              {probe !== undefined && supportsPowerMode(probe.capabilities) && (
+              {/* A fresh probe wins; otherwise the stored capabilities keep the
+                  control visible (offline) for a machine unreachable at launch. */}
+              {supportsPowerMode(probe?.capabilities ?? system.capabilities) && (probe?.endpoint ?? system.endpoint) !== null && (
                 <PowerModePanel
-                  machine={{ environmentId: system.id, endpoint: probe.endpoint }}
-                  online={probe.state === "live"}
+                  machine={{ environmentId: system.id, endpoint: (probe?.endpoint ?? system.endpoint)! }}
+                  online={probe === undefined ? null : probe.state === "live"}
                   machineName={system.displayName}
                 />
               )}

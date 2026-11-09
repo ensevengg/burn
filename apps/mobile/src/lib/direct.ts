@@ -100,6 +100,12 @@ function cursorKey(envId: string): string {
   return `direct_since_v3_${envId}`;
 }
 
+/** Last advertised /ping capabilities (JSON array), so opt-in controls still
+ * render — in their offline state — when a machine is unreachable at launch. */
+export function capabilitiesKey(envId: string): string {
+  return `direct_caps_${envId}`;
+}
+
 function legacyCursorKey(envId: string): string {
   return `direct_since_${envId}`;
 }
@@ -320,6 +326,7 @@ export async function removeDirectMachine(
         `direct_backfill_${environmentId}`,
         `direct_full_at_${environmentId}`,
         reparseKey(environmentId),
+        capabilitiesKey(environmentId),
       ])
         await kvDelete(db, key);
       await forgetReconciliation(db, environmentId);
@@ -486,6 +493,7 @@ async function pullDirectUnlocked(
               [new Date(now()).toISOString(), machine.id],
             );
             await notePinChange(db, machine.id, ping.tokscaleVersion);
+            await kvSetString(db, capabilitiesKey(machine.id), JSON.stringify(ping.capabilities ?? []));
             await db.runAsync(
               `update environments set reporter_version=?,tokscale_version=?,export_schema=?,reporting_timezone=?,host_group=coalesce(?,host_group),last_heartbeat_at=? where id=?`,
               [
