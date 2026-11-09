@@ -131,7 +131,8 @@ export function SystemsScreen() {
               {supportsPowerMode(probe?.capabilities ?? system.capabilities) && (probe?.endpoint ?? system.endpoint) !== null && (
                 <PowerModePanel
                   machine={{ environmentId: system.id, endpoint: (probe?.endpoint ?? system.endpoint)! }}
-                  online={probe === undefined ? null : probe.state === "live"}
+                  // Data errors (e.g. a broken exporter) still mean the machine answers.
+                  online={probe === undefined ? null : probe.state === "live" || probe.state === "error"}
                   machineName={system.displayName}
                 />
               )}
