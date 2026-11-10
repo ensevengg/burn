@@ -135,7 +135,15 @@ describe("fans", () => {
 
   test("labels win, distinct chips stay, junk readings are skipped", async () => {
     const root = mkdtempSync(join(tmpdir(), "burn-sys-"));
-    hwmon(root, "hwmon1", "nct6775", { fan1_input: "900", fan2_input: "1100", fan3_input: "garbage" });
+    hwmon(root, "hwmon1", "nct6775", {
+      fan1_input: "900",
+      fan2_input: "1100",
+      fan3_input: "garbage",
+      fan4_input: "",
+      fan5_input: "\n",
+    });
+    // A directory reads as EISDIR: an unreadable tachometer.
+    mkdirSync(join(root, "devices/nct6775/fan6_input"));
     hwmon(root, "hwmon2", "amdgpu", { fan1_input: "1500", fan1_label: "GPU", fan1_max: "0" });
     expect(await readFans(root)).toEqual([
       { label: "Fan 1", rpm: 900, maxRpm: null },

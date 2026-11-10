@@ -220,7 +220,9 @@ export async function readFans(root = "/sys"): Promise<MachineFan[]> {
     for (const file of files) {
       const match = /^fan(\d+)_input$/.exec(file);
       if (!match) continue;
-      const rpm = Number(await text(`${dir}/${file}`));
+      // An unreadable or empty tachometer is skipped, not shown as stopped.
+      const raw = await text(`${dir}/${file}`);
+      const rpm = raw ? Number(raw) : Number.NaN;
       if (!Number.isSafeInteger(rpm) || rpm < 0 || rpm > 50_000) continue;
       const max = Number(await text(`${dir}/fan${match[1]}_max`));
       fans.push({
