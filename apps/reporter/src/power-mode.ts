@@ -288,10 +288,16 @@ export class PowerModeController {
   }
 
   private async fresh(): Promise<PowerModeState> {
-    const driver = await this.resolveDriver();
+    const resolving = this.resolveDriver();
+    const driver = await resolving;
     if (driver === null) throw new ControlError("this machine exposes no power modes", 404);
     const [reading, fans] = await Promise.all([
-      driver.read(),
+      driver.read().catch((err: unknown) => {
+        // The backend went away (e.g. the daemon stopped): detect again on the
+        // next read, so a fallback is found or the control stops advertising.
+        if (this.driver === resolving) this.driver = null;
+        throw err;
+      }),
       (this.deps.fans ?? readFans)().catch(() => []),
     ]);
     if (reading.modes.length === 0) throw new ControlError("this machine exposes no power modes", 404);

@@ -267,6 +267,51 @@ describe("controller", () => {
   });
 });
 
+describe("controller re-detection", () => {
+  test("a backend that fails a read is re-detected, falling back or dropping the control", async () => {
+    let daemonUp = true;
+    const daemon: PowerModeDriver = {
+      backend: "power-profiles-daemon",
+      read: async () => {
+        if (!daemonUp) throw new Error("powerprofilesctl list exited 1");
+        return { mode: "balanced", modes: ["balanced", "performance"], degraded: null };
+      },
+      set: async () => {},
+    };
+    const kernel: PowerModeDriver = {
+      backend: "platform-profile",
+      read: async () => ({ mode: "quiet", modes: ["quiet", "balanced"], degraded: null }),
+      set: async () => {},
+    };
+    const clock = { t: 0 };
+    const control = new PowerModeController({
+      detect: async () => (daemonUp ? daemon : kernel),
+      fans: async () => [],
+      now: () => clock.t,
+    });
+    expect((await control.state()).backend).toBe("power-profiles-daemon");
+
+    daemonUp = false;
+    clock.t = 2_000;
+    expect(await control.state().catch((e: unknown) => e)).toBeInstanceOf(Error);
+    clock.t = 4_000;
+    expect((await control.state()).backend).toBe("platform-profile");
+
+    // With no fallback either, /ping stops advertising the control.
+    const bare = new PowerModeController({
+      detect: async () => (daemonUp ? daemon : null),
+      fans: async () => [],
+      now: () => clock.t,
+    });
+    daemonUp = true;
+    await bare.state();
+    daemonUp = false;
+    clock.t = 6_000;
+    await bare.state().catch(() => {});
+    expect(await bare.supported()).toBe(false);
+  });
+});
+
 test("polkit rule names only the switch action and a validated user", () => {
   const rule = polkitRule("enseven");
   expect(rule).toContain('action.id === "org.freedesktop.UPower.PowerProfiles.switch-profile"');
