@@ -45,7 +45,10 @@ export function usePowerMode(machine: ControlledMachine, enabled: boolean) {
       ),
     enabled: enabled && focused,
     // Paused during a write so a read cannot overwrite the optimistic mode.
+    // Polling pauses while the app is backgrounded (focusManager in App.tsx)
+    // and reads once on return rather than waiting for the next tick.
     refetchInterval: enabled && focused && !writing ? POLL_MS : false,
+    refetchOnWindowFocus: !writing,
     staleTime: 0,
     retry: false,
   });
