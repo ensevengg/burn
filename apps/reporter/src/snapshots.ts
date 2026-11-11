@@ -72,6 +72,8 @@ export class MachineSnapshots {
   /** The last scan failed: requests wait for the next one so the phone is
    * told, instead of being served an ever-older snapshot in silence. */
   private failed = false;
+  /** Whether the scan in flight bypasses the fingerprint fast path. */
+  private pendingForced = false;
   private readonly history = new Map<
     string,
     { snapshot: MachineSnapshot; touchedAt: number }
@@ -97,14 +99,27 @@ export class MachineSnapshots {
   keepWarm(intervalMs = 30_000, report: (message: string) => void = () => {}): () => void {
     this.warmers++;
     let reported: string | null = null;
+    // A scan that keeps failing (schema drift, a pin mismatch, a timeout) is
+    // retried ever less often, up to five minutes apart: with nobody asking,
+    // the timer must not run the exporter in a loop. Requests still scan.
+    let failures = 0;
+    let retryAt = -Infinity;
+    let failedAt = 0;
     const tick = () => {
       if (this.pending || this.fresh()) return;
+      const now = this.now();
+      if (failures > 0 && now >= failedAt && now < retryAt) return;
       this.refresh(false).then(
-        () => (reported = null),
+        () => {
+          reported = null;
+          failures = 0;
+        },
         (err: unknown) => {
           const message = (err as Error).message ?? String(err);
           if (message !== reported) report(message);
           reported = message;
+          failedAt = this.now();
+          retryAt = failedAt + Math.min(300_000, intervalMs * 2 ** ++failures);
         },
       );
     };
@@ -130,11 +145,17 @@ export class MachineSnapshots {
       if (!this.pending && !this.fresh()) void this.refresh(false).catch(() => {});
       return Promise.resolve(this.latest);
     }
-    if (this.pending) return this.pending;
+    if (this.pending) {
+      // A forced read must not settle for an unforced scan already running
+      // (it may reuse the snapshot by fingerprint): it scans again after it.
+      if (force && !this.pendingForced) return this.pending.then(() => this.get(true), () => this.get(true));
+      return this.pending;
+    }
     if (!force && this.fresh()) return Promise.resolve(this.latest!);
     return this.refresh(force);
   }
   private refresh(force: boolean): Promise<MachineSnapshot> {
+    this.pendingForced = force;
     const pending = this.scan(force)
       .then(
         (snapshot) => {

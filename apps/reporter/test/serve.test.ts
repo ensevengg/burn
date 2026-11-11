@@ -710,3 +710,74 @@ test("/live/digests lists one digest per UTC day and only a changed day's digest
   expect(() => parseLiveDigestsPage({ ...second, days: [[5, "x"], [5, "y"]] })).toThrow("ascend");
   expect(() => parseLiveDigestsPage({ ...second, days: [[5]] })).toThrow("expected [day, digest]");
 });
+
+test("a scan that keeps failing is retried less and less often by the warm timer", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  let time = 0;
+  let scans = 0;
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    now: () => time, check: async () => CONFIG.tokscalePin,
+    scan: async () => { scans++; throw new Error("schema drift"); },
+  });
+  const stop = snapshots.keepWarm(5, () => {});
+  // Two real seconds of 5 ms ticks on a stopped clock: one attempt, then waiting.
+  await Bun.sleep(60);
+  expect(scans).toBe(1);
+  // Attempts follow the doubling delay (10, 20, 40 ms ...), not every tick.
+  for (const [advance, expected] of [[9, 1], [1, 2], [19, 2], [1, 3], [39, 3], [1, 4]] as const) {
+    time += advance;
+    await Bun.sleep(15);
+    expect(scans).toBe(expected);
+  }
+  // A phone asking still gets an immediate attempt and its error.
+  await expect(snapshots.get()).rejects.toThrow("schema drift");
+  expect(scans).toBe(5);
+  stop();
+});
+
+test("a forced read scans again instead of joining an unforced scan in flight", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  let time = 1000;
+  let scans = 0;
+  let release: (() => void) | null = null;
+  let probing = false;
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    now: () => time, check: async () => CONFIG.tokscalePin,
+    // The unforced refresh is still probing sources when the forced read arrives.
+    fingerprint: async () => {
+      if (probing) await new Promise<void>((resolve) => (release = resolve));
+      return "same";
+    },
+    scan: async () => JSON.stringify({ ...EXPORTER_ROW_WITH_KEY, dedup_key: `k${++scans}` }),
+  });
+  const first = await snapshots.get();
+  time += 31_000;
+  probing = true;
+  const unforced = snapshots.get();
+  await Bun.sleep(1);
+  probing = false;
+  const forced = snapshots.get(true);
+  release!();
+  // The unforced one reuses the snapshot by fingerprint; the forced one does not.
+  expect(await unforced).toBe(first);
+  expect((await forced).events[0]!.dedupKey).toBe("k2");
+  expect(scans).toBe(2);
+});
+
+test("health never serves readings stamped after the machine's current time", async () => {
+  const { SystemMetricHistory } = await import("../src/system-metrics");
+  let now = 10 * 3_600_000;
+  const history = new SystemMetricHistory(async () => ({
+    capturedAtMs: now, cpuLoadPct: 1, cpuTempC: null, ramUsedPct: 2, ramTempC: null, gpuUtilPct: null, gpuTempC: null,
+  }), () => now);
+  await history.sample();
+  now += 30_000;
+  await history.sample();
+  // NTP pulls the clock back five and a half hours while the daemon runs.
+  now -= 5.5 * 3_600_000;
+  const served = await history.since(0);
+  expect(served).toHaveLength(1);
+  expect(served[0]!.capturedAtMs).toBe(now);
+  now += 40_000;
+  expect((await history.since(0)).map((sample) => sample.capturedAtMs)).toEqual([now - 40_000, now]);
+});

@@ -207,3 +207,10 @@ describe("peer discovery (ADR 0005)", () => {
     expect(() => parseLivePeersPage({ peers: [{ ...peer, osKind: "plan9" }] })).toThrow();
   });
 });
+
+test("an interface named for Tailscale wins over another address in the shared range", () => {
+  const entry = (address: string) => ({ address, internal: false, family: "IPv4", netmask: "", mac: "", cidr: null }) as never;
+  expect(tailnetAddress({ CloudflareWARP: [entry("100.96.0.7")], tailscale0: [entry("100.101.102.103")] })).toBe("100.101.102.103");
+  expect(tailnetAddress({ Tailscale: [entry("100.70.1.2")], wwan0: [entry("100.64.9.9")] })).toBe("100.70.1.2");
+  expect(tailnetAddress({ utun3: [entry("100.96.0.7")] })).toBe("100.96.0.7");
+});

@@ -164,7 +164,11 @@ export class SystemMetricHistory {
     if (this.active !== null) return this.active;
     const pending = this.collect().then((sample) => {
       this.samples.push(sample);
-      this.samples = this.samples.filter((item) => item.capturedAtMs >= this.now() - 24 * HOUR_MS);
+      // Readings stamped after "now" were taken before the clock was set
+      // back; they would stay the newest sample for as long as the skew.
+      this.samples = this.samples.filter(
+        (item) => item.capturedAtMs >= this.now() - 24 * HOUR_MS && item.capturedAtMs <= this.now(),
+      );
       return sample;
     });
     this.active = pending;
@@ -180,6 +184,7 @@ export class SystemMetricHistory {
     const newest = this.samples.at(-1)?.capturedAtMs;
     const age = newest === undefined ? Infinity : this.now() - newest;
     if (age < 0 || age > 35_000) await this.sample();
-    return this.samples.filter((sample) => sample.capturedAtMs >= sinceMs);
+    const now = this.now();
+    return this.samples.filter((sample) => sample.capturedAtMs >= sinceMs && sample.capturedAtMs <= now);
   }
 }

@@ -49,17 +49,21 @@ export interface LiveServerHandle {
 
 /** This machine's address in Tailscale's range (100.64.0.0/10), read from the
  * network interfaces. Needs no CLI, which the macOS App Store and some
- * Windows installs do not put on PATH. */
+ * Windows installs do not put on PATH. Other software uses that range too
+ * (carrier NAT, some VPNs), so an interface named for Tailscale wins. */
 export function tailnetAddress(
   interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
 ): string | null {
-  for (const addresses of Object.values(interfaces))
+  let fallback: string | null = null;
+  for (const [name, addresses] of Object.entries(interfaces))
     for (const entry of addresses ?? []) {
       if (entry.family !== "IPv4" || entry.internal) continue;
       const [a, b] = entry.address.split(".").map(Number);
-      if (a === 100 && b !== undefined && b >= 64 && b <= 127) return entry.address;
+      if (a !== 100 || b === undefined || b < 64 || b > 127) continue;
+      if (/tailscale/i.test(name)) return entry.address;
+      fallback ??= entry.address;
     }
-  return null;
+  return fallback;
 }
 
 /** Resolve the tailnet IPv4: the tailscale CLI when it is on PATH (it knows
