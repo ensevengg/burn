@@ -18,10 +18,8 @@ export class ExporterError extends Error {
   }
 }
 
-let cachedExporter: Runner | null = null;
-let cachedExporterVersion: string | null = null;
+let cachedExporter: { override: string | undefined; runner: Runner } | null = null;
 let exporterVersionProbe: Promise<string | null> | null = null;
-let cachedCapabilities: ExporterCapabilities | null = null;
 let capabilitiesProbe: Promise<ExporterCapabilities | null> | null = null;
 
 export interface ExporterCapabilities {
@@ -46,16 +44,16 @@ export function assertExporterCapabilities(value: ExporterCapabilities | null, p
   }
 }
 
+/** Runs the binary each time (only concurrent callers share a probe): the
+ * snapshot store rechecks every five minutes precisely to notice an exporter
+ * rebuilt under a running daemon. */
 export function exporterCapabilities(): Promise<ExporterCapabilities | null> {
-  if (cachedCapabilities !== null) return Promise.resolve(cachedCapabilities);
   if (capabilitiesProbe !== null) return capabilitiesProbe;
   const pending = (async () => {
     try {
       const runner = await resolveExporter();
       const { stdout } = await spawnRunner(runner, ["--capabilities"], 60_000);
-      const parsed = parseExporterCapabilities(stdout);
-      if (parsed !== null) cachedCapabilities = parsed;
-      return parsed;
+      return parseExporterCapabilities(stdout);
     } catch {
       return null;
     }
@@ -66,9 +64,9 @@ export function exporterCapabilities(): Promise<ExporterCapabilities | null> {
 }
 
 export async function resolveExporter(): Promise<Runner> {
-  if (cachedExporter !== null) return cachedExporter;
-  const candidates: Runner[] = [];
   const override = process.env["BURN_EVENTS_BIN"];
+  if (cachedExporter !== null && cachedExporter.override === override) return cachedExporter.runner;
+  const candidates: Runner[] = [];
   if (override) candidates.push({ command: override, prefix: [] });
   candidates.push({ command: "burn-events", prefix: [] });
   if (platform() === "win32") candidates.push({ command: "burn-events.exe", prefix: [] });
@@ -76,7 +74,7 @@ export async function resolveExporter(): Promise<Runner> {
   for (const candidate of candidates) {
     try {
       await spawnRunner(candidate, ["--version"], 60_000);
-      cachedExporter = candidate;
+      cachedExporter = { override, runner: candidate };
       return candidate;
     } catch {
       /* probe the next location */
@@ -90,17 +88,15 @@ export async function resolveExporter(): Promise<Runner> {
   );
 }
 
-/** Semver from `burn-events --version` ("burn-events 4.15.1"), or null. */
+/** Semver from `burn-events --version` ("burn-events 4.15.1"), or null.
+ * Never cached across calls, for the same reason as the capabilities probe. */
 export function exporterVersion(): Promise<string | null> {
-  if (cachedExporterVersion !== null) return Promise.resolve(cachedExporterVersion);
   if (exporterVersionProbe !== null) return exporterVersionProbe;
   const pending = (async () => {
     try {
       const runner = await resolveExporter();
       const { stdout } = await spawnRunner(runner, ["--version"], 60_000);
-      const version = /^burn-events\s+(\S+)/m.exec(stdout)?.[1] ?? null;
-      if (version !== null) cachedExporterVersion = version;
-      return version;
+      return /^burn-events\s+(\S+)/m.exec(stdout)?.[1] ?? null;
     } catch {
       return null;
     }

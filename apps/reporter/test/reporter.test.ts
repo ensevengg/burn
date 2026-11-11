@@ -131,3 +131,29 @@ describe("spawnRunner", () => {
     expect(stdout.length).toBe(400 * (1 + 2100 + 1));
   });
 });
+
+describe("exporter pin check", () => {
+  test.skipIf(platform() === "win32")("sees an exporter rebuilt under a running daemon", async () => {
+    const { exporterVersion, exporterCapabilities } = await import("../src/exporter");
+    const { chmodSync } = await import("node:fs");
+    const bin = join(dir, "burn-events");
+    const versionFile = join(dir, "version");
+    writeFileSync(versionFile, "4.21.0");
+    writeFileSync(
+      bin,
+      `#!/bin/sh\nv=$(cat "${versionFile}")\ncase "$1" in\n  --version) echo "burn-events $v";;\n  --capabilities) echo "{\\"protocol\\":2,\\"tokscale_version\\":\\"$v\\",\\"capabilities\\":[\\"fingerprint-v1\\"]}";;\nesac\n`,
+    );
+    chmodSync(bin, 0o755);
+    const previous = process.env["BURN_EVENTS_BIN"];
+    process.env["BURN_EVENTS_BIN"] = bin;
+    try {
+      expect(await exporterVersion()).toBe("4.21.0");
+      writeFileSync(versionFile, "4.22.0");
+      expect(await exporterVersion()).toBe("4.22.0");
+      expect((await exporterCapabilities())?.tokscaleVersion).toBe("4.22.0");
+    } finally {
+      if (previous === undefined) delete process.env["BURN_EVENTS_BIN"];
+      else process.env["BURN_EVENTS_BIN"] = previous;
+    }
+  });
+});
