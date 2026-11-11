@@ -251,16 +251,16 @@ async function writeEvents(
 
 /** Last success survives failed attempts; stale responses never replace newer
  * state. Collection time belongs to the source, never to the phone merge.
- * `machineNowMs` is that machine's current clock: a stored reading stamped
- * later than it was taken before the clock was set back (a dual-boot box
- * booting with local-time RTC, then NTP), and would otherwise block every
+ * `latestPlausibleMs` is the newest collection time that can be real (the
+ * phone's clock plus a tolerance): a stored reading stamped later than it was
+ * taken on a machine clock that ran ahead, and would otherwise block every
  * newer reading until real time caught up with the bad stamp. */
 export async function mergeQuota(
   db: SQLiteDatabase,
   environmentId: string | null,
   q: MachineQuotaInput,
   fetchedAt: string,
-  machineNowMs: number | null = null,
+  latestPlausibleMs: number | null = null,
 ): Promise<void> {
   await db.runAsync(
     `insert into quota_snapshots
@@ -297,7 +297,7 @@ export async function mergeQuota(
       q.error,
       fetchedAt,
       // julianday(null) is null, which leaves the guard as it was.
-      machineNowMs === null ? null : new Date(machineNowMs).toISOString(),
+      latestPlausibleMs === null ? null : new Date(latestPlausibleMs).toISOString(),
     ],
   );
 }

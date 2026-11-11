@@ -158,3 +158,54 @@ test("quotas keep updating after a machine clock is corrected backwards", async 
   const cards = await queryQuotas(fx.db);
   expect(cards[0]!.usedPercent).toBe(80);
 });
+
+test("a machine whose clock runs ahead cannot outrank a correct machine's fresher quota", async () => {
+  const fx = mirrorFixture();
+  const real = Date.UTC(2026, 10, 10, 12, 0, 0);
+  const quota = (used: number) => ({
+    provider: "claude", accountKey: "a", accountLabel: null, plan: null, metric: "5h", usedPercent: used,
+    remainingPercent: null, remainingLabel: null, resetsAt: null, creditStatus: null, spendControl: null,
+    status: "ok" as const, error: null, sourceOffsetMinutes: 0,
+  });
+  // CachyOS booted 5h30 ahead; Windows on the same account has a correct clock.
+  const machine = (slug: string, aheadMs: number, used: () => number): LiveApi => ({
+    ping: async () => ping(clock + aheadMs, { slug, displayName: slug }),
+    events: async (since) => ({ sinceMs: since, generatedAt: new Date(clock + aheadMs).toISOString(), scanStartedAtMs: clock + aheadMs, events: [] }),
+    quotas: async () => ({ generatedAt: new Date(clock + aheadMs).toISOString(), quotas: [quota(used())] }),
+  });
+  let clock = real;
+  let windowsUsed = 35;
+  const apis: Record<string, LiveApi> = {
+    "http://cachy": machine("cachy", 5.5 * HOUR, () => 10),
+    "http://windows": machine("windows", 0, () => windowsUsed),
+  };
+  const apiFor = (endpoint: string) => apis[endpoint]!;
+  await addDirectMachine(fx.db, "http://cachy", { apiFor });
+  await pullDirectFromMachines(fx.db, { apiFor, now: () => clock });
+  // Stored on the phone's clock, not five and a half hours from now.
+  expect(await fx.db.getFirstAsync("select fetched_at from quota_snapshots")).toEqual({ fetched_at: new Date(real).toISOString() });
+
+  // The box reboots into Windows; CachyOS is never pulled again.
+  delete apis["http://cachy"];
+  apis["http://cachy"] = { ...machine("cachy", 0, () => 10), ping: async () => { throw new Error("offline"); } };
+  await addDirectMachine(fx.db, "http://windows", { apiFor });
+  for (const used of [35, 60, 85]) {
+    clock += HOUR;
+    windowsUsed = used;
+    await pullDirectFromMachines(fx.db, { apiFor, now: () => clock });
+    expect((await queryQuotas(fx.db))[0]!.usedPercent).toBe(used);
+  }
+});
+
+test("a reading stamped in the future by an older app version ranks behind plausible ones", async () => {
+  const fx = mirrorFixture();
+  const insert = (key: string, used: number, fetchedAt: string) =>
+    fx.native.query(
+      `insert into quota_snapshots (row_key, environment_id, provider, account_key, metric, used_percent, status, fetched_at)
+       values (?, ?, 'claude', 'a', '5h', ?, 'ok', ?)`,
+    ).run(key, key, used, fetchedAt);
+  insert("ahead", 10, new Date(Date.now() + 5 * HOUR).toISOString());
+  expect((await queryQuotas(fx.db))[0]!.usedPercent).toBe(10);
+  insert("correct", 80, new Date(Date.now() - 60_000).toISOString());
+  expect((await queryQuotas(fx.db)).map((card) => card.usedPercent)).toEqual([80]);
+});

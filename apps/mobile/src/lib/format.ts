@@ -125,7 +125,7 @@ export function formatCount(n: number): string {
  * 999,950 reads "1.0M" rather than "1000k" (tweened numbers pass through
  * every value on the way up). */
 export function formatTokens(n: number): string {
-  if (n >= 999_995_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+  if (n >= 999_500_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
   if (n >= 999_500) return `${(n / 1_000_000).toFixed(n >= 9_950_000 ? 0 : 1)}M`;
   if (n >= 999.5) return `${(n / 1_000).toFixed(n >= 9_950 ? 0 : 1)}k`;
   return String(Math.round(n));

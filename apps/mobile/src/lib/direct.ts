@@ -129,6 +129,30 @@ function digestsKey(envId: string, pending = false): string {
   return `direct_digests_${pending ? "pending_" : ""}${envId}`;
 }
 
+/** Machine clocks within this of the phone's are taken at their word. */
+const QUOTA_SKEW_TOLERANCE_MS = 60_000;
+
+/**
+ * When a quota was read, as the timestamp to store. A reading the source
+ * served from its own cache keeps its real collection time (never later than
+ * the page). Quotas are account-level and the freshest reading across
+ * machines wins, so timestamps from different machines must be comparable: a
+ * machine whose clock is off by more than the tolerance (a dual-boot box that
+ * booted with local-time RTC) has its reading moved onto the phone's clock,
+ * or its "future" reading would outrank every correct machine's.
+ */
+function quotaCollectedAt(
+  quota: { fetchedAt?: string | null },
+  generatedAt: string,
+  machineAheadMs: number,
+): string {
+  const source =
+    quota.fetchedAt && Date.parse(quota.fetchedAt) < Date.parse(generatedAt) ? quota.fetchedAt : generatedAt;
+  return Math.abs(machineAheadMs) > QUOTA_SKEW_TOLERANCE_MS
+    ? new Date(Date.parse(source) - machineAheadMs).toISOString()
+    : source;
+}
+
 /** Set when a machine reports a different tokscale pin; a parser change can
  * re-key or reprice old rows, so it forces full reconciliation until one
  * completes. */
@@ -564,7 +588,8 @@ async function pullDirectUnlocked(
             elapsedMs: now() - started,
           };
         }
-        const clockSkewMs = Math.abs(ping.serverNowMs - now());
+        const skewMs = ping.serverNowMs - now();
+        const clockSkewMs = Math.abs(skewMs);
         base.capabilities = ping.capabilities ?? [];
         base.initialSyncComplete = (await kvGetNumber(db, cursorKey(machine.id))) !== null;
 
@@ -618,11 +643,11 @@ async function pullDirectUnlocked(
                     assertActive();
                     await db.withTransactionAsync(async () => {
                       for (const quota of fresh.quotas) {
-                        const collectedAt =
-                          quota.fetchedAt && Date.parse(quota.fetchedAt) < Date.parse(fresh.generatedAt)
-                            ? quota.fetchedAt
-                            : fresh.generatedAt;
-                        await mergeQuota(db, machine.id, quota, collectedAt, ping.serverNowMs);
+                        await mergeQuota(
+                          db, machine.id, quota,
+                          quotaCollectedAt(quota, fresh.generatedAt, skewMs),
+                          now() + QUOTA_SKEW_TOLERANCE_MS,
+                        );
                         assertActive();
                       }
                     });
@@ -637,13 +662,11 @@ async function pullDirectUnlocked(
               assertActive();
               await db.withTransactionAsync(async () => {
                 for (const quota of page.quotas) {
-                  // A reading the source served from its own cache keeps its
-                  // real collection time; it can never postdate the page.
-                  const collectedAt =
-                    quota.fetchedAt && Date.parse(quota.fetchedAt) < Date.parse(page.generatedAt)
-                      ? quota.fetchedAt
-                      : page.generatedAt;
-                  await mergeQuota(db, machine.id, quota, collectedAt, ping.serverNowMs);
+                  await mergeQuota(
+                    db, machine.id, quota,
+                    quotaCollectedAt(quota, page.generatedAt, skewMs),
+                    now() + QUOTA_SKEW_TOLERANCE_MS,
+                  );
                   if (quota.status === "error")
                     quotaError = quota.error ?? "Quota check failed";
                   assertActive();

@@ -438,7 +438,7 @@ interface Subscription {
 }
 
 /** One entry per provider-account; metric windows (5h, weekly…) live inside. Most urgent first. */
-function groupSubscriptions(quotas: QuotaCard[]): Subscription[] {
+function groupSubscriptions(quotas: QuotaCard[], now: number): Subscription[] {
   const groups = new Map<string, Subscription>();
   for (const quota of quotas) {
     const key = JSON.stringify([quota.provider, quota.accountKey]);
@@ -452,7 +452,9 @@ function groupSubscriptions(quotas: QuotaCard[]): Subscription[] {
       lowest: 100,
     };
     group.metrics.push(quota);
-    group.lowest = Math.min(group.lowest, quota.remainingPercent ?? 100);
+    // A window that has rolled over is no longer running low.
+    const remaining = quotaHasReset(quota.resetsAt, quota.fetchedAt, now) ? 100 : (quota.remainingPercent ?? 100);
+    group.lowest = Math.min(group.lowest, remaining);
     if (Date.parse(quota.fetchedAt) > Date.parse(group.fetchedAt)) group.fetchedAt = quota.fetchedAt;
     groups.set(key, group);
   }
@@ -466,7 +468,7 @@ function Limits() {
   const { checkingMachines } = useSyncStatus();
   const quotas = useQuotasQuery();
   const now = useNow();
-  const subscriptions = useMemo(() => groupSubscriptions(quotas.data ?? []), [quotas.data]);
+  const subscriptions = useMemo(() => groupSubscriptions(quotas.data ?? [], now), [quotas.data, now]);
   if (quotas.data === undefined) return null;
   return (
     <>

@@ -149,3 +149,12 @@ test("a quota reading taken before its reset is recognised as rolled over", asyn
   expect(quotaHasReset("2026-11-09", "2026-11-08T00:00:00Z", now)).toBe(true);
   expect(quotaHasReset(null, "2026-11-08T00:00:00Z", now)).toBe(false);
 });
+
+test("token counts just under a billion round into billions, and odd mode ids stay plain labels", async () => {
+  expect(formatTokens(999_499_999)).toBe("999M");
+  expect(formatTokens(999_500_000)).toBe("1.00B");
+  expect(formatTokens(999_994_999)).toBe("1.00B");
+  const { modeMeta } = await import("../src/lib/power-mode-meta");
+  expect(modeMeta("constructor")).toMatchObject({ label: "Constructor", glyph: "dot" });
+  expect(modeMeta("balanced").glyph).toBe("balance");
+});
