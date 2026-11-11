@@ -677,3 +677,36 @@ test("health requests reuse the resident sampler's reading instead of probing ea
   expect(await history.since(0)).toHaveLength(2);
   expect(calls).toBe(2);
 });
+
+test("/live/digests lists one digest per UTC day and only a changed day's digest moves", async () => {
+  const { parseLiveDigestsPage, parseLivePing } = await import("@burn/sync-api");
+  const DAY = 86_400_000;
+  const row = (key: string, timestamp: number, cost = 0.1) => ({ ...EXPORTER_ROW_WITH_KEY, dedup_key: key, timestamp, cost });
+  let rows = [row("a", 100 * DAY + 5), row("b", 100 * DAY + 9), row("c", 101 * DAY + 1), row("d", 103 * DAY)];
+  let time = Date.parse("2026-09-07T10:05:00.000Z");
+  const fetch = createLiveFetch(deps({ now: () => time, exporterScan: async () => rows.map((r) => JSON.stringify(r)).join("\n") }));
+  const digests = async () => parseLiveDigestsPage(await (await fetch(new Request("http://machine/live/digests"))).json());
+  expect(parseLivePing(await (await fetch(new Request("http://machine/ping"))).json()).capabilities).toContain("day-digests");
+
+  const first = await digests();
+  expect(first.days.map(([day]) => day)).toEqual([100, 101, 103]);
+  expect(new Set(first.days.map(([, digest]) => digest)).size).toBe(3);
+  // The list names the snapshot the event pages come from.
+  const page = await (await fetch(new Request("http://machine/live/events?limit=10"))).json();
+  expect(first.snapshotId).toBe(page.snapshotId);
+  expect(first.contentHash).toBe(page.contentHash);
+
+  // A correction on day 101 and a new day leave days 100 and 103 untouched.
+  rows = [rows[0]!, rows[1]!, row("c", 101 * DAY + 1, 0.2), rows[3]!, row("e", 104 * DAY)];
+  time += 31_000;
+  const second = await digests();
+  const by = (page: typeof first) => Object.fromEntries(page.days);
+  expect(by(second)[100]).toBe(by(first)[100]!);
+  expect(by(second)[103]).toBe(by(first)[103]!);
+  expect(by(second)[101]).not.toBe(by(first)[101]);
+  expect(second.days.map(([day]) => day)).toEqual([100, 101, 103, 104]);
+  expect(second.snapshotId).not.toBe(first.snapshotId);
+
+  expect(() => parseLiveDigestsPage({ ...second, days: [[5, "x"], [5, "y"]] })).toThrow("ascend");
+  expect(() => parseLiveDigestsPage({ ...second, days: [[5]] })).toThrow("expected [day, digest]");
+});

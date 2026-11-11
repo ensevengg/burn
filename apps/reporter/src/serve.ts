@@ -1,13 +1,14 @@
 import { SystemMetricHistory } from "./system-metrics";
 import { gzipSync } from "node:zlib";
 import { networkInterfaces } from "node:os";
-import { MachineSnapshots, QuotaSnapshots, snapshotsFor } from "./snapshots";
+import { MachineSnapshots, QuotaSnapshots, snapshotDayDigests, snapshotsFor } from "./snapshots";
 /** Machine backend bound to the tailnet (or loopback for local diagnostics).
  * Serves validated, priced tokscale rows and vendor quotas from shared
  * snapshots, read-only. The phone owns incremental cursors and history
  * storage. The one write is the opt-in power-mode control (ADR 0004). */
 import {
   CONTROL_HEADER,
+  DAY_DIGESTS_CAPABILITY,
   EVENT_EXPORT_SCHEMA,
   POWER_MODE_CAPABILITY,
   POWER_MODE_PATH,
@@ -203,7 +204,7 @@ export function createLiveFetch(
     const controls = control !== null && (await control.supported()) ? [POWER_MODE_CAPABILITY] : [];
     return {
       protocol: 1 as const,
-      capabilities: ["paged-events", "content-hash", "machine-metrics", "newest-first-pages", ...controls],
+      capabilities: ["paged-events", "content-hash", "machine-metrics", "newest-first-pages", DAY_DIGESTS_CAPABILITY, ...controls],
       ready: snapshots.peek() !== null,
       scanAgeMs: snapshots.peek()
         ? now() - Date.parse(snapshots.peek()!.generatedAt)
@@ -352,6 +353,22 @@ export function createLiveFetch(
             pageKey,
             headers,
           );
+        } catch (err) {
+          return jsonResponse(
+            { error: errorText(err) },
+            errorText(err).includes("not found") ? 503 : 500,
+          );
+        }
+      }
+      case "/live/digests": {
+        try {
+          const snapshot = await snapshots.get();
+          return respond(req, {
+            snapshotId: snapshot.id,
+            contentHash: snapshot.contentHash,
+            generatedAt: snapshot.generatedAt,
+            days: snapshotDayDigests(snapshot),
+          });
         } catch (err) {
           return jsonResponse(
             { error: errorText(err) },

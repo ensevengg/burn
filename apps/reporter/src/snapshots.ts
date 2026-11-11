@@ -20,6 +20,32 @@ export interface MachineSnapshot {
   scanMs: number;
   events: MachineEventInput[];
 }
+const dayDigests = new WeakMap<MachineSnapshot, [number, string][]>();
+/** Per-UTC-day content digests of a snapshot, computed once per snapshot.
+ * Events are already ordered, so each day's rows hash in a stable order. */
+export function snapshotDayDigests(snapshot: MachineSnapshot): [number, string][] {
+  let days = dayDigests.get(snapshot);
+  if (days) return days;
+  days = [];
+  let day = -1;
+  let hash = createHash("sha256");
+  const close = () => {
+    if (day >= 0) days!.push([day, hash.digest("hex").slice(0, 24)]);
+  };
+  for (const event of snapshot.events) {
+    const eventDay = Math.floor(event.occurredAtMs / 86_400_000);
+    if (eventDay !== day) {
+      close();
+      day = eventDay;
+      hash = createHash("sha256");
+    }
+    hash.update(JSON.stringify(event)).update("\n");
+  }
+  close();
+  dayDigests.set(snapshot, days);
+  return days;
+}
+
 interface SnapshotDeps {
   now?: () => number;
   scan?: (sinceMs: number) => Promise<string>;

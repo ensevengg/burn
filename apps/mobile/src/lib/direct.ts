@@ -12,7 +12,9 @@ import {
  * scan-start cursors, atomically commits page continuation, and periodically
  * reconciles full history to pick up old parser/pricing corrections. */
 import {
+  DAY_DIGESTS_CAPABILITY,
   LIVE_OVERLAP_MS,
+  earliestChangedDayMs,
   httpLiveApiFor,
   validateLiveApi,
   LiveError,
@@ -118,6 +120,13 @@ function legacyCursorKey(envId: string): string {
  * snapshot's whole history, so an identical snapshot needs no re-download. */
 function fullHashKey(envId: string): string {
   return `direct_full_hash_${envId}`;
+}
+
+/** Per-UTC-day digests of the snapshot the last completed reconciliation
+ * brought this phone level with (JSON `{[day]: digest}`); `pending` holds
+ * the digests of the snapshot a reconciliation in progress is downloading. */
+function digestsKey(envId: string, pending = false): string {
+  return `direct_digests_${pending ? "pending_" : ""}${envId}`;
 }
 
 /** Set when a machine reports a different tokscale pin; a parser change can
@@ -358,6 +367,8 @@ export async function removeDirectMachine(
         `direct_backfill_${environmentId}`,
         `direct_full_at_${environmentId}`,
         fullHashKey(environmentId),
+        digestsKey(environmentId),
+        digestsKey(environmentId, true),
         reparseKey(environmentId),
         capabilitiesKey(environmentId),
       ])
@@ -713,9 +724,56 @@ async function pullDirectUnlocked(
               lastFull === null ||
               now() < lastFull ||
               now() - lastFull >= 86_400_000);
+          // A reconciliation need not re-download days the machine has not
+          // touched. The machine lists a digest per UTC day; the days this
+          // phone already holds at the same digest are skipped by starting
+          // the window at the earliest day that differs. An explicit full
+          // refresh, a parser change, a clock rollback and a first sync still
+          // start from zero. The digests are fetched either way, to be kept
+          // once this reconciliation completes.
+          let digestSince: number | null = null;
+          if (
+            reconciliation &&
+            !progress &&
+            api.digests &&
+            ping.capabilities?.includes(DAY_DIGESTS_CAPABILITY)
+          ) {
+            const timeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 120_000);
+            try {
+              const listed = await api.digests(timeout.signal);
+              assertActive();
+              const heldRaw = (
+                await db.getFirstAsync<{ value: string }>("select value from kv where key=?", [
+                  digestsKey(machine.id),
+                ])
+              )?.value;
+              const held: Record<string, string> | null = heldRaw ? JSON.parse(heldRaw) : null;
+              if (!options.full && !reparse && !rolledBack && stored !== null && held !== null)
+                digestSince = earliestChangedDayMs(held, listed.days);
+              await withWriteLock(async () => {
+                assertActive();
+                await kvSetString(
+                  db,
+                  digestsKey(machine.id, true),
+                  JSON.stringify({ snapshotId: listed.snapshotId, days: Object.fromEntries(listed.days) }),
+                );
+              });
+            } catch (err) {
+              assertActive();
+              // Digests only save work; without them the window is the whole history.
+              digestSince = null;
+              await withWriteLock(async () => {
+                assertActive();
+                await kvDelete(db, digestsKey(machine.id, true));
+              });
+              if (!(err instanceof LiveError)) throw err;
+            } finally {
+              timeout.cancel();
+            }
+          }
           const since =
             progress?.since ??
-            (reconciliation ? 0 : Math.max(0, stored! - LIVE_OVERLAP_MS));
+            (reconciliation ? (digestSince ?? 0) : Math.max(0, stored! - LIVE_OVERLAP_MS));
           const hashKey = `direct_hash_${machine.id}`;
           const oldHash = options.full
             ? null
@@ -845,23 +903,51 @@ async function pullDirectUnlocked(
                   // phone last reconciled: nothing to download or retire.
                   if (reconciliation && page.notModified)
                     await kvSetString(db, `direct_full_at_${machine.id}`, String(now()));
-                  if (reconciliation && parserVersion !== undefined) {
-                    changed += await dropSupersededEvents(db, machine.id, parserVersion);
+                  // Day digests describe one snapshot. They are kept only when
+                  // the pages came from that same snapshot; a window that began
+                  // after day zero proves the whole history only in that case.
+                  const pendingRaw = reconciliation
+                    ? (
+                        await db.getFirstAsync<{ value: string }>("select value from kv where key=?", [
+                          digestsKey(machine.id, true),
+                        ])
+                      )?.value
+                    : undefined;
+                  const pendingDigests: { snapshotId: string; days: Record<string, string> } | null =
+                    pendingRaw ? JSON.parse(pendingRaw) : null;
+                  const sameSnapshot = pendingDigests !== null && pendingDigests.snapshotId === snapshotId;
+                  const wholeHistory = since === 0 || sameSnapshot;
+                  // A window that began after day zero can be empty (a day's
+                  // rows disappeared and nothing newer exists) and still be a
+                  // completed reconciliation: the earlier days were verified
+                  // by digest against this very snapshot.
+                  const verifiedEmptyWindow = parserVersion === undefined && since > 0 && sameSnapshot;
+                  if (reconciliation && verifiedEmptyWindow) await forgetReconciliation(db, machine.id);
+                  if (reconciliation && (parserVersion !== undefined || verifiedEmptyWindow)) {
+                    if (parserVersion !== undefined)
+                      changed += await dropSupersededEvents(db, machine.id, parserVersion);
                     await kvSetString(
                       db,
                       `direct_full_at_${machine.id}`,
                       String(now()),
                     );
-                    if (contentHash) await kvSetString(db, fullHashKey(machine.id), contentHash);
+                    if (contentHash && wholeHistory) await kvSetString(db, fullHashKey(machine.id), contentHash);
+                    else if (!wholeHistory) await kvDelete(db, fullHashKey(machine.id));
+                    if (sameSnapshot)
+                      await kvSetString(db, digestsKey(machine.id), JSON.stringify(pendingDigests!.days));
                     // A re-registration may have recorded a newer pin while this
                     // pass ran; only the pin this snapshot parsed is satisfied.
                     const pending = await db.getFirstAsync<{ value: string }>(
                       "select value from kv where key=?",
                       [reparseKey(machine.id)],
                     );
-                    if (pending === null || pinParser(pending.value) === parserVersion)
+                    if (
+                      parserVersion !== undefined &&
+                      (pending === null || pinParser(pending.value) === parserVersion)
+                    )
                       await kvDelete(db, reparseKey(machine.id));
                   }
+                  if (reconciliation) await kvDelete(db, digestsKey(machine.id, true));
                   await kvDelete(db, progressKey);
                 } else {
                   await kvSetString(
