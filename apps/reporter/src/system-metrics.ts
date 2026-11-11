@@ -174,8 +174,12 @@ export class SystemMetricHistory {
     return pending;
   }
 
+  /** The resident sampler runs every 30 seconds, so a request only waits for
+   * a reading of its own when the newest one is older than that cadence. */
   async since(sinceMs: number): Promise<MachineMetricInput[]> {
-    await this.sample();
+    const newest = this.samples.at(-1)?.capturedAtMs;
+    const age = newest === undefined ? Infinity : this.now() - newest;
+    if (age < 0 || age > 35_000) await this.sample();
     return this.samples.filter((sample) => sample.capturedAtMs >= sinceMs);
   }
 }

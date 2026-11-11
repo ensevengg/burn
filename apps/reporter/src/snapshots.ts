@@ -29,13 +29,23 @@ interface SnapshotDeps {
 }
 
 /** A normalized full snapshot covers every requested window. One scan promise
- * is shared by HTTP consumers; old generations remain briefly pageable. */
+ * is shared by HTTP consumers; old generations remain briefly pageable.
+ *
+ * A resident daemon keeps the snapshot warm (`keepWarm`): scans then run on a
+ * timer instead of inside a phone's request, which otherwise waits for the
+ * exporter (and, once an hour, for tokscale to re-download its pricing data).
+ * Requests are answered from the newest finished snapshot, at most one
+ * refresh interval behind the sources, the same bound the cache TTL gives. */
 export class MachineSnapshots {
   private latest: MachineSnapshot | null = null;
   private pending: Promise<MachineSnapshot> | null = null;
   private checkedAt = -Infinity;
   private sourceFingerprint: string | null = null;
   private refreshedAt = -Infinity;
+  private warm = false;
+  /** The last scan failed: requests wait for the next one so the phone is
+   * told, instead of being served an ever-older snapshot in silence. */
+  private failed = false;
   private readonly history = new Map<
     string,
     { snapshot: MachineSnapshot; touchedAt: number }
@@ -56,19 +66,63 @@ export class MachineSnapshots {
     entry.touchedAt = this.now();
     return entry.snapshot;
   }
-  get(force = false): Promise<MachineSnapshot> {
-    if (this.pending) return this.pending;
-    if (
-      !force &&
-      this.latest &&
+  /** Scan now and on every interval; returns the stop function. Failures are
+   * reported once per distinct message, not once per tick. */
+  keepWarm(intervalMs = 30_000, report: (message: string) => void = () => {}): () => void {
+    this.warm = true;
+    let reported: string | null = null;
+    const tick = () => {
+      if (this.pending || this.fresh()) return;
+      this.refresh(false).then(
+        () => (reported = null),
+        (err: unknown) => {
+          const message = (err as Error).message ?? String(err);
+          if (message !== reported) report(message);
+          reported = message;
+        },
+      );
+    };
+    tick();
+    const timer = setInterval(tick, intervalMs);
+    return () => {
+      clearInterval(timer);
+      this.warm = false;
+    };
+  }
+  private fresh(): boolean {
+    return (
+      this.latest !== null &&
       this.now() >= this.refreshedAt &&
-      this.now() - this.refreshedAt <
-        (this.deps.ttlMs ?? 30_000)
-    )
+      this.now() - this.refreshedAt < (this.deps.ttlMs ?? 30_000)
+    );
+  }
+  get(force = false): Promise<MachineSnapshot> {
+    // Warm stores answer from the finished snapshot while a scan runs. A
+    // forced read, a failed scan or a clock set back behind the snapshot
+    // still waits for a scan.
+    if (!force && this.warm && this.latest && !this.failed && this.now() >= this.latest.startedAtMs) {
+      if (!this.pending && !this.fresh()) void this.refresh(false).catch(() => {});
       return Promise.resolve(this.latest);
-    const pending = this.scan(force).finally(() => {
-      if (this.pending === pending) this.pending = null;
-    });
+    }
+    if (this.pending) return this.pending;
+    if (!force && this.fresh()) return Promise.resolve(this.latest!);
+    return this.refresh(force);
+  }
+  private refresh(force: boolean): Promise<MachineSnapshot> {
+    const pending = this.scan(force)
+      .then(
+        (snapshot) => {
+          this.failed = false;
+          return snapshot;
+        },
+        (err: unknown) => {
+          this.failed = true;
+          throw err;
+        },
+      )
+      .finally(() => {
+        if (this.pending === pending) this.pending = null;
+      });
     this.pending = pending;
     return pending;
   }
@@ -128,6 +182,10 @@ export class MachineSnapshots {
   }
 }
 
+/** Vendor quotas, read through tokscale. A reading is fresh for 45 seconds.
+ * With `serveStaleMs`, an older reading (up to that age) is returned at once
+ * with its true collection time while a refresh runs behind it: provider APIs
+ * take seconds, and the phone shows "checked X ago" either way. */
 export class QuotaSnapshots {
   private cached: { generatedAt: string; quotas: MachineQuotaInput[] } | null =
     null;
@@ -138,15 +196,19 @@ export class QuotaSnapshots {
   constructor(
     private readonly load: () => Promise<MachineQuotaInput[]>,
     private readonly now: () => number = Date.now,
+    private readonly serveStaleMs = 0,
   ) {}
   get() {
-    if (this.pending) return this.pending;
-    if (
-      this.cached &&
-      this.now() >= Date.parse(this.cached.generatedAt) &&
-      this.now() - Date.parse(this.cached.generatedAt) < 45_000
-    )
+    const age = this.cached ? this.now() - Date.parse(this.cached.generatedAt) : NaN;
+    if (this.cached && age >= 0 && age < 45_000) return Promise.resolve(this.cached);
+    if (this.cached && age >= 0 && age < this.serveStaleMs) {
+      // A failed refresh keeps the last reading; its age stays visible.
+      if (!this.pending) void this.refresh().catch(() => {});
       return Promise.resolve(this.cached);
+    }
+    return this.pending ?? this.refresh();
+  }
+  private refresh() {
     const pending = this.load()
       .then((quotas) => {
         this.cached = {
@@ -162,6 +224,8 @@ export class QuotaSnapshots {
     return pending;
   }
 }
+/** How old a quota reading may be and still be answered immediately. */
+export const QUOTA_SERVE_STALE_MS = 10 * 60_000;
 const stores = new Map<
   string,
   { events: MachineSnapshots; quotas: QuotaSnapshots }
@@ -171,8 +235,10 @@ export function snapshotsFor(config: BurnConfig) {
   if (!store) {
     store = {
       events: new MachineSnapshots(config.tokscalePin),
-      quotas: new QuotaSnapshots(async () =>
-        tokscaleQuotaInputs(await fetchUsage(config.tokscalePin)),
+      quotas: new QuotaSnapshots(
+        async () => tokscaleQuotaInputs(await fetchUsage(config.tokscalePin)),
+        Date.now,
+        QUOTA_SERVE_STALE_MS,
       ),
     };
     stores.set(config.tokscalePin, store);

@@ -398,6 +398,12 @@ export async function startLiveServer(
   });
   const sampler = config.osKind === "wsl" ? null : setInterval(sample, 30_000);
   if (sampler) sample();
+  // Injected scans (tests, embedders) get their own cold store in
+  // createLiveFetch; only the shared production store is kept warm.
+  const injected = options.deps?.exporterScan || options.deps?.exporterCheck || options.deps?.now;
+  const stopWarm = injected
+    ? null
+    : snapshotsFor(config).events.keepWarm(10_000, (message) => console.warn(`[scan] ${message}`));
   const boundPort = server.port ?? port;
   return {
     hostname,
@@ -405,6 +411,7 @@ export async function startLiveServer(
     url: `http://${hostname}:${boundPort}`,
     stop: () => {
       if (sampler) clearInterval(sampler);
+      stopWarm?.();
       server.stop(true);
     },
   };

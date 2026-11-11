@@ -557,3 +557,123 @@ describe("power mode control (ADR 0004)", () => {
     expect((await fetcher(new Request("http://machine/live/quotas", { method: "POST" }))).status).toBe(405);
   });
 });
+
+test("a warm store answers from the finished snapshot while the next scan runs", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  let time = 1000;
+  let scans = 0;
+  let release: (() => void) | null = null;
+  let fail = false;
+  const reported: string[] = [];
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    now: () => time, check: async () => CONFIG.tokscalePin,
+    scan: async () => {
+      const n = ++scans;
+      if (n > 1) await new Promise<void>((resolve) => (release = resolve));
+      if (fail) throw new Error("exporter crashed");
+      return JSON.stringify({ ...EXPORTER_ROW_WITH_KEY, dedup_key: `k${n}` });
+    },
+  });
+  const stop = snapshots.keepWarm(1_000_000, (message) => reported.push(message));
+  // The daemon scans at startup, before any phone asks.
+  const first = await snapshots.get();
+  expect(scans).toBe(1);
+  expect(snapshots.peek()).toBe(first);
+
+  // Past the TTL a request is answered at once and starts the refresh itself.
+  time += 31_000;
+  expect(await snapshots.get()).toBe(first);
+  expect(await snapshots.get()).toBe(first);
+  expect(scans).toBe(2);
+  release!();
+  await Bun.sleep(1);
+  const second = await snapshots.get();
+  expect(second.events[0]!.dedupKey).toBe("k2");
+  expect(snapshots.pageSnapshot(first.id)).toBe(first);
+
+  // An explicit full refresh still waits for its own scan.
+  const forced = snapshots.get(true);
+  await Bun.sleep(1);
+  release!();
+  expect((await forced).events[0]!.dedupKey).toBe("k3");
+
+  // A failed background scan is not hidden behind the old snapshot.
+  fail = true;
+  time += 31_000;
+  expect((await snapshots.get()).events[0]!.dedupKey).toBe("k3");
+  await Bun.sleep(1);
+  release!();
+  await Bun.sleep(1);
+  const waiting = snapshots.get();
+  await Bun.sleep(1);
+  release!();
+  await expect(waiting).rejects.toThrow("exporter crashed");
+  fail = false;
+  const recovered = snapshots.get();
+  await Bun.sleep(1);
+  release!();
+  expect((await recovered).events[0]!.dedupKey).toBe("k6");
+  stop();
+});
+
+test("the warm timer reports a failing scan once and stays quiet while it repeats", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  const reported: string[] = [];
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    check: async () => null,
+    scan: async () => "",
+  });
+  const stop = snapshots.keepWarm(5, (message) => reported.push(message));
+  await Bun.sleep(40);
+  stop();
+  expect(reported).toEqual(["burn-events exporter not found on this machine"]);
+});
+
+test("stale-tolerant quotas answer immediately with their true collection time", async () => {
+  const { QuotaSnapshots } = await import("../src/snapshots");
+  let time = Date.parse("2026-09-07T10:00:00.000Z");
+  let loads = 0;
+  let release: (() => void) | null = null;
+  const quotas = new QuotaSnapshots(async () => {
+    if (++loads > 1) await new Promise<void>((resolve) => (release = resolve));
+    return [];
+  }, () => time, 600_000);
+  const first = await quotas.get();
+  time += 44_000;
+  expect(await quotas.get()).toBe(first);
+  expect(loads).toBe(1);
+  // Stale but tolerable: answered now, refreshed behind the response.
+  time += 60_000;
+  const stale = await quotas.get();
+  expect(stale).toBe(first);
+  expect(stale.generatedAt).toBe("2026-09-07T10:00:00.000Z");
+  expect(await quotas.get()).toBe(first);
+  expect(loads).toBe(2);
+  release!();
+  await Bun.sleep(1);
+  expect((await quotas.get()).generatedAt).toBe("2026-09-07T10:01:44.000Z");
+  // Too old to show: the request waits for a real reading.
+  time += 700_000;
+  const waiting = quotas.get();
+  await Bun.sleep(1);
+  release!();
+  expect((await waiting).generatedAt).toBe("2026-09-07T10:13:24.000Z");
+  expect(loads).toBe(3);
+});
+
+test("health requests reuse the resident sampler's reading instead of probing each time", async () => {
+  const { SystemMetricHistory } = await import("../src/system-metrics");
+  let now = 100_000;
+  let calls = 0;
+  const history = new SystemMetricHistory(async () => {
+    calls++;
+    return { capturedAtMs: now, cpuLoadPct: 1, cpuTempC: null, ramUsedPct: 2, ramTempC: null, gpuUtilPct: null, gpuTempC: null };
+  }, () => now);
+  expect(await history.since(0)).toHaveLength(1);
+  now += 20_000;
+  expect(await history.since(0)).toHaveLength(1);
+  expect(calls).toBe(1);
+  now += 20_000;
+  expect(await history.since(0)).toHaveLength(2);
+  expect(calls).toBe(2);
+});
