@@ -135,6 +135,13 @@ test("demo data stops at the moment it is seeded", async () => {
   const earlier = new Set(early.events.map((e) => e.eventId));
   expect(late.events.filter((e) => e.occurredAtMs <= now).every((e) => earlier.has(e.eventId))).toBe(true);
   expect(late.events.length).toBeGreaterThan(early.events.length);
+  // Mid-afternoon, with part of the day's work already generated: every row
+  // seeded then is in the later seed, unchanged.
+  const midday = generateDemoDataset(Date.parse("2026-11-11T09:30:00Z"));
+  expect(midday.events.length).toBeGreaterThan(early.events.length);
+  expect(late.events.length).toBeGreaterThan(midday.events.length);
+  const lateById = new Map(late.events.map((e) => [e.eventId, e]));
+  expect(midday.events.every((e) => JSON.stringify(lateById.get(e.eventId)) === JSON.stringify(e))).toBe(true);
 });
 
 test("a quota reading taken before its reset is recognised as rolled over", async () => {
