@@ -1,6 +1,8 @@
 import { TOKSCALE_PIN } from "@burn/sync-api";
 import { platform, userInfo } from "node:os";
-import { configSchema, loadConfig, saveConfig, configPath, type BurnConfig } from "./config.js";
+import {
+  configSchema, loadConfig, saveConfig, configPath, defaultIdentity, detectOsKind, type BurnConfig,
+} from "./config.js";
 import { fetchUsage, tokscaleVersion } from "./tokscale.js";
 import { exporterVersion, exporterCapabilities } from "./exporter.js";
 import { runServe, tailscaleIp } from "./serve.js";
@@ -8,12 +10,7 @@ import { PowerModeController } from "./power-mode.js";
 
 export { REPORTER_VERSION, tokscaleQuotaInputs, currentUtcOffsetMinutes } from "./tokscale.js";
 
-export function detectOsKind(): BurnConfig["osKind"] {
-  if (platform() === "win32") return "windows";
-  if (platform() === "darwin") return "macos";
-  if (process.env["WSL_DISTRO_NAME"]) return "wsl";
-  return "linux";
-}
+export { detectOsKind };
 
 export function printConfigured(config: BurnConfig): void {
   console.log(`environment  ${config.environmentSlug} (${config.environmentName})`);
@@ -22,20 +19,21 @@ export function printConfigured(config: BurnConfig): void {
 }
 
 export function runInit(args: Map<string, string>): void {
-  const missing = ["slug", "name"].filter((key) => !args.get(key));
-  if (missing.length) throw new Error("init requires --slug <machine-slug> --name <display-name>");
+  // Every flag is optional: an unnamed machine is named after its hostname.
+  const osKind = configSchema.shape.osKind.parse(args.get("os") ?? detectOsKind());
+  const defaults = defaultIdentity(osKind);
   const config = configSchema.parse({
-    environmentSlug: args.get("slug"),
-    environmentName: args.get("name"),
-    hostGroup: args.get("host-group") ?? null,
-    osKind: args.get("os") ?? detectOsKind(),
-    reportingTimezone: args.get("tz") ?? "Asia/Kolkata",
+    environmentSlug: args.get("slug") ?? defaults.environmentSlug,
+    environmentName: args.get("name") ?? defaults.environmentName,
+    hostGroup: args.get("host-group") ?? defaults.hostGroup,
+    osKind,
+    reportingTimezone: args.get("tz") ?? defaults.reportingTimezone,
     tokscalePin: args.get("tokscale-pin") ?? TOKSCALE_PIN,
   });
   saveConfig(config);
   printConfigured(config);
   console.log(`config       ${configPath()}`);
-  console.log("\nRun npx burn-report daemon, then add its printed URL on your phone's Machines tab. Both devices must be on your tailnet.");
+  console.log("\nRun burn-report daemon, then add this machine on your phone's Machines tab. Both devices must be on your tailnet.");
 }
 
 export async function runDoctor(): Promise<number> {
@@ -50,9 +48,10 @@ export async function runDoctor(): Promise<number> {
   const checks = [
     { name: "tokscale", ok: tokscale !== null, detail: tokscale ? `reachable at pin ${config.tokscalePin}` : `npx tokscale@${config.tokscalePin} failed` },
     { name: "burn-events", ok: exporter === config.tokscalePin && supportsFingerprint, detail: exporter === null ? "exporter not found — install the pinned burn-events binary (or set BURN_EVENTS_BIN)" : exporter === config.tokscalePin && supportsFingerprint ? `matches pin ${config.tokscalePin}; fingerprint cache supported` : exporter === config.tokscalePin ? "fingerprint-v1 capability is missing — rebuild: cargo install --path crates/burn-events" : `version ${exporter} differs from pin ${config.tokscalePin} — rebuild the exporter` },
-    { name: "Tailscale", ok: address !== null, detail: address ?? "no tailnet IPv4 address — start Tailscale before serving this machine" },
+    { name: "Tailscale", ok: address !== null, detail: address ?? "no tailnet IPv4 address — start Tailscale; the daemon binds to it as soon as it appears" },
   ];
   for (const check of checks) console.log(`${check.ok ? "ok" : "FAIL"} ${check.name}: ${check.detail}`);
+  if (address !== null) console.log(`\nOn the phone, add: http://${address}:8787 (or this machine's Tailscale name)`);
   return checks.every((check) => check.ok) ? 0 : 1;
 }
 

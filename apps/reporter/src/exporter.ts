@@ -9,6 +9,8 @@
  * loudly rather than served with mixed parser provenance.
  */
 import { platform } from "node:os";
+import { dirname, join } from "node:path";
+import { configDir } from "./config.js";
 import { spawnRunner, TokscaleError, type Runner } from "./tokscale.js";
 
 export class ExporterError extends Error {
@@ -68,6 +70,11 @@ export async function resolveExporter(): Promise<Runner> {
   if (cachedExporter !== null && cachedExporter.override === override) return cachedExporter.runner;
   const candidates: Runner[] = [];
   if (override) candidates.push({ command: override, prefix: [] });
+  // A downloaded release sits next to burn-report (or in burn's config
+  // directory); neither needs a PATH entry or an environment variable.
+  const binary = platform() === "win32" ? "burn-events.exe" : "burn-events";
+  for (const directory of [dirname(process.execPath), join(configDir(), "bin")])
+    candidates.push({ command: join(directory, binary), prefix: [] });
   candidates.push({ command: "burn-events", prefix: [] });
   if (platform() === "win32") candidates.push({ command: "burn-events.exe", prefix: [] });
 
@@ -80,11 +87,11 @@ export async function resolveExporter(): Promise<Runner> {
       /* probe the next location */
     }
   }
-  const tried = override ? `${override}, burn-events` : "burn-events on PATH";
+  const tried = override ? `${override}, burn-events` : "next to burn-report, in burn's config directory and on PATH";
   throw new ExporterError(
     `burn-events exporter not found (tried ${tried}). ` +
-      `Install it once per machine: cargo install --path crates/burn-events ` +
-      `— or download a release binary and point BURN_EVENTS_BIN at it.`,
+      `Put the release binary next to burn-report, or build it: cargo install --path crates/burn-events ` +
+      `(BURN_EVENTS_BIN points at any other location).`,
   );
 }
 

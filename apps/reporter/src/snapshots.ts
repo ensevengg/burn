@@ -42,7 +42,7 @@ export class MachineSnapshots {
   private checkedAt = -Infinity;
   private sourceFingerprint: string | null = null;
   private refreshedAt = -Infinity;
-  private warm = false;
+  private warmers = 0;
   /** The last scan failed: requests wait for the next one so the phone is
    * told, instead of being served an ever-older snapshot in silence. */
   private failed = false;
@@ -69,7 +69,7 @@ export class MachineSnapshots {
   /** Scan now and on every interval; returns the stop function. Failures are
    * reported once per distinct message, not once per tick. */
   keepWarm(intervalMs = 30_000, report: (message: string) => void = () => {}): () => void {
-    this.warm = true;
+    this.warmers++;
     let reported: string | null = null;
     const tick = () => {
       if (this.pending || this.fresh()) return;
@@ -86,7 +86,7 @@ export class MachineSnapshots {
     const timer = setInterval(tick, intervalMs);
     return () => {
       clearInterval(timer);
-      this.warm = false;
+      this.warmers--;
     };
   }
   private fresh(): boolean {
@@ -100,7 +100,7 @@ export class MachineSnapshots {
     // Warm stores answer from the finished snapshot while a scan runs. A
     // forced read, a failed scan or a clock set back behind the snapshot
     // still waits for a scan.
-    if (!force && this.warm && this.latest && !this.failed && this.now() >= this.latest.startedAtMs) {
+    if (!force && this.warmers > 0 && this.latest && !this.failed && this.now() >= this.latest.startedAtMs) {
       if (!this.pending && !this.fresh()) void this.refresh(false).catch(() => {});
       return Promise.resolve(this.latest);
     }

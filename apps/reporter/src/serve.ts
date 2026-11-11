@@ -1,5 +1,6 @@
 import { SystemMetricHistory } from "./system-metrics";
 import { gzipSync } from "node:zlib";
+import { networkInterfaces } from "node:os";
 import { MachineSnapshots, QuotaSnapshots, snapshotsFor } from "./snapshots";
 /** Machine backend bound to the tailnet (or loopback for local diagnostics).
  * Serves validated, priced tokscale rows and vendor quotas from shared
@@ -14,7 +15,7 @@ import {
   type MachineQuotaInput,
 } from "@burn/sync-api";
 import { ControlError, PowerModeController } from "./power-mode.js";
-import { loadConfig, type BurnConfig } from "./config.js";
+import { configPath, loadOrInitConfig, type BurnConfig } from "./config.js";
 import {
   fetchUsage,
   spawnRunner,
@@ -41,7 +42,23 @@ export interface LiveServerHandle {
   stop(): void;
 }
 
-/** Resolve the tailnet IPv4 via the tailscale CLI, or null when absent. */
+/** This machine's address in Tailscale's range (100.64.0.0/10), read from the
+ * network interfaces. Needs no CLI, which the macOS App Store and some
+ * Windows installs do not put on PATH. */
+export function tailnetAddress(
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): string | null {
+  for (const addresses of Object.values(interfaces))
+    for (const entry of addresses ?? []) {
+      if (entry.family !== "IPv4" || entry.internal) continue;
+      const [a, b] = entry.address.split(".").map(Number);
+      if (a === 100 && b !== undefined && b >= 64 && b <= 127) return entry.address;
+    }
+  return null;
+}
+
+/** Resolve the tailnet IPv4: the tailscale CLI when it is on PATH (it knows
+ * which interface is Tailscale's), else the interface in Tailscale's range. */
 export async function tailscaleIp(timeoutMs = 5_000): Promise<string | null> {
   try {
     const { stdout } = await spawnRunner(
@@ -49,10 +66,12 @@ export async function tailscaleIp(timeoutMs = 5_000): Promise<string | null> {
       ["ip", "-4"],
       timeoutMs,
     );
-    return /^(\d+\.\d+\.\d+\.\d+)\s*$/m.exec(stdout)?.[1] ?? null;
+    const address = /^(\d+\.\d+\.\d+\.\d+)\s*$/m.exec(stdout)?.[1];
+    if (address) return address;
   } catch {
-    return null;
+    /* no CLI, or Tailscale is stopped */
   }
+  return tailnetAddress();
 }
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -378,12 +397,16 @@ export async function startLiveServer(
     bind?: string;
     port?: number;
     deps?: Omit<LiveDeps, "config">;
+    /** Tailnet address lookup; injectable for tests. */
+    detect?: () => Promise<string | null>;
+    /** Suppress the loopback warning (the supervisor prints its own). */
+    quiet?: boolean;
   } = {},
 ): Promise<LiveServerHandle> {
-  const detected = options.bind ? null : await tailscaleIp();
+  const detected = options.bind ? null : await (options.detect ?? tailscaleIp)();
   const hostname = options.bind ?? detected ?? "127.0.0.1";
   const port = options.port ?? 8787;
-  if (!options.bind && detected === null) {
+  if (!options.bind && detected === null && !options.quiet) {
     console.warn(
       "[live] tailscale not detected — binding 127.0.0.1 (phone cannot reach this)",
     );
@@ -417,9 +440,70 @@ export async function startLiveServer(
   };
 }
 
+/**
+ * A server that follows Tailscale. Started at boot, a daemon usually runs
+ * before Tailscale has an address; binding loopback once and staying there
+ * left the machine unreachable until someone restarted it. This keeps
+ * looking and moves to the tailnet address when it appears (or changes),
+ * starting the new listener before stopping the old one.
+ */
+export async function superviseLiveServer(
+  config: BurnConfig,
+  options: {
+    bind?: string;
+    port?: number;
+    deps?: Omit<LiveDeps, "config">;
+    detect?: () => Promise<string | null>;
+    pollMs?: number;
+    onBound?: (live: LiveServerHandle, tailnet: boolean) => void;
+  } = {},
+): Promise<{ current(): LiveServerHandle; stop(): void }> {
+  const detect = options.detect ?? tailscaleIp;
+  // One history across rebinds: the phone's 24-hour health view survives.
+  const deps = { ...options.deps, metrics: options.deps?.metrics ?? new SystemMetricHistory() };
+  const base = {
+    deps,
+    quiet: true,
+    ...(options.port === undefined ? {} : { port: options.port }),
+  };
+  const first = options.bind ? options.bind : await detect();
+  let live = await startLiveServer(config, { ...base, bind: first ?? "127.0.0.1" });
+  options.onBound?.(live, options.bind !== undefined || first !== null);
+  if (options.bind) return { current: () => live, stop: () => live.stop() };
+  let busy = false;
+  const watcher = setInterval(() => {
+    if (busy) return;
+    busy = true;
+    void (async () => {
+      const address = await detect();
+      if (address === null || address === live.hostname) return;
+      // Same port on the new address, so a phone that registered this
+      // machine by name keeps working.
+      const next = await startLiveServer(config, { ...base, bind: address, port: live.port });
+      live.stop();
+      live = next;
+      options.onBound?.(live, true);
+    })()
+      .catch((err) => console.warn(`[serve] could not move to the tailnet address: ${errorText(err)}`))
+      .finally(() => (busy = false));
+  }, options.pollMs ?? 10_000);
+  return {
+    current: () => live,
+    stop: () => {
+      clearInterval(watcher);
+      live.stop();
+    },
+  };
+}
+
 /** Run until interrupted; binding failures fail the command. */
 export async function runServe(args: Map<string, string>): Promise<void> {
-  const config = loadConfig();
+  const { config, created } = loadOrInitConfig();
+  if (created)
+    console.log(
+      `[serve] first run: this machine is "${config.environmentName}" (${config.environmentSlug}). ` +
+        `Rename it with: burn-report init --slug … --name …  (config: ${configPath()})`,
+    );
   const options: { bind?: string; port?: number } = {};
   const bind = args.get("bind");
   if (bind) options.bind = bind;
@@ -429,9 +513,20 @@ export async function runServe(args: Map<string, string>): Promise<void> {
     if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535)
       throw new Error("--port must be an integer between 1 and 65535");
   }
-  const live = await startLiveServer(config, options);
-  console.log(`[serve] ${config.environmentSlug} at ${live.url}`);
-  console.log("Add this URL on your phone's Machines tab. Keep this process running.");
+  const live = await superviseLiveServer(config, {
+    ...options,
+    onBound: (bound, tailnet) => {
+      if (tailnet) {
+        console.log(`[serve] ${config.environmentSlug} at ${bound.url}`);
+        console.log("Add this address (or this machine's Tailscale name) on your phone's Machines tab. Keep this process running.");
+      } else {
+        console.warn(
+          `[serve] Tailscale has no address yet — listening on ${bound.url} only (the phone cannot reach this). ` +
+            "Waiting for Tailscale; no restart needed.",
+        );
+      }
+    },
+  });
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       process.removeListener("SIGINT", shutdown);

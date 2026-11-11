@@ -11,7 +11,7 @@ import {
   renameSync,
   unlinkSync,
 } from "node:fs";
-import { homedir, platform } from "node:os";
+import { homedir, hostname, platform } from "node:os";
 import { join } from "node:path";
 import { TOKSCALE_PIN } from "@burn/sync-api";
 import { z } from "zod";
@@ -51,6 +51,38 @@ function atLeastCheckoutPin(saved: string): string {
 }
 
 export type BurnConfig = z.infer<typeof configSchema>;
+
+export function detectOsKind(): BurnConfig["osKind"] {
+  if (platform() === "win32") return "windows";
+  if (platform() === "darwin") return "macos";
+  if (process.env["WSL_DISTRO_NAME"]) return "wsl";
+  return "linux";
+}
+
+/**
+ * Identity for a machine nobody has named: its hostname. WSL reports its
+ * Windows host's name, so the WSL reporter gets a `-wsl` suffix (slugs must
+ * differ per install) and both share that name as their host group.
+ */
+export function defaultIdentity(
+  osKind: BurnConfig["osKind"] = detectOsKind(),
+  host: string = hostname(),
+): Pick<BurnConfig, "environmentSlug" | "environmentName" | "hostGroup" | "reportingTimezone"> {
+  const short = host.split(".")[0] || "machine";
+  const base = short.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "machine";
+  let zone = "Asia/Kolkata";
+  try {
+    zone = Intl.DateTimeFormat().resolvedOptions().timeZone || zone;
+  } catch {
+    /* keep the schema default */
+  }
+  return {
+    environmentSlug: osKind === "wsl" ? `${base}-wsl` : base,
+    environmentName: osKind === "wsl" ? `${short} (WSL)` : short,
+    hostGroup: osKind === "wsl" || osKind === "windows" ? base : null,
+    reportingTimezone: zone,
+  };
+}
 
 export function configDir(): string {
   const override = process.env["BURN_CONFIG_DIR"];
@@ -103,6 +135,15 @@ export function loadConfig(): BurnConfig {
   }
   removeLegacySetup();
   return parsed.data;
+}
+
+/** The saved config, or one created from this machine's defaults: `daemon`
+ * on a fresh machine needs no `init` first. */
+export function loadOrInitConfig(): { config: BurnConfig; created: boolean } {
+  if (existsSync(configPath())) return { config: loadConfig(), created: false };
+  const config = configSchema.parse({ ...defaultIdentity(), osKind: detectOsKind() });
+  saveConfig(config);
+  return { config, created: true };
 }
 
 export function saveConfig(config: BurnConfig): void {
