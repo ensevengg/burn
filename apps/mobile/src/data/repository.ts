@@ -61,6 +61,10 @@ export interface MachineMetricRow {
 
 export interface SystemRow extends EnvironmentRow {
   metrics: MachineMetricRow[];
+  /** Registered endpoint and last advertised capabilities (null/[] for demo
+   * or never-pinged machines); live probes supersede them. */
+  endpoint: string | null;
+  capabilities: string[];
 }
 
 export interface Totals {
@@ -741,8 +745,23 @@ export async function querySystems(db: SQLiteDatabase): Promise<SystemRow[]> {
     });
     byEnvironment.set(environmentId, metrics);
   }
+  const registrations = await db.getAllAsync<{ id: string; base_url: string; caps: string | null }>(
+    `select m.id, m.base_url, kv.value as caps
+       from direct_machines m left join kv on kv.key = 'direct_caps_' || m.id`,
+  );
+  const registered = new Map(registrations.map((row) => [row.id, row]));
+  const capabilities = (raw: string | null | undefined): string[] => {
+    try {
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+    } catch {
+      return [];
+    }
+  };
   return environments.map((environment) => ({
     ...environment,
     metrics: byEnvironment.get(environment.id) ?? [],
+    endpoint: registered.get(environment.id)?.base_url ?? null,
+    capabilities: capabilities(registered.get(environment.id)?.caps),
   }));
 }

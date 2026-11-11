@@ -6,11 +6,13 @@ import { formatRelative } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
-import { gutter, hairline, radius, spacing, type } from "../theme";
+import { hairline, radius, spacing, type } from "../theme";
 import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
 import { FadeIn, PressableScale, TweenText } from "../ui/motion";
 import { Sparkline } from "../ui/charts";
 import { Screen } from "../ui/screen";
+import { PowerModePanel } from "../ui/power-mode";
+import { supportsPowerMode } from "@burn/sync-api";
 
 type MetricKey = "cpuLoadPct" | "cpuTempC" | "ramUsedPct" | "ramTempC" | "gpuUtilPct" | "gpuTempC";
 
@@ -39,7 +41,14 @@ function MetricTile({
   const hot = latest !== null && latest >= warnAt;
   return (
     <View style={[styles.tile, { backgroundColor: C.panelAlt }]}>
-      <Text style={[type.muted, { color: C.muted }]}>{label}</Text>
+      <View style={styles.tileTop}>
+        <Text style={[type.muted, { color: C.muted }]}>{label}</Text>
+        {values.length > 1 && (
+          <Text style={[styles.tileNote, { color: C.faint }]}>
+            {`${Math.round(Math.min(...values))}–${Math.round(Math.max(...values))}${unit}`}
+          </Text>
+        )}
+      </View>
       <View style={styles.tileValueRow}>
         {latest === null ? (
           <Text style={[styles.tileValue, { color: C.faint }]}>—</Text>
@@ -49,16 +58,11 @@ function MetricTile({
         {latest !== null && <Text style={[styles.tileUnit, { color: C.muted }]}>{unit === "°" ? "°C" : "%"}</Text>}
       </View>
       {values.length > 1 ? (
-        <Sparkline values={values} ceiling={100} height={34} color={hot ? C.warn : C.text} />
+        <Sparkline values={values} ceiling={100} height={24} color={hot ? C.warn : C.text} />
       ) : (
-        <View style={{ height: 34, justifyContent: "flex-end" }}>
+        <View style={{ height: 24, justifyContent: "flex-end" }}>
           <Text style={[styles.tileNote, { color: C.faint }]}>{latest === null ? "no sensor" : "first sample"}</Text>
         </View>
-      )}
-      {values.length > 1 && (
-        <Text style={[styles.tileNote, { color: C.faint }]}>
-          {`${Math.round(Math.min(...values))}–${Math.round(Math.max(...values))}${unit} · 24h`}
-        </Text>
       )}
     </View>
   );
@@ -87,9 +91,6 @@ export function SystemsScreen() {
 
   return (
     <Screen title="Systems">
-      <Text style={[type.muted, styles.subtitle, { color: C.muted }]}>
-        Vitals sampled every 30 seconds. Trends cover the trailing 24 hours.
-      </Text>
       {systems.data !== undefined && systems.data.length === 0 && <Empty message="No machines have reported yet." />}
       {reporting.map((system, index) => {
         const state = machineState(system, now);
@@ -122,6 +123,16 @@ export function SystemsScreen() {
                 <MetricTile label="RAM temp" unit="°" samples={system.metrics} field="ramTempC" warnAt={85} />
                 <MetricTile label="GPU temp" unit="°" samples={system.metrics} field="gpuTempC" warnAt={85} />
               </View>
+              {/* A fresh probe wins; otherwise the stored capabilities keep the
+                  control visible (offline) for a machine unreachable at launch. */}
+              {supportsPowerMode(probe?.capabilities ?? system.capabilities) && (probe?.endpoint ?? system.endpoint) !== null && (
+                <PowerModePanel
+                  machine={{ environmentId: system.id, endpoint: (probe?.endpoint ?? system.endpoint)! }}
+                  // Data errors (e.g. a broken exporter) still mean the machine answers.
+                  online={probe === undefined ? null : probe.state === "live" || probe.state === "error"}
+                  machineName={system.displayName}
+                />
+              )}
             </Card>
           </FadeIn>
         );
@@ -178,14 +189,14 @@ export function SystemsScreen() {
 }
 
 const styles = StyleSheet.create({
-  subtitle: { marginHorizontal: gutter, marginBottom: spacing.m, lineHeight: 18 },
   cardHeader: { flexDirection: "row", alignItems: "center", gap: spacing.s },
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: spacing.s, marginTop: spacing.l },
-  tile: { width: "48.6%", borderRadius: radius.m, padding: spacing.m, paddingBottom: 10 },
-  tileValueRow: { flexDirection: "row", alignItems: "baseline", marginTop: 2, marginBottom: 6 },
-  tileValue: { fontSize: 28, fontWeight: "700", fontVariant: ["tabular-nums"], letterSpacing: -0.8 },
-  tileUnit: { fontSize: 13, fontWeight: "600", marginLeft: 2 },
-  tileNote: { fontSize: 10.5, marginTop: 4, fontVariant: ["tabular-nums"] },
+  grid: { flexDirection: "row", flexWrap: "wrap", gap: spacing.s, marginTop: spacing.m },
+  tile: { width: "48.6%", borderRadius: radius.m - 2, paddingHorizontal: spacing.m, paddingTop: 10, paddingBottom: 10 },
+  tileTop: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", gap: 6 },
+  tileValueRow: { flexDirection: "row", alignItems: "baseline", marginTop: 1, marginBottom: 4 },
+  tileValue: { fontSize: 22, fontWeight: "700", fontVariant: ["tabular-nums"], letterSpacing: -0.6 },
+  tileUnit: { fontSize: 12, fontWeight: "600", marginLeft: 2 },
+  tileNote: { fontSize: 10.5, fontVariant: ["tabular-nums"] },
   quietRow: { paddingVertical: 12 },
   quietTop: { flexDirection: "row", alignItems: "center", gap: 10 },
   quietDot: { width: 8, height: 8, borderRadius: 4, borderWidth: 1.5 },

@@ -15,6 +15,7 @@ import {
   type TextProps,
   type ViewStyle,
 } from "react-native";
+import { mixHex } from "../lib/color";
 import { motion } from "../theme";
 
 /** Expo-out: fast start, long soft landing. */
@@ -51,6 +52,28 @@ export function useTweenedNumber(target: number, duration = 520, from?: number):
     return () => cancelAnimationFrame(frame);
   }, [target, duration, instant]);
   return instant ? target : value;
+}
+
+/** Fade between `#rrggbb` colors on the JS thread; retargeting mid-fade
+ * starts from the color currently shown. */
+export function useTweenedColor(target: string, duration = 450): string {
+  const [color, setColor] = useState(target);
+  const shown = useRef(target);
+  useEffect(() => {
+    const start = shown.current;
+    if (start === target) return;
+    const began = performance.now();
+    let frame = 0;
+    const tick = () => {
+      const t = Math.min(1, (performance.now() - began) / duration);
+      shown.current = mixHex(start, target, 1 - Math.pow(1 - t, 3));
+      setColor(shown.current);
+      if (t < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [target, duration]);
+  return color;
 }
 
 /**
@@ -146,7 +169,7 @@ export function PressableScale({
 }
 
 /** Breathing opacity loop for "in progress" dots. */
-export function Pulse({ active, children }: { active: boolean; children: ReactNode }) {
+export function Pulse({ active, children, style }: { active: boolean; children: ReactNode; style?: StyleProp<ViewStyle> }) {
   const value = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     if (!active) {
@@ -163,7 +186,7 @@ export function Pulse({ active, children }: { active: boolean; children: ReactNo
     loop.start();
     return () => loop.stop();
   }, [active, value]);
-  return <Animated.View style={{ opacity: value }}>{children}</Animated.View>;
+  return <Animated.View style={[style, { opacity: value }]}>{children}</Animated.View>;
 }
 
 /** Shimmer-free skeleton block: a slow opacity breath reads as "loading" without strobing. */

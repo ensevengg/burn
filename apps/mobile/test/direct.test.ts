@@ -9,7 +9,7 @@ import {
   type LiveEventsPage,
   type LivePing,
 } from "@burn/sync-api";
-import { queryWindowOverview } from "../src/data/repository";
+import { querySystems, queryWindowOverview } from "../src/data/repository";
 import { subscribePullProgress, type PullProgress } from "../src/lib/sync-state";
 import { mirrorFixture } from "./mirror-fixture";
 import {
@@ -223,6 +223,33 @@ describe("direct mode registry", () => {
 });
 
 describe("direct pull", () => {
+  test("pull status carries the machine's advertised capabilities, never an impostor's", async () => {
+    const fx = mirrorFixture();
+    const seen: FakeEntry = { seenSince: [], seenPingSignal: null, ping: ping({ capabilities: ["paged-events", "power-mode"] }) };
+    await addDirectMachine(fx.db, "http://win:8787", { apiFor: directApiFor({ "http://win:8787": seen }) });
+    const [live] = await pullDirectFromMachines(fx.db, { apiFor: directApiFor({ "http://win:8787": seen }) });
+    expect(live!.capabilities).toEqual(["paged-events", "power-mode"]);
+
+    seen.ping = ping({ slug: "other", capabilities: ["power-mode"] });
+    const [skipped] = await pullDirectFromMachines(fx.db, { apiFor: directApiFor({ "http://win:8787": seen }) });
+    expect(skipped!.state).toBe("skipped");
+    expect(skipped!.capabilities).toBeUndefined();
+  });
+
+  test("advertised capabilities persist for offline launches and leave with the machine", async () => {
+    const fx = mirrorFixture();
+    const seen: FakeEntry = { seenSince: [], seenPingSignal: null, ping: ping({ capabilities: ["power-mode"] }) };
+    const { id } = await addDirectMachine(fx.db, "http://win:8787", { apiFor: directApiFor({ "http://win:8787": seen }) });
+    await pullDirectFromMachines(fx.db, { apiFor: directApiFor({ "http://win:8787": seen }) });
+    // The machine then goes away; the stored advertisement survives the failed pull.
+    seen.failPing = new LiveUnreachableError("offline");
+    await pullDirectFromMachines(fx.db, { apiFor: directApiFor({ "http://win:8787": seen }) });
+    const [system] = await querySystems(fx.db);
+    expect(system).toMatchObject({ endpoint: "http://win:8787", capabilities: ["power-mode"] });
+    await removeDirectMachine(fx.db, id);
+    expect(await fx.db.getFirstAsync("select value from kv where key = ?", [`direct_caps_${id}`])).toBeNull();
+  });
+
   test("first pull takes full history and atomically sets the cursor", async () => {
     const fx = mirrorFixture();
     const seen: FakeEntry = {

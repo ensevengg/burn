@@ -25,7 +25,7 @@ No servers. No accounts. No telemetry.
 machine: tokscale + burn-events → burn-report daemon ← Tailscale → phone: Expo + SQLite
 ```
 
-- **Machines are the backend:** each runs `burn-report daemon`, a read-only server.
+- **Machines are the backend:** each runs `burn-report daemon`, a read-only server (plus one opt-in control, below).
 - **[tokscale](https://github.com/junhoyeo/tokscale) parses and prices** ~50 AI clients.
 - **The phone pulls over Tailscale** and keeps an offline copy.
 - **Machine offline?** Its history is still there.
@@ -57,6 +57,7 @@ Published CLI: `npx burn-report init --slug my-machine --name "My Machine"`, the
 - **Flags:** `--port 8787`, `--bind <address>`. `serve` is an alias for `daemon`.
 - **No Tailscale?** It falls back to loopback, which the phone can't reach.
 - **Quotas:** `burn-report usage` prints them locally.
+- **Power mode from the phone (Linux, opt-in):** `burn-report controls enable power-mode`, then restart the daemon. Systems gets a fan-speed readout and a mode switch (e.g. Power Saver / Balanced / Performance). `burn-report controls status` shows what the machine offers. It works while you're signed in to the desktop. To also allow it while signed out, install the polkit rule that `burn-report controls polkit-rule` prints. See [ADR 0004](docs/adr/0004-opt-in-machine-controls.md).
 
 ## The app
 
@@ -64,7 +65,7 @@ Published CLI: `npx burn-report init --slug my-machine --name "My Machine"`, the
 |---|---|
 | **Overview** | Spend or tokens, 24h to All. Drag the chart for any day. Agents, cache hits, limits. |
 | **Explore** | Models, agents, workspaces, sessions. Ranked. |
-| **Systems** | RAM, GPU, temps. 24h trends. |
+| **Systems** | RAM, GPU, temps. 24h trends. Live fans and power mode on opted-in Linux machines. |
 | **Machines** | Add by URL. Refresh or reconcile. |
 | **Settings** | Theme, timezone, disconnect. |
 
@@ -95,7 +96,7 @@ Deep dives: [transfer behavior](docs/connection-transfer-fixes.md) · [why Tails
 | Path | What |
 |---|---|
 | `apps/mobile` | Expo Android app |
-| `apps/reporter` | `burn-report` CLI and read-only machine backend |
+| `apps/reporter` | `burn-report` CLI and machine backend (read-only, plus opt-in power mode) |
 | `crates/burn-events` | Pinned Rust exporter of priced tokscale records (JSONL) |
 | `packages/sync-api` | Transport, shared types, validation, mirror keys |
 | `docs` | Decisions, transfer behavior, audits |
@@ -110,6 +111,7 @@ bun run --cwd apps/mobile android   # local Android build; needs JDK + Android S
 
 - **Rules:** [AGENTS.md](AGENTS.md)
 - **Why Tailscale-only:** [ADR 0003](docs/adr/0003-tailscale-only-backend.md)
+- **Why the one write endpoint:** [ADR 0004](docs/adr/0004-opt-in-machine-controls.md)
 
 ## Next up
 

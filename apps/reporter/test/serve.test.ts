@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { BurnConfig } from "../src/config.js";
 import { createLiveFetch, type LiveDeps } from "../src/serve.js";
+import { PowerModeController } from "../src/power-mode.js";
+import { parsePowerModeState } from "@burn/sync-api";
 
 const CONFIG: BurnConfig = {
   environmentSlug: "lenovo-windows",
@@ -481,4 +483,77 @@ test("a missing source fingerprint keeps scanning and a clock rollback renews sc
   const replay = await snapshots.get();
   expect(scans).toBe(4);
   expect(replay.startedAtMs).toBe(1000);
+});
+
+describe("power mode control (ADR 0004)", () => {
+  function control(initial = "balanced") {
+    let mode = initial;
+    const sets: string[] = [];
+    const powerMode = new PowerModeController({
+      detect: async () => ({
+        backend: "power-profiles-daemon",
+        read: async () => ({ mode, modes: ["power-saver", "balanced", "performance"], degraded: null }),
+        set: async (next: string) => {
+          sets.push(next);
+          mode = next;
+        },
+      }),
+      fans: async () => [],
+      sleep: async () => {},
+    });
+    return { powerMode, sets };
+  }
+  const enabled = { ...CONFIG, osKind: "linux" as const, controls: { powerMode: true } };
+  const post = (body: unknown, headers: Record<string, string> = {}) =>
+    new Request("http://machine/controls/power-mode", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-burn-control": "1", ...headers },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  test("off by default: not advertised and every request is refused", async () => {
+    const { powerMode, sets } = control();
+    const fetcher = createLiveFetch(deps({ powerMode }));
+    const ping = (await (await fetcher(new Request("http://machine/ping"))).json()) as { capabilities: string[] };
+    expect(ping.capabilities).not.toContain("power-mode");
+    expect((await fetcher(new Request("http://machine/controls/power-mode"))).status).toBe(404);
+    expect((await fetcher(post({ mode: "performance" }))).status).toBe(404);
+    expect(sets).toEqual([]);
+  });
+
+  test("enabled: advertised, readable and switchable", async () => {
+    const { powerMode, sets } = control();
+    const fetcher = createLiveFetch(deps({ config: enabled, powerMode }));
+    const ping = (await (await fetcher(new Request("http://machine/ping"))).json()) as { capabilities: string[] };
+    expect(ping.capabilities).toContain("power-mode");
+    const read = parsePowerModeState(await (await fetcher(new Request("http://machine/controls/power-mode"))).json());
+    expect(read.mode).toBe("balanced");
+    const response = await fetcher(post({ mode: "performance" }));
+    expect(response.status).toBe(200);
+    expect(parsePowerModeState(await response.json()).mode).toBe("performance");
+    expect(sets).toEqual(["performance"]);
+  });
+
+  test("browser-forgeable and malformed writes never reach the backend", async () => {
+    const { powerMode, sets } = control();
+    const fetcher = createLiveFetch(deps({ config: enabled, powerMode }));
+    const cases: [Request, number][] = [
+      [post({ mode: "performance" }, { origin: "http://evil.example" }), 403],
+      [post({ mode: "performance" }, { "x-burn-control": "" }), 403],
+      [post({ mode: "performance" }, { "content-type": "text/plain" }), 415],
+      [post("{not json"), 400],
+      [post({ mode: "performance", extra: 1 }), 400],
+      [post({ mode: "Performance; reboot" }), 400],
+      [post({ mode: "x".repeat(2_000) }), 413],
+      [post({ mode: "max-power" }), 409],
+      [new Request("http://machine/controls/power-mode", { method: "DELETE" }), 405],
+    ];
+    for (const [request, status] of cases) expect((await fetcher(request)).status).toBe(status);
+    expect(sets).toEqual([]);
+  });
+
+  test("other endpoints stay read-only", async () => {
+    const fetcher = createLiveFetch(deps({ config: enabled, powerMode: control().powerMode }));
+    expect((await fetcher(new Request("http://machine/live/quotas", { method: "POST" }))).status).toBe(405);
+  });
 });

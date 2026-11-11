@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseLiveEventsPage, parseLiveQuotasPage, parseLivePing, httpLiveApiFor } from "../src/live";
+import { parseLiveEventsPage, parseLiveQuotasPage, parseLivePing, httpLiveApiFor, LiveError, LiveUnreachableError } from "../src/live";
 
 test("weak conditional validators preserve the snapshot content hash", async () => {
   const fetchImpl = (async (
@@ -90,4 +90,22 @@ test("vendor quota calendar reset dates survive validation without inventing a r
   expect(parseLiveQuotasPage({ generatedAt, quotas: [quota] }).quotas[0]!.resetsAt).toBe("2026-11-01");
   for (const invalid of ["2026-02-29", "2026-04-31", "2026-13-01", "2026-01-00", "tomorrow"])
     expect(() => parseLiveQuotasPage({ generatedAt, quotas: [{ ...quota, resetsAt: invalid }] })).toThrow();
+});
+
+test("a proxy's empty gateway error means the reporter is unreachable, not a bad payload", async () => {
+  const answer = (status: number, body = "") =>
+    httpLiveApiFor("https://machine.ts.net", (async () => new Response(body, { status })) as unknown as typeof fetch);
+  for (const status of [502, 503, 504]) {
+    const err = await answer(status).ping().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LiveUnreachableError);
+    expect((err as Error).message).toContain(`HTTP ${status}`);
+  }
+  const notFound = await answer(404, "<html>nope</html>").ping().catch((e: unknown) => e);
+  expect(notFound).toBeInstanceOf(LiveError);
+  expect(notFound).not.toBeInstanceOf(LiveUnreachableError);
+  expect((notFound as LiveError).status).toBe(404);
+  // A reporter's own JSON errors keep their message and status.
+  const own = await answer(503, JSON.stringify({ error: "exporter not found" })).ping().catch((e: unknown) => e);
+  expect(own).not.toBeInstanceOf(LiveUnreachableError);
+  expect((own as Error).message).toContain("exporter not found");
 });

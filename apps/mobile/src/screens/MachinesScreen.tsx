@@ -10,7 +10,7 @@ import { useApp, useSyncStatus } from "../lib/app-context";
 import type { DirectPullStatus } from "../lib/direct";
 import { useTheme } from "../lib/theme-context";
 import { confirmDestructive } from "../lib/confirm-destructive";
-import { gutter, hairline, radius, spacing, type } from "../theme";
+import { hairline, radius, spacing, type } from "../theme";
 import { Button, Card, Empty, SectionTitle } from "../ui/primitives";
 import { FadeIn, PressableScale } from "../ui/motion";
 import { Screen, SyncPill } from "../ui/screen";
@@ -18,7 +18,7 @@ import { Sheet } from "../ui/sheet";
 
 export function MachinesScreen() {
   const machines = useMachinesQuery();
-  const { mode, reportingTimezone, addDirectMachine } = useApp();
+  const { mode, addDirectMachine } = useApp();
   const { C } = useTheme();
   const [showAdd, setShowAdd] = useState(false);
 
@@ -44,12 +44,6 @@ export function MachinesScreen() {
   // Machine count is dynamic; each installation is registered by URL.
   return (
     <Screen title="Machines" trailing={trailing}>
-      <Text style={[type.muted, styles.subtitle, { color: C.muted }]}>
-        {mode === "direct"
-          ? `Read directly over Tailscale. Pull down to refresh every machine. Days bucket in ${reportingTimezone}.`
-          : "Demo machines. Connect over Tailscale for live data."}
-      </Text>
-
       {machines.data !== undefined && machines.data.length === 0 ? (
         <Empty message="Add a machine URL to start tracking usage." />
       ) : (
@@ -257,7 +251,6 @@ function AddMachine({
 }
 
 const styles = StyleSheet.create({
-  subtitle: { marginHorizontal: gutter, lineHeight: 18 },
   trailing: { flexDirection: "row", alignItems: "center", gap: 8 },
   addButton: { width: 30, height: 30, borderRadius: 15, alignItems: "center", justifyContent: "center" },
   cardTop: { flexDirection: "row", alignItems: "center", gap: 10 },
