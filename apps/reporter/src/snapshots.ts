@@ -139,9 +139,9 @@ export class MachineSnapshots {
   }
   get(force = false): Promise<MachineSnapshot> {
     // Warm stores answer from the finished snapshot while a scan runs. A
-    // forced read, a failed scan or a clock set back behind the snapshot
-    // still waits for a scan.
-    if (!force && this.warmers > 0 && this.latest && !this.failed && this.now() >= this.latest.startedAtMs) {
+    // forced read, a failed scan or a clock set back behind the last
+    // refresh still waits for a scan.
+    if (!force && this.warmers > 0 && this.latest && !this.failed && this.now() >= this.refreshedAt) {
       if (!this.pending && !this.fresh()) void this.refresh(false).catch(() => {});
       return Promise.resolve(this.latest);
     }

@@ -475,9 +475,12 @@ export function parseLivePeersPage(raw: unknown): LivePeersPage {
     peers: page.peers.map((entry, index) => {
       const peer = expectObject(entry, `peers[${index}]`);
       const url = identity(peer.url, `peers[${index}].url`);
-      // A peer list is another machine's word: only plain tailnet-style
-      // endpoints are accepted, never an arbitrary URL to send the phone to.
-      if (!/^https?:\/\/[A-Za-z0-9.\-[\]:]+$/.test(url)) throw new LiveError(`peers[${index}].url: invalid endpoint`);
+      // A peer list is another machine's word: only an address in
+      // Tailscale's range (100.64.0.0/10) is accepted, which is all a
+      // reporter ever lists, never a name or URL to send the phone elsewhere.
+      const address = /^http:\/\/100\.(\d{1,3})\.\d{1,3}\.\d{1,3}(?::\d{1,5})?$/.exec(url);
+      if (!address || Number(address[1]) < 64 || Number(address[1]) > 127)
+        throw new LiveError(`peers[${index}].url: invalid endpoint`);
       return {
         url,
         slug: identity(peer.slug, `peers[${index}].slug`),

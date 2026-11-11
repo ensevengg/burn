@@ -26,8 +26,10 @@ describe("identity defaults", () => {
     });
     // WSL shares its Windows host's name: distinct slugs, one host group.
     expect(defaultIdentity("windows", "DESKTOP_7")).toMatchObject({
-      environmentSlug: "desktop-7", environmentName: "DESKTOP_7", hostGroup: "desktop-7",
+      environmentSlug: "desktop-7-windows", environmentName: "DESKTOP_7", hostGroup: "desktop-7",
     });
+    // A dual-boot box named the same on both sides is still two machines.
+    expect(defaultIdentity("windows", "Nerve-PC").environmentSlug).not.toBe(defaultIdentity("linux", "Nerve-PC").environmentSlug);
     expect(defaultIdentity("wsl", "DESKTOP_7")).toMatchObject({
       environmentSlug: "desktop-7-wsl", environmentName: "DESKTOP_7 (WSL)", hostGroup: "desktop-7",
     });
@@ -62,7 +64,7 @@ describe("tailnet address", () => {
   test("is the interface address inside 100.64.0.0/10", () => {
     expect(tailnetAddress({ lo: [entry("127.0.0.1", true)], eth0: [entry("192.168.1.9")], tailscale0: [entry("fd7a::1", false, "IPv6"), entry("100.101.102.103")] })).toBe("100.101.102.103");
     expect(tailnetAddress({ eth0: [entry("192.168.1.9"), entry("100.63.0.1"), entry("100.128.0.1"), entry("10.100.64.1")] })).toBeNull();
-    expect(tailnetAddress({ utun4: [entry("100.64.0.1")] })).toBe("100.64.0.1");
+    expect(tailnetAddress({ utun4: [entry("100.64.0.1")] }, "darwin")).toBe("100.64.0.1");
     expect(tailnetAddress({})).toBeNull();
   });
 });
@@ -104,6 +106,26 @@ describe("following Tailscale", () => {
     } finally {
       live.stop();
     }
+  });
+
+  test.skipIf(platform() !== "linux")("a supervisor stopped while it looks for the address opens nothing", async () => {
+    let release: (address: string) => void = () => {};
+    let asked = 0;
+    const bound: string[] = [];
+    const live = await superviseLiveServer(config, {
+      port: 0, deps, pollMs: 5,
+      // The first answer (startup) is "no tailnet"; the poll's answer is held.
+      detect: () => (asked++ === 0 ? Promise.resolve(null) : new Promise<string>((resolve) => (release = resolve))),
+      onBound: (handle) => bound.push(handle.hostname),
+    });
+    const port = live.current().port;
+    while (asked < 2) await Bun.sleep(5);
+    live.stop();
+    release("127.0.0.2");
+    await Bun.sleep(40);
+    expect(bound).toEqual(["127.0.0.1"]);
+    await expect(fetch(`http://127.0.0.2:${port}/ping`)).rejects.toThrow();
+    await expect(fetch(`http://127.0.0.1:${port}/ping`)).rejects.toThrow();
   });
 
   test("an explicit --bind is never moved", async () => {
@@ -198,11 +220,35 @@ describe("peer discovery (ADR 0005)", () => {
     }
   });
 
+  test("a peer that redirects its ping is skipped without following it", async () => {
+    const { PeerDirectory } = await import("../src/peers");
+    let followed = 0;
+    const outside = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => { followed++; return Response.json({}); } });
+    const peer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.redirect(`http://127.0.0.1:${outside.port}/ping`, 302) });
+    try {
+      const directory = new PeerDirectory(8787, {
+        listPeers: async () => ["100.64.0.9"],
+        fetchImpl: ((_input: string, init?: RequestInit) => fetch(`http://127.0.0.1:${peer.port}/ping`, init)) as typeof fetch,
+      });
+      expect(await directory.list()).toEqual([]);
+      expect(followed).toBe(0);
+    } finally {
+      peer.stop(true);
+      outside.stop(true);
+    }
+  });
+
   test("a peer list cannot hand the phone an arbitrary URL", async () => {
     const { parseLivePeersPage } = await import("@burn/sync-api");
     const peer = { url: "http://100.64.0.2:8787", slug: "a", displayName: "A", osKind: "linux" };
     expect(parseLivePeersPage({ peers: [peer] }).peers).toHaveLength(1);
-    for (const url of ["http://evil.example/steal?x=1", "javascript:alert(1)", "http://host/path", "ftp://100.64.0.2"])
+    expect(parseLivePeersPage({ peers: [{ ...peer, url: "http://100.127.255.254" }] }).peers).toHaveLength(1);
+    for (const url of [
+      "http://evil.example/steal?x=1", "javascript:alert(1)", "http://host/path", "ftp://100.64.0.2",
+      // Names and addresses outside Tailscale's range, whatever the port.
+      "http://evil.example:8787", "http://192.168.1.4:8787", "http://100.63.0.1:8787", "http://100.128.0.1:8787",
+      "https://100.64.0.2:8787", "http://100.64.0.2:8787/", "http://100.64.0.2.evil.example:8787",
+    ])
       expect(() => parseLivePeersPage({ peers: [{ ...peer, url }] })).toThrow("invalid endpoint");
     expect(() => parseLivePeersPage({ peers: [{ ...peer, osKind: "plan9" }] })).toThrow();
   });
@@ -212,5 +258,16 @@ test("an interface named for Tailscale wins over another address in the shared r
   const entry = (address: string) => ({ address, internal: false, family: "IPv4", netmask: "", mac: "", cidr: null }) as never;
   expect(tailnetAddress({ CloudflareWARP: [entry("100.96.0.7")], tailscale0: [entry("100.101.102.103")] })).toBe("100.101.102.103");
   expect(tailnetAddress({ Tailscale: [entry("100.70.1.2")], wwan0: [entry("100.64.9.9")] })).toBe("100.70.1.2");
-  expect(tailnetAddress({ utun3: [entry("100.96.0.7")] })).toBe("100.96.0.7");
+  expect(tailnetAddress({ utun3: [entry("100.96.0.7")] }, "darwin")).toBe("100.96.0.7");
+});
+
+test("an uplink in the carrier-NAT range is never taken for the tailnet", () => {
+  const entry = (address: string) => ({ address, internal: false, family: "IPv4", netmask: "", mac: "", cidr: null }) as never;
+  // No Tailscale interface: the server stays on loopback rather than binding
+  // an unauthenticated endpoint to an ISP's shared network.
+  for (const os of ["linux", "win32", "darwin"]) {
+    expect(tailnetAddress({ wwan0: [entry("100.64.9.9")] }, os)).toBeNull();
+    expect(tailnetAddress({ en0: [entry("100.72.3.4")], "Ethernet 2": [entry("100.100.1.1")] }, os)).toBeNull();
+  }
+  expect(tailnetAddress({ utun3: [entry("100.96.0.7")] }, "linux")).toBeNull();
 });

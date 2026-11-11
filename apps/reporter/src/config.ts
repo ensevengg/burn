@@ -60,9 +60,11 @@ export function detectOsKind(): BurnConfig["osKind"] {
 }
 
 /**
- * Identity for a machine nobody has named: its hostname. WSL reports its
- * Windows host's name, so the WSL reporter gets a `-wsl` suffix (slugs must
- * differ per install) and both share that name as their host group.
+ * Identity for a machine nobody has named: its hostname. Slugs must differ
+ * per install, and the phone keeps one history per slug, so the installs
+ * that commonly share a hostname get a suffix: WSL reports its Windows
+ * host's name (`-wsl`), and a dual-boot box is often given one name on both
+ * sides (`-windows`). Windows and WSL share the name as their host group.
  */
 export function defaultIdentity(
   osKind: BurnConfig["osKind"] = detectOsKind(),
@@ -77,7 +79,7 @@ export function defaultIdentity(
     /* keep the schema default */
   }
   return {
-    environmentSlug: osKind === "wsl" ? `${base}-wsl` : base,
+    environmentSlug: osKind === "wsl" || osKind === "windows" ? `${base}-${osKind}` : base,
     environmentName: osKind === "wsl" ? `${short} (WSL)` : short,
     hostGroup: osKind === "wsl" || osKind === "windows" ? base : null,
     reportingTimezone: zone,

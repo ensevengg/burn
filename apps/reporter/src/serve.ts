@@ -1,6 +1,6 @@
 import { SystemMetricHistory } from "./system-metrics";
 import { gzipSync } from "node:zlib";
-import { networkInterfaces } from "node:os";
+import { networkInterfaces, platform } from "node:os";
 import { MachineSnapshots, QuotaSnapshots, snapshotDayDigests, snapshotsFor } from "./snapshots";
 /** Machine backend bound to the tailnet (or loopback for local diagnostics).
  * Serves validated, priced tokscale rows and vendor quotas from shared
@@ -49,21 +49,24 @@ export interface LiveServerHandle {
 
 /** This machine's address in Tailscale's range (100.64.0.0/10), read from the
  * network interfaces. Needs no CLI, which the macOS App Store and some
- * Windows installs do not put on PATH. Other software uses that range too
- * (carrier NAT, some VPNs), so an interface named for Tailscale wins. */
+ * Windows installs do not put on PATH. Carrier NAT hands out the same range
+ * on ordinary uplinks, and this server has no authentication (D7), so only
+ * Tailscale's own interface counts: `tailscale0` on Linux, "Tailscale" on
+ * Windows, a `utun` tunnel on macOS (where it carries no name). */
 export function tailnetAddress(
   interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+  os: string = platform(),
 ): string | null {
-  let fallback: string | null = null;
+  let tunnel: string | null = null;
   for (const [name, addresses] of Object.entries(interfaces))
     for (const entry of addresses ?? []) {
       if (entry.family !== "IPv4" || entry.internal) continue;
       const [a, b] = entry.address.split(".").map(Number);
       if (a !== 100 || b === undefined || b < 64 || b > 127) continue;
       if (/tailscale/i.test(name)) return entry.address;
-      fallback ??= entry.address;
+      if (os === "darwin" && /^utun\d+$/.test(name)) tunnel ??= entry.address;
     }
-  return fallback;
+  return tunnel;
 }
 
 /** Resolve the tailnet IPv4: the tailscale CLI when it is on PATH (it knows
@@ -515,15 +518,18 @@ export async function superviseLiveServer(
   options.onBound?.(live, options.bind !== undefined || first !== null);
   if (options.bind) return { current: () => live, stop: () => live.stop() };
   let busy = false;
+  let stopped = false;
   const watcher = setInterval(() => {
     if (busy) return;
     busy = true;
     void (async () => {
       const address = await detect();
-      if (address === null || address === live.hostname) return;
+      if (stopped || address === null || address === live.hostname) return;
       // Same port on the new address, so a phone that registered this
       // machine by name keeps working.
       const next = await startLiveServer(config, { ...base, bind: address, port: live.port });
+      // Stopped while the new listener was starting: it must not outlive us.
+      if (stopped) return next.stop();
       live.stop();
       live = next;
       options.onBound?.(live, true);
@@ -534,6 +540,7 @@ export async function superviseLiveServer(
   return {
     current: () => live,
     stop: () => {
+      stopped = true;
       clearInterval(watcher);
       live.stop();
     },

@@ -71,6 +71,9 @@ export class PeerDirectory {
         try {
           const response = await fetchImpl(`${url}/ping`, {
             headers: { accept: "application/json" },
+            // A peer answers /ping itself; a redirect would send this machine
+            // to an address Tailscale never listed.
+            redirect: "manual",
             signal: AbortSignal.timeout(1_500),
           });
           if (!response.ok) return null;
