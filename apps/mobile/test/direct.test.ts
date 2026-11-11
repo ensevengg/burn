@@ -695,6 +695,36 @@ test("older direct quotas and later errors cannot evict the last successful quot
   ).toEqual({ used_percent: 40 });
 });
 
+test("a quota the machine served from its cache is stored at its real collection time", async () => {
+  const fx = mirrorFixture();
+  const q = {
+    provider: "claude", accountKey: "acc", accountLabel: null, plan: null, metric: "5h",
+    usedPercent: 40, remainingPercent: 60, remainingLabel: null, resetsAt: null,
+    creditStatus: null, spendControl: null, sourceOffsetMinutes: null,
+    status: "ok" as const, error: null,
+  };
+  const api: LiveApi = {
+    ping: async () => ping(),
+    events: async () => ({ sinceMs: 0, generatedAt: "2026-09-30T10:00:00Z", events: [] }),
+    quotas: async () => ({
+      generatedAt: "2026-09-30T10:00:00Z",
+      quotas: [
+        { ...q, fetchedAt: "2026-09-30T09:10:00.000Z" },
+        // A claimed collection time after the page itself is not believed.
+        { ...q, metric: "weekly", fetchedAt: "2026-09-30T12:00:00.000Z" },
+      ],
+    }),
+  };
+  await addDirectMachine(fx.db, "http://win", { apiFor: () => api });
+  await pullDirectFromMachines(fx.db, { apiFor: () => api });
+  expect(
+    await fx.db.getAllAsync("select metric, fetched_at from quota_snapshots order by metric"),
+  ).toEqual([
+    { metric: "5h", fetched_at: "2026-09-30T09:10:00.000Z" },
+    { metric: "weekly", fetched_at: "2026-09-30T10:00:00Z" },
+  ]);
+});
+
 test("paged direct backfill publishes partial rows, resumes, and checkpoints the scan rather than phone time", async () => {
   const fx = mirrorFixture();
   const seen: (string | undefined)[] = [];

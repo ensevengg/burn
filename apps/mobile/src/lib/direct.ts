@@ -526,7 +526,13 @@ async function pullDirectUnlocked(
               assertActive();
               await db.withTransactionAsync(async () => {
                 for (const quota of page.quotas) {
-                  await mergeQuota(db, machine.id, quota, page.generatedAt);
+                  // A reading the source served from its own cache keeps its
+                  // real collection time; it can never postdate the page.
+                  const collectedAt =
+                    quota.fetchedAt && Date.parse(quota.fetchedAt) < Date.parse(page.generatedAt)
+                      ? quota.fetchedAt
+                      : page.generatedAt;
+                  await mergeQuota(db, machine.id, quota, collectedAt);
                   if (quota.status === "error")
                     quotaError = quota.error ?? "Quota check failed";
                   assertActive();

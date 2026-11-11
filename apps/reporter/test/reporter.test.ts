@@ -79,6 +79,34 @@ describe("tokscale adapter", () => {
     });
   });
 
+  test("a provider's prose reset time becomes unknown instead of poisoning the page", async () => {
+    const { parseLiveQuotasPage } = await import("@burn/sync-api");
+    const inputs = tokscaleQuotaInputs(
+      usageReportSchema.parse([
+        { provider: "Sakana", metrics: [{ label: "Weekly", used_percent: 10, remaining_percent: 90, resets_at: "June 22, 2026 at 9:58 AM" }] },
+        { provider: "Copilot", metrics: [{ label: "Monthly", used_percent: 10, remaining_percent: 90, resets_at: "2026-12-01" }] },
+        { provider: "Codex", metrics: [{ label: "Weekly", used_percent: 10, remaining_percent: 90, resets_at: "2026-09-09T00:00:00Z" }] },
+      ]),
+    );
+    expect(inputs.map((i) => i.resetsAt)).toEqual([null, "2026-12-01", "2026-09-09T00:00:00Z"]);
+    expect(parseLiveQuotasPage({ generatedAt: "2026-09-06T10:00:00.000Z", quotas: inputs }).quotas).toHaveLength(3);
+  });
+
+  test("a reading tokscale served from its cache keeps its collection time", async () => {
+    const { parseLiveQuotasPage } = await import("@burn/sync-api");
+    const fetched = Date.UTC(2026, 8, 6, 9, 10) / 1000;
+    const inputs = tokscaleQuotaInputs(
+      usageReportSchema.parse([
+        { provider: "Claude", metrics: [{ label: "5h", used_percent: 10, remaining_percent: 90 }], freshness: { fetched_at: fetched, stale: true } },
+        { provider: "Codex", metrics: [{ label: "5h", used_percent: 10, remaining_percent: 90 }] },
+      ]),
+    );
+    expect(inputs[0]!.fetchedAt).toBe("2026-09-06T09:10:00.000Z");
+    expect("fetchedAt" in inputs[1]!).toBe(false);
+    const page = parseLiveQuotasPage({ generatedAt: "2026-09-06T10:00:00.000Z", quotas: inputs });
+    expect(page.quotas[0]!.fetchedAt).toBe("2026-09-06T09:10:00.000Z");
+  });
+
   test("schema drift fails loudly (D2)", () => {
     expect(() =>
       usageReportSchema.parse([

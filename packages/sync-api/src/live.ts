@@ -339,6 +339,9 @@ export function parseLiveQuotasPage(raw: unknown): LiveQuotasPage {
       status: choice(q.status ?? "ok", ["ok", "error"], where("status")),
       error: orNullString(q.error),
       sourceOffsetMinutes: orNullNumber(q.sourceOffsetMinutes),
+      ...(q.fetchedAt === null || q.fetchedAt === undefined
+        ? {}
+        : { fetchedAt: timestamp(q.fetchedAt, where("fetchedAt")) }),
     };
   });
   return { generatedAt: timestamp(page.generatedAt, "generatedAt"), quotas };
