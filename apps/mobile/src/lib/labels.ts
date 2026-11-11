@@ -66,9 +66,16 @@ const WORDS: Record<string, string> = {
 };
 
 /** Fallback word-case for unknown identifiers: "my_thing-v2" → "My Thing V2". */
+/** Own keys only: identifiers arrive from machines, and "constructor" or
+ * "__proto__" would otherwise resolve to Object.prototype members. */
+function own(table: Record<string, string>, key: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+}
+
 function wordCase(word: string): string {
   const lower = word.toLowerCase();
-  if (WORDS[lower] !== undefined) return WORDS[lower]!;
+  const known = own(WORDS, lower);
+  if (known !== undefined) return known;
   if (/^\d/.test(lower)) return lower.toUpperCase(); // version segments: "5.2"
   if (lower === lower.toUpperCase() && lower.length <= 4) return lower; // preserve short all-caps
   return lower.charAt(0).toUpperCase() + lower.slice(1);
@@ -78,7 +85,7 @@ export function humanize(raw: string | null | undefined): string {
   if (raw === null || raw === undefined) return "";
   const trimmed = raw.trim();
   if (trimmed === "") return "";
-  const exact = EXACT[trimmed] ?? EXACT[trimmed.toLowerCase()];
+  const exact = own(EXACT, trimmed) ?? own(EXACT, trimmed.toLowerCase());
   if (exact !== undefined) return exact;
   const words = trimmed.split(/[_\-\s]+/).filter((part) => part !== "");
   // Dash-separated versions: "claude-opus-4-5" → "Claude Opus 4.5". Only a

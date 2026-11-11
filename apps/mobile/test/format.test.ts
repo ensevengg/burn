@@ -24,6 +24,10 @@ describe("bucketKey", () => {
   test("bucketLabel renders compact labels", () => {
     expect(bucketLabel("2026-09", "monthly")).toBe("Sep");
     expect(bucketLabel("2026", "yearly")).toBe("2026");
+    // Built from the key, so the device's own zone cannot shift them.
+    expect(bucketLabel("2026-11-01", "daily")).toBe("11/1");
+    expect(bucketLabel("2026-01", "monthly")).toBe("Jan");
+    expect(bucketLabel("2026-09-05T14", "hourly")).toBe("14:00");
   });
 });
 
@@ -40,6 +44,12 @@ describe("formatting", () => {
     expect(formatTokens(1_234_567)).toBe("1.2M");
     // Tweens pass fractional in-between values.
     expect(formatTokens(734.6)).toBe("735");
+    // A value that rounds up to the next unit is shown in that unit.
+    expect(formatTokens(999.6)).toBe("1.0k");
+    expect(formatTokens(9_999)).toBe("10k");
+    expect(formatTokens(999_950)).toBe("1.0M");
+    expect(formatTokens(9_999_999)).toBe("10M");
+    expect(formatTokens(999_999_999)).toBe("1.00B");
   });
 
   test("counts group thousands without Intl", () => {
@@ -54,6 +64,9 @@ describe("formatting", () => {
     expect(formatCost(0)).toBe("$0");
     expect(formatCost(4.5)).toBe("$4.50");
     expect(formatCost(1234)).toBe("$1,234");
+    expect(formatCost(0.9999)).toBe("$1.00");
+    expect(formatCost(999.996)).toBe("$1,000");
+    expect(formatCost(0.00999)).toBe("$0.010");
     expect(formatCost(1234567.4)).toBe("$1,234,567");
   });
 
@@ -101,4 +114,25 @@ test("cached zone offsets match Intl exactly, including DST transition days", ()
     instants.push(Date.parse("2025-11-01T00:00:00Z") + (seed % 400) * 86_400_000 + (seed % 86_400_000));
   }
   for (const zone of zones) for (const t of instants) expect(calendarParts(t, zone)).toEqual(reference(t, zone));
+});
+
+test("humanize never resolves an identifier to an Object.prototype member", () => {
+  expect(humanize("constructor")).toBe("Constructor");
+  expect(humanize("site-constructor")).toBe("Site Constructor");
+  expect(humanize("__proto__")).toBe("Proto");
+  expect(humanize("hasOwnProperty")).toBe("Hasownproperty");
+});
+
+test("demo data stops at the moment it is seeded", async () => {
+  const { generateDemoDataset } = await import("../src/data/demo-generator");
+  // 08:30 IST: most of the day's generated work hours are still ahead.
+  const now = Date.parse("2026-11-11T03:00:00Z");
+  const early = generateDemoDataset(now);
+  expect(early.events.length).toBeGreaterThan(1000);
+  expect(Math.max(...early.events.map((e) => e.occurredAtMs))).toBeLessThanOrEqual(now);
+  // Seeding later the same day only adds today's rows; history is unchanged.
+  const late = generateDemoDataset(Date.parse("2026-11-11T20:00:00Z"));
+  const earlier = new Set(early.events.map((e) => e.eventId));
+  expect(late.events.filter((e) => e.occurredAtMs <= now).every((e) => earlier.has(e.eventId))).toBe(true);
+  expect(late.events.length).toBeGreaterThan(early.events.length);
 });

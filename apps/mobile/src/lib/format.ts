@@ -79,18 +79,15 @@ export function keyFromParts(y: number, m: number, d: number, h: number, granula
   return `${day}T${String(h).padStart(2, "0")}`;
 }
 
+/** Keys are already calendar parts in the reporting zone, so labels are built
+ * from them directly: formatting a Date here would shift them into the
+ * device's zone (a day or month early anywhere west of UTC). */
 export function bucketLabel(key: string, granularity: Granularity): string {
   if (granularity === "yearly") return key;
   if (granularity === "hourly") return `${key.slice(11, 13)}:00`;
-  if (granularity === "monthly") {
-    const [y, m] = key.split("-").map(Number);
-    return new Date(Date.UTC(y ?? 1970, (m ?? 1) - 1, 1)).toLocaleString("en", { month: "short" });
-  }
-  const [, m, d] = key.split("-").map(Number);
-  return new Date(Date.UTC(2000, (m ?? 1) - 1, d ?? 1)).toLocaleString("en", {
-    month: "numeric",
-    day: "numeric",
-  });
+  const [, m = 1, d = 1] = key.split("-").map(Number);
+  if (granularity === "monthly") return MONTHS[m - 1] ?? key;
+  return `${m}/${d}`;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -124,17 +121,20 @@ export function formatCount(n: number): string {
   return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
+/** Thresholds sit where the smaller unit would round up to the next one, so
+ * 999,950 reads "1.0M" rather than "1000k" (tweened numbers pass through
+ * every value on the way up). */
 export function formatTokens(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`;
+  if (n >= 999_995_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+  if (n >= 999_500) return `${(n / 1_000_000).toFixed(n >= 9_950_000 ? 0 : 1)}M`;
+  if (n >= 999.5) return `${(n / 1_000).toFixed(n >= 9_950 ? 0 : 1)}k`;
   return String(Math.round(n));
 }
 
 export function formatCost(cost: number): string {
-  if (cost >= 1000) return `$${formatCount(cost)}`;
-  if (cost >= 1) return `$${cost.toFixed(2)}`;
-  if (cost >= 0.01) return `$${cost.toFixed(3)}`;
+  if (cost >= 999.995) return `$${formatCount(cost)}`;
+  if (cost >= 0.9995) return `$${cost.toFixed(2)}`;
+  if (cost >= 0.00995) return `$${cost.toFixed(3)}`;
   if (cost > 0) return `$${cost.toFixed(4)}`;
   return "$0";
 }

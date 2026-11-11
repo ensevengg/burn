@@ -211,7 +211,10 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
           const isTurnStart = m > 0 && m % 6 === 0;
           const revision = revisions[env.slug]!;
 
-          events.push({
+          // Today's work hours may not have happened yet. Only the row is
+          // skipped: the random stream above is consumed either way, so the
+          // rest of the dataset does not depend on the time of day.
+          if (cursorMs <= now) events.push({
             eventId: `${env.slug}|${model.client}|v1:${model.client}:${sessionId}:${cursorMs}:${m}`,
             environmentSlug: env.slug,
             client: model.client,
