@@ -34,30 +34,38 @@ machine: tokscale + burn-events → burn-report daemon ← Tailscale → phone: 
 
 **1. Join one tailnet.** Install [Tailscale](https://tailscale.com/) on every machine and your phone.
 
-**2. Run a reporter on each machine.** Needs Bun.
+**2. Start a reporter on each machine.**
 
 ```bash
-bun install
-cargo install --path crates/burn-events   # once per machine, or use a release binary
-bun run reporter -- init --slug my-machine --name "My Machine"
-bun run reporter -- doctor
-bun run reporter -- daemon                # keep it running; prints the URL
+curl -fsSL https://raw.githubusercontent.com/ensevengg/burn/main/scripts/install.sh | sh
+burn-report daemon             # prints what to add on the phone
+burn-report install-service    # optional: start it at every login
 ```
 
-Published CLI: `npx burn-report init --slug my-machine --name "My Machine"`, then `npx burn-report daemon`.
+Binaries are attached to each `burn-events-v*` release; until one exists for your platform, use [From source](#from-source) below. That is the whole setup: the machine is named after its hostname and the daemon waits for Tailscale if it is not up yet. The installer covers Linux x86_64 and Apple-silicon macOS and verifies checksums. On Windows, download `burn-report-windows-x64.exe` and `burn-events-x86_64-pc-windows-msvc.exe` from the [latest release](https://github.com/ensevengg/burn/releases/latest) into one folder, rename them `burn-report.exe` and `burn-events.exe`, and run `burn-report.exe daemon`.
 
-**3. Open the app.** Run `bun run mobile` and open it in Expo Go on Android. Tap **Connect my machines**, then paste the URL under **Machines → +**.
+**3. Open the app.** Run `bun run mobile` and open it in Expo Go on Android. Tap **Connect my machines**, then **Machines → +** and enter the machine's Tailscale name or address. Your other machines are offered right there once the first is added.
 
 **Just looking?** Tap **Explore with demo data**.
 
+### From source
+
+Needs Bun and a Rust toolchain.
+
+```bash
+bun install
+cargo install --path crates/burn-events   # once per machine
+bun run reporter -- daemon
+```
+
 ### Reporter tips
 
-- **One slug per install:** Windows, WSL and each dual-boot side.
-- **Same box?** Share a `--host-group`.
+- **Rename a machine:** `burn-report init --slug my-machine --name "My Machine"`. Every flag is optional.
+- **One slug per install:** Windows, WSL and each dual-boot side. WSL gets a `-wsl` slug by default.
+- **Same box?** Share a `--host-group`. Windows and WSL share their hostname automatically.
 - **Flags:** `--port 8787`, `--bind <address>`. `serve` is an alias for `daemon`.
-- **No Tailscale?** It falls back to loopback, which the phone can't reach.
-- **Quotas:** `burn-report usage` prints them locally.
-- **Power mode from the phone (Linux, opt-in):** `burn-report controls enable power-mode`, then restart the daemon. Systems gets a fan-speed readout and a mode switch (e.g. Power Saver / Balanced / Performance). `burn-report controls status` shows what the machine offers. It works while you're signed in to the desktop. To also allow it while signed out, install the polkit rule that `burn-report controls polkit-rule` prints. See [ADR 0004](docs/adr/0004-opt-in-machine-controls.md).
+- **Check a machine:** `burn-report doctor`.
+- **Limits** (vendor quotas) need the tokscale CLI, which the reporter runs through Bun or Node if either is installed. Usage syncs without it.
 
 ## The app
 
@@ -76,8 +84,9 @@ Published CLI: `npx burn-report init --slug my-machine --name "My Machine"`, the
 ## Sync, in short
 
 - **Incremental:** only new rows travel.
+- **Warm:** reporters scan in the background, so a pull does not wait for one.
 - **Resumable:** big backfills continue while the app is open.
-- **Self-correcting:** a daily full reconcile catches late records and price fixes.
+- **Self-correcting:** a daily reconcile catches late records and price fixes, downloading only from the first day that changed.
 - **Independent:** a failed quota check never wipes good data.
 - **Health:** sampled every 30s, 24h kept.
 - **Phone-only deletes:** removing a machine clears the phone's copy, never the machine's.
@@ -85,7 +94,7 @@ Published CLI: `npx burn-report init --slug my-machine --name "My Machine"`, the
 ## Upgrading
 
 - **Restart reporters.**
-- **Exporter:** if `burn-events --capabilities` lacks `fingerprint-v1`, rerun `cargo install --path crates/burn-events`.
+- **Exporter:** rebuild or re-download `burn-events` with each release; the reporter refuses one built for another tokscale pin.
 - **`push` is gone:** run `daemon` instead.
 - **Kept:** reporter identity, phone history, settings and machine URLs.
 
@@ -118,7 +127,6 @@ bun run --cwd apps/mobile android   # local Android build; needs JDK + Android S
 - Upstream `tokscale events --jsonl`
 - Skia charts
 - APKs on GitHub Releases
-- Reporter service install
 - QR onboarding
 - Accurate model-price reference transport
 
