@@ -67,6 +67,9 @@ export interface DirectPullOptions {
   continuation?: boolean;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+  /** When a machine answers with an older cached quota reading (it refreshes
+   * behind the response), ask once more after this delay. Off by default. */
+  quotaFollowUpMs?: number;
   /** Test seam. */
   apiFor?: (endpoint: string) => LiveApi;
   now?: () => number;
@@ -108,6 +111,13 @@ export function capabilitiesKey(envId: string): string {
 
 function legacyCursorKey(envId: string): string {
   return `direct_since_${envId}`;
+}
+
+/** Content hash of the snapshot the last completed full reconciliation
+ * downloaded. Unlike the incremental hash, it proves this phone holds that
+ * snapshot's whole history, so an identical snapshot needs no re-download. */
+function fullHashKey(envId: string): string {
+  return `direct_full_hash_${envId}`;
 }
 
 /** Set when a machine reports a different tokscale pin; a parser change can
@@ -188,6 +198,30 @@ export async function listDirectMachines(
   }));
 }
 
+/** The reporter's default port; `burn-report daemon --port` overrides it. */
+export const DEFAULT_REPORTER_PORT = 8787;
+
+/**
+ * What people type is a machine name or a tailnet address, not a URL:
+ * `cachyos` and `100.101.102.103` mean plain HTTP on the reporter port, and
+ * `cachyos:9000` plain HTTP on that one. Anything with a scheme is a full URL
+ * and is kept exactly as written.
+ */
+export function normalizeMachineUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (trimmed === "") throw new LiveError("enter the machine's name or address");
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
+  if (hasScheme && !/^https?:\/\//i.test(trimmed))
+    throw new LiveError("machine URL must start with http:// or https://");
+  const url = hasScheme ? trimmed : `http://${trimmed}`;
+  const match = /^(https?):\/\/(\[[^\]]+\]|[^/:?#\s]+)(:\d+)?([/?#].*)?$/i.exec(url);
+  if (!match) throw new LiveError(`"${raw.trim()}" is not a machine name, address or URL`);
+  const [, scheme, host, port, rest] = match;
+  void scheme;
+  if (!hasScheme && !port && !rest) return `http://${host}:${DEFAULT_REPORTER_PORT}`;
+  return url;
+}
+
 /**
  * Validate an endpoint with /ping and register it. The environment id reuses
  * an existing environment row with the same slug when one exists, preserving
@@ -207,9 +241,7 @@ export async function addDirectMachine(
     if (syncGeneration(db) !== generation)
       throw new LiveError("add machine cancelled");
   };
-  const base = rawUrl.trim().replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(base))
-    throw new LiveError("machine URL must start with http:// or https://");
+  const base = normalizeMachineUrl(rawUrl);
   const now = options.now ?? Date.now;
   const pingTimeout = withTimeout(undefined, options.pingTimeoutMs ?? 3_000);
   const api = validateLiveApi(
@@ -325,6 +357,7 @@ export async function removeDirectMachine(
         `direct_hash_${environmentId}`,
         `direct_backfill_${environmentId}`,
         `direct_full_at_${environmentId}`,
+        fullHashKey(environmentId),
         reparseKey(environmentId),
         capabilitiesKey(environmentId),
       ])
@@ -521,6 +554,34 @@ async function pullDirectUnlocked(
           );
           try {
             const page = await api.quotas(timeout.signal);
+            // The reporter may answer with its last reading and refresh behind
+            // the response; collect the fresh one without holding this pass.
+            const followUpMs = options.quotaFollowUpMs;
+            if (followUpMs !== undefined && ping.serverNowMs - Date.parse(page.generatedAt) > 60_000)
+              void (async () => {
+                await new Promise((resolve) => setTimeout(resolve, followUpMs));
+                assertActive();
+                const again = withTimeout(probeSignal, options.quotaTimeoutMs ?? 45_000);
+                try {
+                  const fresh = await api.quotas(again.signal);
+                  await withWriteLock(async () => {
+                    assertActive();
+                    await db.withTransactionAsync(async () => {
+                      for (const quota of fresh.quotas) {
+                        const collectedAt =
+                          quota.fetchedAt && Date.parse(quota.fetchedAt) < Date.parse(fresh.generatedAt)
+                            ? quota.fetchedAt
+                            : fresh.generatedAt;
+                        await mergeQuota(db, machine.id, quota, collectedAt, ping.serverNowMs);
+                        assertActive();
+                      }
+                    });
+                  });
+                  publishMirrorChange(db, "quotas");
+                } finally {
+                  again.cancel();
+                }
+              })().catch(() => {});
             let quotaError: string | null = null;
             await withWriteLock(async () => {
               assertActive();
@@ -664,6 +725,15 @@ async function pullDirectUnlocked(
                   [hashKey],
                 )
               )?.value;
+          const fullHash =
+            reconciliation && !options.full && !reparse && !progress
+              ? (
+                  await db.getFirstAsync<{ value: string }>(
+                    "select value from kv where key=?",
+                    [fullHashKey(machine.id)],
+                  )
+                )?.value
+              : undefined;
           let cursor = progress?.cursor;
           let scanStartedAtMs: number | null =
             progress?.scanStartedAtMs ?? null;
@@ -698,6 +768,9 @@ async function pullDirectUnlocked(
                 ...(oldHash && !cursor && !reconciliation
                   ? { knownHash: oldHash }
                   : {}),
+                // A reconciliation may only be skipped against the snapshot a
+                // completed reconciliation already downloaded in full.
+                ...(fullHash && !cursor && !restarted ? { knownHash: fullHash } : {}),
                 ...(options.full && !cursor ? { force: true } : {}),
               });
             } catch (err) {
@@ -768,6 +841,10 @@ async function pullDirectUnlocked(
                   // An empty snapshot (sources unreadable, not yet scanned) proves
                   // nothing and deletes nothing: reconciliation stays pending so
                   // it reruns from full history once rows return.
+                  // The machine's snapshot is byte-identical to the one this
+                  // phone last reconciled: nothing to download or retire.
+                  if (reconciliation && page.notModified)
+                    await kvSetString(db, `direct_full_at_${machine.id}`, String(now()));
                   if (reconciliation && parserVersion !== undefined) {
                     changed += await dropSupersededEvents(db, machine.id, parserVersion);
                     await kvSetString(
@@ -775,6 +852,7 @@ async function pullDirectUnlocked(
                       `direct_full_at_${machine.id}`,
                       String(now()),
                     );
+                    if (contentHash) await kvSetString(db, fullHashKey(machine.id), contentHash);
                     // A re-registration may have recorded a newer pin while this
                     // pass ran; only the pin this snapshot parsed is satisfied.
                     const pending = await db.getFirstAsync<{ value: string }>(

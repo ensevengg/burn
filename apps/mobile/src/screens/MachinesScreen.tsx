@@ -204,7 +204,7 @@ function AddMachine({
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const valid = /^https?:\/\//.test(url.trim());
+  const valid = url.trim().length > 0;
 
   const submit = () => {
     if (!valid || busy) return;
@@ -220,8 +220,8 @@ function AddMachine({
     <View>
       <Text style={[type.title, { color: C.text, fontSize: 24 }]}>Add a machine</Text>
       <Text style={[type.muted, { color: C.muted, marginTop: 6, lineHeight: 18 }]}>
-        Run this on the machine and keep the daemon running. With both devices on your tailnet, paste the URL it
-        prints.
+        Run this on the machine and keep the daemon running. With both devices on your tailnet, enter the
+        machine's Tailscale name or address (or paste the URL the daemon prints).
       </Text>
       <Text selectable style={[styles.command, { color: C.text, backgroundColor: C.panelAlt, borderColor: C.border }]}>
         {'npx burn-report init --slug <machine-slug> --name "<Display Name>"\nnpx burn-report daemon'}
@@ -232,7 +232,7 @@ function AddMachine({
       <TextInput
         value={url}
         onChangeText={setUrl}
-        placeholder="http://machine-name:8787"
+        placeholder="machine-name or 100.x.y.z"
         placeholderTextColor={C.faint}
         autoCapitalize="none"
         autoCorrect={false}

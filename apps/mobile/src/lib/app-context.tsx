@@ -12,7 +12,16 @@ import {
   removeDirectMachine, type DirectPullStatus, type DirectPullOptions,
 } from "./direct";
 import { removeEnvironmentLocal } from "../data/repository";
-import { advanceSyncGeneration, subscribeMirrorChanges, subscribePullProgress } from "./sync-state";
+import {
+  advanceSyncGeneration, coalesce, subscribeMirrorChanges, subscribePullProgress, type MirrorChange,
+} from "./sync-state";
+
+const EVENT_REFETCH_MS = 900;
+/** Pause between passes of a multi-pass backfill: long enough for a queued
+ * refresh or tap to get in, short enough not to be most of the wait. */
+const BACKFILL_PAUSE_MS = 50;
+/** See DirectPullOptions.quotaFollowUpMs; provider reads take a few seconds. */
+const QUOTA_FOLLOW_UP_MS = 4_000;
 
 interface AppState {
   db: SQLiteDatabase | null;
@@ -99,14 +108,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => { active = false; };
   }, [patchStatus]);
 
-  useEffect(() => subscribeMirrorChanges((changedDb, kind) => {
-    if (changedDb !== db) return;
-    void queryClient.invalidateQueries({
+  useEffect(() => {
+    const invalidate = (kind: MirrorChange) => void queryClient.invalidateQueries({
       predicate: (query) => kind === "events"
         ? query.queryKey[0] !== "quotas" && query.queryKey[0] !== "machines" && query.queryKey[0] !== "systems"
         : query.queryKey[0] === kind || (kind === "machines" && query.queryKey[0] === "systems"),
     });
-  }), [db, queryClient]);
+    // A backfill commits a page every few hundred milliseconds, and every
+    // event screen re-reads its whole window per invalidation. The first
+    // change shows at once; the rest arrive together, at most once a window.
+    const eventRefetch = coalesce(() => invalidate("events"), EVENT_REFETCH_MS);
+    const unsubscribe = subscribeMirrorChanges((changedDb, kind) => {
+      if (changedDb !== db) return;
+      if (kind === "events") eventRefetch.request();
+      else invalidate(kind);
+    });
+    return () => {
+      unsubscribe();
+      eventRefetch.cancel();
+    };
+  }, [db, queryClient]);
 
   useEffect(() => subscribePullProgress((changedDb, event) => {
     if (changedDb !== db) return;
@@ -125,14 +146,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!db || mode !== "direct") return;
     const epoch = lifecycle.current;
     try {
-      const statuses = await pullDirectFromMachines(db, options);
+      const statuses = await pullDirectFromMachines(db, { quotaFollowUpMs: QUOTA_FOLLOW_UP_MS, ...options });
       if (epoch !== lifecycle.current) return;
       if (statuses.some((s) => s.hasMore) && NativeAppState.currentState === "active") {
         if (backfillTimer.current) clearTimeout(backfillTimer.current);
         backfillTimer.current = setTimeout(() => {
           backfillTimer.current = null;
           void continueSync.current();
-        }, 1000);
+        }, BACKFILL_PAUSE_MS);
       }
       setStatus((current) => {
         // Targeted and continuation passes report a subset of machines.

@@ -1689,3 +1689,105 @@ test("health refreshes request only samples from the newest stored capture onwar
   expect(seen).toEqual([now - 86_400_000, now - 30_000, now - 86_400_000]);
   fx.native.close();
 });
+
+test("a machine name or tailnet address is enough to add a machine", async () => {
+  const { normalizeMachineUrl } = await import("../src/lib/direct");
+  expect(normalizeMachineUrl(" cachyos ")).toBe("http://cachyos:8787");
+  expect(normalizeMachineUrl("100.101.102.103")).toBe("http://100.101.102.103:8787");
+  expect(normalizeMachineUrl("cachyos.tail1234.ts.net")).toBe("http://cachyos.tail1234.ts.net:8787");
+  expect(normalizeMachineUrl("cachyos:9000")).toBe("http://cachyos:9000");
+  expect(normalizeMachineUrl("[fd7a:115c:a1e0::1]")).toBe("http://[fd7a:115c:a1e0::1]:8787");
+  // Anything typed as a URL is used as written.
+  expect(normalizeMachineUrl("http://cachyos/")).toBe("http://cachyos");
+  expect(normalizeMachineUrl("https://cachyos.tail1234.ts.net")).toBe("https://cachyos.tail1234.ts.net");
+  expect(normalizeMachineUrl("http://100.101.102.103:8787/")).toBe("http://100.101.102.103:8787");
+  expect(() => normalizeMachineUrl("ftp://cachyos")).toThrow("http:// or https://");
+  expect(() => normalizeMachineUrl("  ")).toThrow("name or address");
+  expect(() => normalizeMachineUrl("two words")).toThrow("not a machine name");
+
+  const fx = mirrorFixture();
+  const seen: string[] = [];
+  await addDirectMachine(fx.db, "win", {
+    apiFor: (endpoint) => {
+      seen.push(endpoint);
+      return { ping: async () => ping(), events: async () => ({ sinceMs: 0, generatedAt: "2026-09-30T10:00:00Z", events: [] }), quotas: async () => ({ generatedAt: "2026-09-30T10:00:00Z", quotas: [] }) };
+    },
+  });
+  expect(seen).toEqual(["http://win:8787"]);
+  expect(await fx.db.getFirstAsync("select base_url from direct_machines")).toEqual({ base_url: "http://win:8787" });
+});
+
+test("reconciling a page asks which rows exist a few times, not once per insert batch", async () => {
+  const fx = mirrorFixture();
+  const events = Array.from({ length: 1000 }, (_, i) => ingestRow({ dedupKey: `k${i}`, occurredAtMs: 1_700_000_000_000 + i }));
+  const api: LiveApi = {
+    ping: async () => ping(),
+    events: async () => ({ sinceMs: 0, generatedAt: "2026-09-30T10:00:00Z", scanStartedAtMs: 1, events }),
+    quotas: async () => ({ generatedAt: "2026-09-30T10:00:00Z", quotas: [] }),
+  };
+  await addDirectMachine(fx.db, "http://win", { apiFor: () => api });
+  const lookups: number[] = [];
+  const getAll = fx.db.getAllAsync.bind(fx.db);
+  (fx.db as unknown as { getAllAsync: unknown }).getAllAsync = async (sql: string, params: unknown[] = []) => {
+    if (sql.includes("select event_id from usage_events where event_id in")) lookups.push(params.length);
+    return (getAll as (sql: string, params: unknown[]) => Promise<unknown[]>)(sql, params);
+  };
+  expect((await pullDirectFromMachines(fx.db, { apiFor: () => api }))[0]!.pulledEvents).toBe(1000);
+  expect(lookups).toEqual([500, 500]);
+  expect(await fx.db.getFirstAsync("select count(*) as n from usage_events")).toEqual({ n: 1000 });
+});
+
+test("a cached quota answer is followed by one later request for the fresh reading", async () => {
+  const fx = mirrorFixture();
+  const serverNow = Date.parse("2026-09-30T10:05:00Z");
+  const q = {
+    provider: "claude", accountKey: "acc", accountLabel: null, plan: null, metric: "5h",
+    usedPercent: 40, remainingPercent: 60, remainingLabel: null, resetsAt: null,
+    creditStatus: null, spendControl: null, sourceOffsetMinutes: null, status: "ok" as const, error: null,
+  };
+  let calls = 0;
+  const api: LiveApi = {
+    ping: async () => ping({ serverNowMs: serverNow }),
+    events: async () => ({ sinceMs: 0, generatedAt: "2026-09-30T10:05:00Z", events: [] }),
+    // First answer is the reporter's four-minute-old reading; it refreshes behind it.
+    quotas: async () =>
+      ++calls === 1
+        ? { generatedAt: "2026-09-30T10:01:00Z", quotas: [q] }
+        : { generatedAt: "2026-09-30T10:05:02Z", quotas: [{ ...q, usedPercent: 75 }] },
+  };
+  await addDirectMachine(fx.db, "http://win", { apiFor: () => api });
+  const used = () => fx.db.getFirstAsync("select used_percent from quota_snapshots");
+  const [status] = await pullDirectFromMachines(fx.db, { apiFor: () => api, quotaFollowUpMs: 5 });
+  // The pass itself does not wait for the second reading.
+  expect(status!.pulledQuotas).toBe(1);
+  expect(calls).toBe(1);
+  expect(await used()).toEqual({ used_percent: 40 });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  expect(calls).toBe(2);
+  expect(await used()).toEqual({ used_percent: 75 });
+  // A fresh answer needs no second request, and without the option none is made.
+  await pullDirectFromMachines(fx.db, { apiFor: () => api, quotaFollowUpMs: 5 });
+  await pullDirectFromMachines(fx.db, { apiFor: () => ({ ...api, quotas: async () => { calls++; return { generatedAt: "2026-09-30T10:01:00Z", quotas: [q] }; } }) });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  expect(calls).toBe(4);
+});
+
+test("coalesce runs the first request at once and folds a burst into one trailing run", async () => {
+  const { coalesce } = await import("../src/lib/sync-state");
+  let runs = 0;
+  const limited = coalesce(() => runs++, 20);
+  limited.request();
+  expect(runs).toBe(1);
+  for (let i = 0; i < 10; i++) limited.request();
+  expect(runs).toBe(1);
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  expect(runs).toBe(2);
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  expect(runs).toBe(2);
+  limited.request();
+  expect(runs).toBe(3);
+  limited.request();
+  limited.cancel();
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  expect(runs).toBe(3);
+});
