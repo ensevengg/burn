@@ -6,6 +6,7 @@ import { formatRelative } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
+import { useNow } from "../lib/use-now";
 import { hairline, radius, spacing, type } from "../theme";
 import { Card, Chip, Empty, SectionTitle } from "../ui/primitives";
 import { FadeIn, PressableScale, TweenText } from "../ui/motion";
@@ -82,7 +83,7 @@ export function SystemsScreen() {
   const systems = useSystemsQuery();
   const { C } = useTheme();
   const [openId, setOpenId] = useState<string | null>(null);
-  const now = Date.now();
+  const now = useNow();
   const reporting = (systems.data ?? []).filter((system) => {
     const latest = system.metrics.at(-1);
     return latest !== undefined && now - latest.capturedAtMs <= STALE_AFTER_MS;

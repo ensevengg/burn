@@ -156,6 +156,21 @@ export function formatRelative(iso: string | null, now = Date.now()): string {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+/**
+ * True when a quota reading predates its own reset: the window has rolled
+ * over since, so the stored percentage describes the previous window. A
+ * calendar-date reset names a day in an unknown zone, so it only counts once
+ * that day is over everywhere.
+ */
+export function quotaHasReset(resetsAt: string | null, fetchedAt: string, now = Date.now()): boolean {
+  if (resetsAt === null) return false;
+  const parsed = Date.parse(resetsAt);
+  const fetched = Date.parse(fetchedAt);
+  if (Number.isNaN(parsed) || Number.isNaN(fetched)) return false;
+  const at = /^\d{4}-\d{2}-\d{2}$/.test(resetsAt) ? parsed + 2 * DAY_MS : parsed;
+  return at <= now && fetched < at;
+}
+
 /** Countdown to an instant: "3h 12m", "2d 4h", "45m", "now". Null when unknown or past. */
 export function formatUntil(iso: string | null, now = Date.now()): string | null {
   if (iso === null) return null;

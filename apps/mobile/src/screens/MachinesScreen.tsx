@@ -9,6 +9,7 @@ import { humanize } from "../lib/labels";
 import { useApp, useSyncStatus } from "../lib/app-context";
 import type { DirectPullStatus } from "../lib/direct";
 import { useTheme } from "../lib/theme-context";
+import { useNow } from "../lib/use-now";
 import { confirmDestructive } from "../lib/confirm-destructive";
 import { hairline, radius, spacing, type } from "../theme";
 import { Button, Card, Empty, SectionTitle } from "../ui/primitives";
@@ -71,10 +72,11 @@ function describe(
   machine: EnvironmentRow,
   live: DirectPullStatus | undefined,
   demo: boolean,
+  now: number,
 ): { text: string; tone: "ok" | "muted" | "warn" } {
-  if (demo) return { text: `Demo machine · last report ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
-  if (live === undefined) return { text: `Not checked yet · last contact ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
-  if (live.state === "offline") return { text: `Unreachable · showing cached history · seen ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
+  if (demo) return { text: `Demo machine · last report ${formatRelative(machine.lastHeartbeatAt, now)}`, tone: "muted" };
+  if (live === undefined) return { text: `Not checked yet · last contact ${formatRelative(machine.lastHeartbeatAt, now)}`, tone: "muted" };
+  if (live.state === "offline") return { text: `Unreachable · showing cached history · seen ${formatRelative(machine.lastHeartbeatAt, now)}`, tone: "muted" };
   if (live.state === "skipped") return { text: "Endpoint answered as a different machine", tone: "warn" };
   if (live.state === "error") return { text: "Pull failed · showing cached history", tone: "warn" };
   if (live.quotaError) return { text: "Live · quota refresh failed", tone: "warn" };
@@ -90,8 +92,9 @@ function MachineCard({ machine }: { machine: EnvironmentRow }) {
   const { refreshingMachines, liveMachines, pass } = useSyncStatus();
   const [details, setDetails] = useState(false);
   const live = liveMachines.find((status) => status.slug === machine.slug);
-  const issue = reporterIssue(machine, live);
-  const summary = describe(machine, live, mode === "demo");
+  const now = useNow();
+  const issue = reporterIssue(machine, live, now);
+  const summary = describe(machine, live, mode === "demo", now);
   const pending = pass !== null && pass.ids.includes(machine.id) && pass.settled[machine.id] === undefined;
   const dot = pending ? C.text : summary.tone === "ok" ? C.ok : summary.tone === "warn" ? C.warn : C.faint;
   const toneColor = summary.tone === "ok" ? C.ok : summary.tone === "warn" ? C.warn : C.muted;
@@ -135,7 +138,7 @@ function MachineCard({ machine }: { machine: EnvironmentRow }) {
         {[
           machine.reporterVersion === null ? null : `reporter ${machine.reporterVersion}`,
           machine.tokscaleVersion === null ? null : `tokscale ${machine.tokscaleVersion}`,
-          `pulled ${formatRelative(machine.lastSuccessAt)}`,
+          `pulled ${formatRelative(machine.lastSuccessAt, now)}`,
         ]
           .filter(Boolean)
           .join(" · ")}

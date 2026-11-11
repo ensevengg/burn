@@ -12,11 +12,13 @@ import {
   formatRelative,
   formatTokens,
   formatUntil,
+  quotaHasReset,
   type Granularity,
 } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp, useSyncStatus } from "../lib/app-context";
 import { useTheme } from "../lib/theme-context";
+import { useNow } from "../lib/use-now";
 import { fillSeries, rollupYears } from "../lib/series";
 import { DASHBOARD_RANGES, USAGE_RANGES, usageWindowStart, type UsageRangeId } from "../lib/usage-range";
 import { gutter, hairline, motion, radius, spacing, type } from "../theme";
@@ -338,8 +340,9 @@ const AgentShares = memo(function AgentShares({ metric, rangeId }: { metric: Met
     share: total === 0 ? 0 : (metric === "cost" ? client.cost : client.tokens) / total,
     color: C.chart[Math.min(i, C.chart.length - 1)]!,
   }));
+  // Placeholder rows belong to the previous range; dim them like the hero.
   return (
-    <>
+    <Dim dim={overview.isPlaceholderData}>
       <SectionTitle trailing={metric === "cost" ? "by spend" : "by tokens"}>Agents</SectionTitle>
       <View style={{ marginHorizontal: gutter }}>
         <ShareBar shares={rows.map((row) => ({ key: row.key, fraction: row.share, color: row.color }))} />
@@ -369,7 +372,7 @@ const AgentShares = memo(function AgentShares({ metric, rangeId }: { metric: Met
           </View>
         ))}
       </View>
-    </>
+    </Dim>
   );
 });
 
@@ -381,7 +384,7 @@ const TokenBreakdown = memo(function TokenBreakdown({ metric, rangeId }: { metri
   if (totals === undefined) return <SectionSkeleton title="Tokens" height={110} corner={radius.l} />;
   const savings = overview.data?.cacheSavings ?? null;
   return (
-    <>
+    <Dim dim={overview.isPlaceholderData}>
       <SectionTitle>Tokens</SectionTitle>
       <Card style={styles.tokensCard}>
         <Ring fraction={totals.hitRate} size={78} stroke={7} color={C.text}>
@@ -397,7 +400,7 @@ const TokenBreakdown = memo(function TokenBreakdown({ metric, rangeId }: { metri
           {totals.reasoningTokens > 0 && <TokenStat label="Reasoning" value={totals.reasoningTokens} />}
         </View>
       </Card>
-    </>
+    </Dim>
   );
 });
 
@@ -450,7 +453,7 @@ function groupSubscriptions(quotas: QuotaCard[]): Subscription[] {
     };
     group.metrics.push(quota);
     group.lowest = Math.min(group.lowest, quota.remainingPercent ?? 100);
-    if (quota.fetchedAt > group.fetchedAt) group.fetchedAt = quota.fetchedAt;
+    if (Date.parse(quota.fetchedAt) > Date.parse(group.fetchedAt)) group.fetchedAt = quota.fetchedAt;
     groups.set(key, group);
   }
   return [...groups.values()].sort((a, b) => a.lowest - b.lowest);
@@ -462,6 +465,7 @@ function Limits() {
   const { C } = useTheme();
   const { checkingMachines } = useSyncStatus();
   const quotas = useQuotasQuery();
+  const now = useNow();
   const subscriptions = useMemo(() => groupSubscriptions(quotas.data ?? []), [quotas.data]);
   if (quotas.data === undefined) return null;
   return (
@@ -471,7 +475,7 @@ function Limits() {
         <Empty message="No quota snapshots yet. Run `npx burn-report usage` on a machine." />
       ) : (
         subscriptions.map((sub) => {
-          const stale = Date.now() - Date.parse(sub.fetchedAt) > STALE_QUOTA_MS;
+          const stale = now - Date.parse(sub.fetchedAt) > STALE_QUOTA_MS;
           return (
             <Card key={sub.key} style={[styles.limitCard, stale && { opacity: 0.55 }]}>
               <View style={{ flex: 1, paddingTop: 2 }}>
@@ -482,14 +486,17 @@ function Limits() {
                   {sub.plan === null ? "Account" : humanize(sub.plan)}
                 </Text>
                 <Text style={[type.muted, { color: stale ? C.warn : C.faint, marginTop: 6 }]}>
-                  {`checked ${formatRelative(sub.fetchedAt)}`}
+                  {`checked ${formatRelative(sub.fetchedAt, now)}`}
                 </Text>
               </View>
               <View style={styles.limitMetrics}>
                 {sub.metrics.map((quota) => {
-                  const remaining = quota.remainingPercent;
+                  // Past its reset, the stored percentage is the old window's:
+                  // show the limit as reset rather than as nearly spent.
+                  const reset = quotaHasReset(quota.resetsAt, quota.fetchedAt, now);
+                  const remaining = reset ? null : quota.remainingPercent;
                   const tone = remaining === null ? C.faint : remaining <= 15 ? C.err : remaining <= 35 ? C.warn : C.text;
-                  const resets = formatUntil(quota.resetsAt);
+                  const resets = reset ? "reset" : formatUntil(quota.resetsAt, now);
                   return (
                     <View key={quota.metric} style={styles.limitMetric}>
                       <Ring fraction={(remaining ?? 0) / 100} size={50} stroke={4.5} color={tone}>
@@ -526,6 +533,7 @@ function MachineStrip() {
   const { machineStates } = useSyncStatus();
   const machines = useMachinesQuery();
   const navigation = useNavigation<NavigationProp<ParamListBase>>();
+  const now = useNow();
   if (machines.data === undefined || machines.data.length === 0) return null;
   return (
     <>
@@ -540,7 +548,7 @@ function MachineStrip() {
             <PressableScale
               key={machine.id}
               accessibilityRole="button"
-              accessibilityLabel={`${machine.displayName}, ${live ? "live" : "last seen " + formatRelative(machine.lastHeartbeatAt)}`}
+              accessibilityLabel={`${machine.displayName}, ${live ? "live" : "last seen " + formatRelative(machine.lastHeartbeatAt, now)}`}
               onPress={() => navigation.navigate("machines")}
               style={[styles.machineChip, { backgroundColor: C.panel, borderColor: C.border }]}
             >
@@ -549,7 +557,7 @@ function MachineStrip() {
                 {machine.displayName}
               </Text>
               <Text style={[type.muted, { color: C.faint }]}>
-                {live ? "live" : formatRelative(machine.lastHeartbeatAt).replace(" ago", "")}
+                {live ? "live" : formatRelative(machine.lastHeartbeatAt, now).replace(" ago", "")}
               </Text>
             </PressableScale>
           );

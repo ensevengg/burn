@@ -136,3 +136,16 @@ test("demo data stops at the moment it is seeded", async () => {
   expect(late.events.filter((e) => e.occurredAtMs <= now).every((e) => earlier.has(e.eventId))).toBe(true);
   expect(late.events.length).toBeGreaterThan(early.events.length);
 });
+
+test("a quota reading taken before its reset is recognised as rolled over", async () => {
+  const { quotaHasReset } = await import("../src/lib/format");
+  const now = Date.parse("2026-11-11T12:00:00Z");
+  expect(quotaHasReset("2026-11-11T10:00:00Z", "2026-11-11T08:00:00Z", now)).toBe(true);
+  expect(quotaHasReset("2026-11-11T14:00:00Z", "2026-11-11T08:00:00Z", now)).toBe(false);
+  // A reading taken after the reset it names already describes the new window.
+  expect(quotaHasReset("2026-11-11T10:00:00Z", "2026-11-11T11:00:00Z", now)).toBe(false);
+  // A date-only reset has no zone: it counts only once that day is over everywhere.
+  expect(quotaHasReset("2026-11-11", "2026-11-09T00:00:00Z", now)).toBe(false);
+  expect(quotaHasReset("2026-11-09", "2026-11-08T00:00:00Z", now)).toBe(true);
+  expect(quotaHasReset(null, "2026-11-08T00:00:00Z", now)).toBe(false);
+});
