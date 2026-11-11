@@ -665,7 +665,7 @@ export async function queryWindowOverview(
 
 export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
   const rows = await db.getAllAsync<Record<string, unknown>>(
-    "select provider, account_key, account_label, plan, metric, used_percent, remaining_percent, remaining_label, resets_at, fetched_at from quota_snapshots where status = 'ok' order by provider, metric, fetched_at desc",
+    "select provider, account_key, account_label, plan, metric, used_percent, remaining_percent, remaining_label, resets_at, fetched_at from quota_snapshots where status = 'ok' order by provider, metric, julianday(fetched_at) desc",
   );
   const seen = new Set<string>();
   const cards: QuotaCard[] = [];
