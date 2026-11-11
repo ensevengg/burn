@@ -245,12 +245,17 @@ async function writeEvents(
 }
 
 /** Last success survives failed attempts; stale responses never replace newer
- * state. Collection time belongs to the source, never to the phone merge. */
+ * state. Collection time belongs to the source, never to the phone merge.
+ * `machineNowMs` is that machine's current clock: a stored reading stamped
+ * later than it was taken before the clock was set back (a dual-boot box
+ * booting with local-time RTC, then NTP), and would otherwise block every
+ * newer reading until real time caught up with the bad stamp. */
 export async function mergeQuota(
   db: SQLiteDatabase,
   environmentId: string | null,
   q: MachineQuotaInput,
   fetchedAt: string,
+  machineNowMs: number | null = null,
 ): Promise<void> {
   await db.runAsync(
     `insert into quota_snapshots
@@ -261,7 +266,8 @@ export async function mergeQuota(
       remaining_label=excluded.remaining_label,resets_at=excluded.resets_at,
       credit_status=excluded.credit_status,spend_control=excluded.spend_control,
       error=excluded.error,fetched_at=excluded.fetched_at
-    where julianday(excluded.fetched_at)>=julianday(quota_snapshots.fetched_at)`,
+    where julianday(excluded.fetched_at)>=julianday(quota_snapshots.fetched_at)
+       or julianday(quota_snapshots.fetched_at)>julianday(?)`,
     [
       quotaMirrorKey(
         environmentId,
@@ -285,6 +291,8 @@ export async function mergeQuota(
       q.status,
       q.error,
       fetchedAt,
+      // julianday(null) is null, which leaves the guard as it was.
+      machineNowMs === null ? null : new Date(machineNowMs).toISOString(),
     ],
   );
 }
@@ -297,11 +305,21 @@ export async function mergeMetrics(
   metrics: import("@burn/sync-api").MachineMetricInput[],
   now: number,
   assertActive: () => void,
+  /** Machine clock after a rollback: samples stamped later than this were
+   * taken on the wrong clock and would sit on top as the "latest" reading. */
+  dropAfterMs: number | null = null,
 ): Promise<number> {
   const columns = ["id", "environment_id", "captured_at_ms", "cpu_load_pct", "cpu_temp_c",
     "ram_used_pct", "ram_temp_c", "gpu_util_pct", "gpu_temp_c"];
   const content = columns.slice(3);
   let changed = 0;
+  if (dropAfterMs !== null)
+    changed += (
+      await db.runAsync("delete from machine_metrics where environment_id=? and captured_at_ms>?", [
+        environmentId,
+        dropAfterMs,
+      ])
+    ).changes;
   for (let start = 0; start < metrics.length; start += 32) {
     assertActive();
     const chunk = metrics.slice(start, start + 32);

@@ -532,7 +532,7 @@ async function pullDirectUnlocked(
                     quota.fetchedAt && Date.parse(quota.fetchedAt) < Date.parse(page.generatedAt)
                       ? quota.fetchedAt
                       : page.generatedAt;
-                  await mergeQuota(db, machine.id, quota, collectedAt);
+                  await mergeQuota(db, machine.id, quota, collectedAt, ping.serverNowMs);
                   if (quota.status === "error")
                     quotaError = quota.error ?? "Quota check failed";
                   assertActive();
@@ -568,8 +568,9 @@ async function pullDirectUnlocked(
                   [machine.id],
                 )
               )?.at ?? null;
+            const rolledBack = newest !== null && newest > ping.serverNowMs;
             const since =
-              newest !== null && newest > windowStart && newest <= ping.serverNowMs
+              newest !== null && newest > windowStart && !rolledBack
                 ? newest
                 : windowStart;
             const page = await api.metrics(since, timeout.signal);
@@ -577,7 +578,10 @@ async function pullDirectUnlocked(
               assertActive();
               let changed = 0;
               await db.withTransactionAsync(async () => {
-                changed = await mergeMetrics(db, machine.id, page.metrics, now(), assertActive);
+                changed = await mergeMetrics(
+                  db, machine.id, page.metrics, now(), assertActive,
+                  rolledBack ? ping.serverNowMs : null,
+                );
                 assertActive();
               });
               return changed;
@@ -624,10 +628,15 @@ async function pullDirectUnlocked(
           // rows. Full history covers any unfinished incremental window, so
           // that window restarts as the reconciliation instead of finishing
           // first; so does a reconciliation that was parsing an older pin.
+          // A machine clock set back below the checkpoint invalidates a saved
+          // incremental window too: its `since` was taken on the wrong clock,
+          // so resuming it would skip everything recorded since the correction.
+          const rolledBack = stored !== null && ping.serverNowMs < stored;
           const progress =
-            reparse &&
-            (saved?.reconciliation === false ||
-              (saved?.parserVersion !== undefined && saved.parserVersion !== pinParser(pendingPin)))
+            (reparse &&
+              (saved?.reconciliation === false ||
+                (saved?.parserVersion !== undefined && saved.parserVersion !== pinParser(pendingPin)))) ||
+            (rolledBack && saved?.reconciliation === false)
               ? null
               : saved;
           const lastFull = await kvGetNumber(
@@ -638,7 +647,7 @@ async function pullDirectUnlocked(
             progress?.reconciliation ??
             (options.full === true ||
               reparse ||
-              (stored !== null && ping.serverNowMs < stored) ||
+              rolledBack ||
               stored === null ||
               lastFull === null ||
               now() < lastFull ||
@@ -750,7 +759,7 @@ async function pullDirectUnlocked(
                     db,
                     cursorKey(machine.id),
                     String(
-                      stored !== null && ping.serverNowMs < stored
+                      rolledBack
                         ? scanStartedAtMs!
                         : Math.max(stored ?? 0, scanStartedAtMs!),
                     ),
