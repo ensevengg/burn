@@ -18,12 +18,21 @@ dir="${BURN_INSTALL_DIR:-$HOME/.local/bin}"
 
 # The binaries live on burn-events-v* releases. "latest" would be whichever
 # release was published last (an app build, say), so the tag is looked up.
+# The checksums come from the same place as the binaries, so the connection
+# is what vouches for them: a release is fetched over HTTPS only, redirects
+# included. BURN_RELEASE_BASE (a mirror or a local copy) is taken as given.
+https="--proto =https --proto-redir =https"
 if [ -n "${BURN_RELEASE_BASE:-}" ]; then
   base="$BURN_RELEASE_BASE"
+  https=""
 else
   tag="${BURN_RELEASE_TAG:-}"
   if [ -z "$tag" ]; then
-    tag="$(curl -fsSL "${BURN_RELEASE_API:-https://api.github.com/repos/$repo/releases?per_page=100}" |
+    api="https://api.github.com/repos/$repo/releases?per_page=100"
+    api_https="$https"
+    if [ -n "${BURN_RELEASE_API:-}" ]; then api="$BURN_RELEASE_API"; api_https=""; fi
+    # shellcheck disable=SC2086
+    tag="$(curl -fsSL $api_https "$api" |
       grep -o '"tag_name": *"burn-events-v[^"]*"' | head -n 1 | sed 's/.*"\(burn-events-v[^"]*\)"/\1/')" || tag=""
   fi
   if [ -z "$tag" ]; then
@@ -50,7 +59,8 @@ trap 'rm -rf "$tmp"' EXIT
 
 fetch() {
   echo "downloading $1"
-  curl -fsSL --retry 2 -o "$tmp/$1" "$base/$1"
+  # shellcheck disable=SC2086
+  curl -fsSL $https --retry 2 -o "$tmp/$1" "$base/$1"
 }
 fetch "$reporter"
 fetch "$exporter"
