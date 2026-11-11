@@ -5,15 +5,35 @@
 #   curl -fsSL https://raw.githubusercontent.com/ensevengg/burn/main/scripts/install.sh | sh
 #
 # Overrides: BURN_INSTALL_DIR (default ~/.local/bin),
-#            BURN_RELEASE_BASE (default the latest release's download URL).
+#            BURN_RELEASE_TAG (default: the newest burn-events-v* release),
+#            BURN_RELEASE_BASE (a download URL to use instead of a release).
 # Windows: download burn-report-windows-x64.exe and
 # burn-events-x86_64-pc-windows-msvc.exe from the release page into one
 # folder, rename them burn-report.exe and burn-events.exe, and run
 # `burn-report.exe daemon`.
 set -eu
 
-base="${BURN_RELEASE_BASE:-https://github.com/ensevengg/burn/releases/latest/download}"
+repo="ensevengg/burn"
 dir="${BURN_INSTALL_DIR:-$HOME/.local/bin}"
+
+# The binaries live on burn-events-v* releases. "latest" would be whichever
+# release was published last (an app build, say), so the tag is looked up.
+if [ -n "${BURN_RELEASE_BASE:-}" ]; then
+  base="$BURN_RELEASE_BASE"
+else
+  tag="${BURN_RELEASE_TAG:-}"
+  if [ -z "$tag" ]; then
+    tag="$(curl -fsSL "${BURN_RELEASE_API:-https://api.github.com/repos/$repo/releases?per_page=100}" |
+      grep -o '"tag_name": *"burn-events-v[^"]*"' | head -n 1 | sed 's/.*"\(burn-events-v[^"]*\)"/\1/')" || tag=""
+  fi
+  if [ -z "$tag" ]; then
+    echo "No burn-events release was found for $repo." >&2
+    echo "Build from source instead: see the README's \"From source\" section." >&2
+    exit 1
+  fi
+  echo "release $tag"
+  base="https://github.com/$repo/releases/download/$tag"
+fi
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) reporter="burn-report-linux-x64"; exporter="burn-events-x86_64-unknown-linux-gnu" ;;
