@@ -232,7 +232,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       async removeMachine(environmentId) {
         if (!db) return;
         // In-flight pulls must not write the removed machine back. Other
-        // machines keep their status and resume pending backfills afterwards.
+        // machines keep their status and are pulled again afterwards.
         cancelActive();
         setStatus((current) => {
           const { [environmentId]: _removed, ...machineStates } = current.machineStates;
@@ -245,7 +245,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (mode === "direct") await removeDirectMachine(db, environmentId);
         else await removeEnvironmentLocal(db, environmentId);
         invalidate();
-        if (mode === "direct") void pull({ continuation: true });
+        // A full pass, not a continuation: the cancel above also dropped
+        // queued first pulls (a machine added moments ago has no saved
+        // backfill to resume) and other machines' in-flight refreshes.
+        if (mode === "direct") void pull();
       },
       async setReportingTimezone(tz) {
         if (!db) return;
