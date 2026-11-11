@@ -472,7 +472,7 @@ function Limits() {
     <>
       <SectionTitle trailing={checkingMachines ? "checking…" : "most urgent first"}>Limits</SectionTitle>
       {subscriptions.length === 0 ? (
-        <Empty message="No quota snapshots yet. Run `npx burn-report usage` on a machine." />
+        <Empty message="No limits yet. They arrive with the next pull from a connected machine." />
       ) : (
         subscriptions.map((sub) => {
           const stale = now - Date.parse(sub.fetchedAt) > STALE_QUOTA_MS;

@@ -39,7 +39,7 @@ try {
   for (let i = 1; command !== "controls" && i < argv.length; i++) {
     const arg = argv[i]!;
     if (!arg.startsWith("--") || !allowed.includes(arg.slice(2)))
-      throw new Error(`Unknown argument: ${arg} (try 'npx burn-report help')`);
+      throw new Error(`Unknown argument: ${arg} (try 'burn-report help')`);
     const name = arg.slice(2);
     // Compatibility with previously documented machine-only init commands.
     if (name === "direct" || name === "print") { args.set(name, ""); continue; }
@@ -59,7 +59,7 @@ try {
       process.exitCode = await runControls(argv[1] ?? "status", argv[2]);
       break;
     case "help": case "--help": case "-h": usage(); break;
-    default: throw new Error(`Unknown command: ${command} (try 'npx burn-report help')`);
+    default: throw new Error(`Unknown command: ${command} (try 'burn-report help')`);
   }
 } catch (err) {
   console.error(`burn-report: ${(err as Error).message}`);

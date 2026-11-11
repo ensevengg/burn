@@ -224,10 +224,11 @@ function AddMachine({
         machine's Tailscale name or address (or paste the URL the daemon prints).
       </Text>
       <Text selectable style={[styles.command, { color: C.text, backgroundColor: C.panelAlt, borderColor: C.border }]}>
-        {'npx burn-report init --slug <machine-slug> --name "<Display Name>"\nnpx burn-report daemon'}
+        {"burn-report daemon"}
       </Text>
       <Text style={[type.muted, { color: C.faint, marginTop: 8, lineHeight: 17 }]}>
-        Give each Windows, WSL or dual-boot installation its own slug; share --host-group across one physical machine.
+        The machine is named after its hostname; rename it with burn-report init. Installing burn-report is one
+        line in the README.
       </Text>
       <TextInput
         value={url}

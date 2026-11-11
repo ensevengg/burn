@@ -46,13 +46,15 @@ export async function runDoctor(): Promise<number> {
   ]);
   const supportsFingerprint = capabilities?.tokscaleVersion === config.tokscalePin && capabilities.capabilities.includes("fingerprint-v1");
   const checks = [
-    { name: "tokscale", ok: tokscale !== null, detail: tokscale ? `reachable at pin ${config.tokscalePin}` : `npx tokscale@${config.tokscalePin} failed` },
+    // Usage rows come from burn-events alone; only vendor limits need the tokscale CLI.
+    { name: "tokscale", ok: tokscale !== null, optional: true, detail: tokscale ? `reachable at pin ${config.tokscalePin}` : `tokscale@${config.tokscalePin} could not be run (needs Bun, Node or tokscale on PATH) — usage still syncs, vendor limits will not` },
     { name: "burn-events", ok: exporter === config.tokscalePin && supportsFingerprint, detail: exporter === null ? "exporter not found — install the pinned burn-events binary (or set BURN_EVENTS_BIN)" : exporter === config.tokscalePin && supportsFingerprint ? `matches pin ${config.tokscalePin}; fingerprint cache supported` : exporter === config.tokscalePin ? "fingerprint-v1 capability is missing — rebuild: cargo install --path crates/burn-events" : `version ${exporter} differs from pin ${config.tokscalePin} — rebuild the exporter` },
     { name: "Tailscale", ok: address !== null, detail: address ?? "no tailnet IPv4 address — start Tailscale; the daemon binds to it as soon as it appears" },
   ];
-  for (const check of checks) console.log(`${check.ok ? "ok" : "FAIL"} ${check.name}: ${check.detail}`);
+  for (const check of checks)
+    console.log(`${check.ok ? "ok" : "optional" in check ? "warn" : "FAIL"} ${check.name}: ${check.detail}`);
   if (address !== null) console.log(`\nOn the phone, add: http://${address}:8787 (or this machine's Tailscale name)`);
-  return checks.every((check) => check.ok) ? 0 : 1;
+  return checks.every((check) => check.ok || "optional" in check) ? 0 : 1;
 }
 
 /** Local diagnostic output; the resident HTTP server supplies phone quotas. */

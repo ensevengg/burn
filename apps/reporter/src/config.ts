@@ -117,7 +117,7 @@ export function atomicJson(path: string, data: unknown): void {
 export function loadConfig(): BurnConfig {
   const path = configPath();
   if (!existsSync(path)) {
-    throw new Error(`No config at ${path}. Run: npx burn-report init`);
+    throw new Error(`No config at ${path}. Run: burn-report daemon (or burn-report init to choose a name)`);
   }
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
   const parsed = configSchema.safeParse(raw);
