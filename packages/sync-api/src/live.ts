@@ -478,8 +478,10 @@ export function parseLivePeersPage(raw: unknown): LivePeersPage {
       // A peer list is another machine's word: only an address in
       // Tailscale's range (100.64.0.0/10) is accepted, which is all a
       // reporter ever lists, never a name or URL to send the phone elsewhere.
-      const address = /^http:\/\/100\.(\d{1,3})\.\d{1,3}\.\d{1,3}(?::\d{1,5})?$/.exec(url);
-      if (!address || Number(address[1]) < 64 || Number(address[1]) > 127)
+      // Octets are plain decimals: a leading zero reads as octal to a URL
+      // parser, which would turn 100.064.x.x into an address outside the range.
+      const address = /^http:\/\/100\.([1-9]\d{1,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})(?::\d{1,5})?$/.exec(url);
+      if (!address || Number(address[1]) < 64 || Number(address[1]) > 127 || Number(address[2]) > 255 || Number(address[3]) > 255)
         throw new LiveError(`peers[${index}].url: invalid endpoint`);
       return {
         url,

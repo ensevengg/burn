@@ -248,6 +248,8 @@ describe("peer discovery (ADR 0005)", () => {
       // Names and addresses outside Tailscale's range, whatever the port.
       "http://evil.example:8787", "http://192.168.1.4:8787", "http://100.63.0.1:8787", "http://100.128.0.1:8787",
       "https://100.64.0.2:8787", "http://100.64.0.2:8787/", "http://100.64.0.2.evil.example:8787",
+      // A URL parser reads a leading zero as octal: 100.064.0.1 is 100.52.0.1.
+      "http://100.064.0.1:8787", "http://100.64.01.1:8787", "http://100.64.0.010:8787", "http://100.64.0.256:8787",
     ])
       expect(() => parseLivePeersPage({ peers: [{ ...peer, url }] })).toThrow("invalid endpoint");
     expect(() => parseLivePeersPage({ peers: [{ ...peer, osKind: "plan9" }] })).toThrow();
