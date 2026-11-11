@@ -131,8 +131,12 @@ export function spawnRunner(
         ),
       );
     }, timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    // Stream decoders hold a multibyte character split across pipe chunks;
+    // decoding each chunk alone turns both halves into U+FFFD.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => (stdout += chunk));
+    child.stderr.on("data", (chunk: string) => (stderr += chunk));
     child.on("error", (err) => {
       clearTimeout(timer);
       reject(

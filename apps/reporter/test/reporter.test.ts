@@ -120,3 +120,14 @@ describe("init artifacts", () => {
     expect(existsSync(join(dir, "setup-tokens.sql"))).toBe(false);
   });
 });
+
+describe("spawnRunner", () => {
+  test("keeps multibyte characters that straddle pipe chunks", async () => {
+    const { spawnRunner } = await import("../src/tokscale");
+    // 3-byte characters at every offset: any chunk boundary splits one.
+    const script = `const line = "é" + "日本語".repeat(700) + "\\n"; for (let i = 0; i < 400; i++) process.stdout.write(line);`;
+    const { stdout } = await spawnRunner({ command: process.execPath, prefix: [] }, ["-e", script], 30_000);
+    expect(stdout.includes("�")).toBe(false);
+    expect(stdout.length).toBe(400 * (1 + 2100 + 1));
+  });
+});
