@@ -206,21 +206,25 @@ async function writeEvents(
   trackInsertedFor: string | null = null,
 ): Promise<number> {
   let changed = 0;
+  // Which ids already exist is asked once per 500 rows, not once per insert
+  // batch: a reconciliation of unchanged history is mostly these lookups.
+  let known: Set<string> | null = null;
+  if (trackInsertedFor !== null) {
+    known = new Set();
+    for (let i = 0; i < events.length; i += 500) {
+      assertActive();
+      const ids = events.slice(i, i + 500).map((e) => e.eventId);
+      const rows = await db.getAllAsync<{ event_id: string }>(
+        `select event_id from usage_events where event_id in (${ids.map(() => "?").join(",")})`,
+        ids,
+      );
+      for (const row of rows) known.add(row.event_id);
+    }
+  }
   // 32 × 27 bindings stays below the classic 999-parameter SQLite limit.
   for (let i = 0; i < events.length; i += 32) {
     assertActive();
     const chunk = events.slice(i, i + 32);
-    const known =
-      trackInsertedFor === null
-        ? null
-        : new Set(
-            (
-              await db.getAllAsync<{ event_id: string }>(
-                `select event_id from usage_events where event_id in (${chunk.map(() => "?").join(",")})`,
-                chunk.map((e) => e.eventId),
-              )
-            ).map((row) => row.event_id),
-          );
     const conflict = `
       on conflict(event_id) do update set ${contentColumns
         .map((c) => `${c}=excluded.${c}`)
@@ -232,7 +236,8 @@ async function writeEvents(
       chunk.flatMap(eventBindings),
     );
     changed += result.changes;
-    const inserted = known === null ? [] : chunk.filter((e) => !known.has(e.eventId));
+    const seen = known;
+    const inserted = seen === null ? [] : chunk.filter((e) => !seen.has(e.eventId));
     if (inserted.length > 0)
       await db.runAsync(
         `insert or ignore into reconcile_new_events (environment_id, event_id)
