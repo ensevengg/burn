@@ -61,7 +61,7 @@ bun run reporter -- daemon
 ### Reporter tips
 
 - **Rename a machine:** `burn-report init --slug my-machine --name "My Machine"`. Every flag is optional.
-- **One slug per install:** Windows, WSL and each dual-boot side. WSL gets a `-wsl` slug by default.
+- **One slug per install:** Windows, WSL and each dual-boot side. By default Windows gets a `-windows` slug and WSL a `-wsl` slug.
 - **Same box?** Share a `--host-group`. Windows and WSL share their hostname automatically.
 - **Flags:** `--port 8787`, `--bind <address>`. `serve` is an alias for `daemon`.
 - **Check a machine:** `burn-report doctor`.
