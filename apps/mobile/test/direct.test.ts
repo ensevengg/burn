@@ -1791,3 +1791,29 @@ test("coalesce runs the first request at once and folds a burst into one trailin
   await new Promise((resolve) => setTimeout(resolve, 35));
   expect(runs).toBe(3);
 });
+
+test("registered machines reveal the unregistered reporters on the tailnet", async () => {
+  const { discoverPeerMachines } = await import("../src/lib/direct");
+  const fx = mirrorFixture();
+  const base = (slug: string): LiveApi => ({
+    ping: async () => ping({ slug, displayName: slug.toUpperCase() }),
+    events: async () => ({ sinceMs: 0, generatedAt: "2026-09-30T10:00:00Z", events: [] }),
+    quotas: async () => ({ generatedAt: "2026-09-30T10:00:00Z", quotas: [] }),
+  });
+  const peer = (slug: string) => ({ url: `http://100.64.0.${slug.length}:8787`, slug, displayName: slug.toUpperCase(), osKind: "linux" as const });
+  const apis: Record<string, LiveApi> = {
+    // Sees both itself-registered sibling and two new machines.
+    "http://a": { ...base("a"), peers: async () => ({ peers: [peer("b"), peer("ccc"), peer("dddd")] }) },
+    // Older reporter: no endpoint.
+    "http://b": base("b"),
+  };
+  expect(await discoverPeerMachines(fx.db, { apiFor: (endpoint) => apis[endpoint]! })).toEqual([]);
+  await addDirectMachine(fx.db, "http://a", { apiFor: (endpoint) => apis[endpoint]! });
+  await addDirectMachine(fx.db, "http://b", { apiFor: (endpoint) => apis[endpoint]! });
+  expect(await discoverPeerMachines(fx.db, { apiFor: (endpoint) => apis[endpoint]! })).toEqual([peer("ccc"), peer("dddd")]);
+  // An unreachable machine or a malformed list contributes nothing.
+  apis["http://a"] = { ...base("a"), peers: async () => { throw new Error("offline"); } };
+  expect(await discoverPeerMachines(fx.db, { apiFor: (endpoint) => apis[endpoint]! })).toEqual([]);
+  apis["http://a"] = { ...base("a"), peers: async () => ({ peers: [{ ...peer("ccc"), url: "http://evil.example/x" }] }) };
+  expect(await discoverPeerMachines(fx.db, { apiFor: (endpoint) => apis[endpoint]! })).toEqual([]);
+});

@@ -231,6 +231,45 @@ export function normalizeMachineUrl(raw: string): string {
   return url;
 }
 
+export interface DiscoveredMachine {
+  url: string;
+  slug: string;
+  displayName: string;
+  osKind: string;
+}
+
+/**
+ * Other reporters on the tailnet that are not registered yet, as reported by
+ * the machines that are (ADR 0005). Best effort and read-only: unreachable
+ * machines and reporters without the endpoint simply contribute nothing.
+ */
+export async function discoverPeerMachines(
+  db: SQLiteDatabase,
+  options: { timeoutMs?: number; apiFor?: (endpoint: string) => LiveApi } = {},
+): Promise<DiscoveredMachine[]> {
+  const registered = await listDirectMachines(db);
+  const known = new Set(registered.map((machine) => machine.slug));
+  const lists = await Promise.all(
+    registered.map(async (machine) => {
+      const api = validateLiveApi(
+        options.apiFor ? options.apiFor(machine.baseUrl) : httpLiveApiFor(machine.baseUrl, fetch),
+      );
+      if (!api.peers) return [];
+      const timeout = withTimeout(undefined, options.timeoutMs ?? 4_000);
+      try {
+        return (await api.peers(timeout.signal)).peers;
+      } catch {
+        return [];
+      } finally {
+        timeout.cancel();
+      }
+    }),
+  );
+  const found = new Map<string, DiscoveredMachine>();
+  for (const peer of lists.flat()) if (!known.has(peer.slug) && !found.has(peer.slug)) found.set(peer.slug, peer);
+  return [...found.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
 /**
  * Validate an endpoint with /ping and register it. The environment id reuses
  * an existing environment row with the same slug when one exists, preserving

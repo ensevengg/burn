@@ -155,3 +155,55 @@ describe("exporter lookup", () => {
     }
   });
 });
+
+describe("peer discovery (ADR 0005)", () => {
+  const config = configSchema.parse({ environmentSlug: "hub", environmentName: "Hub" });
+  const deps = { now: Date.now, exporterCheck: async () => config.tokscalePin, exporterScan: async () => "", usage: async () => [] };
+
+  test("lists other reporters among the tailnet peers and skips everything else", async () => {
+    const { PeerDirectory } = await import("../src/peers");
+    const { startLiveServer } = await import("../src/serve");
+    const { parseLivePeersPage, parseLivePing } = await import("@burn/sync-api");
+    // Two real reporters, one unrelated HTTP service and one dead address.
+    const other = await startLiveServer(configSchema.parse({ environmentSlug: "laptop", environmentName: "Laptop", osKind: "windows" }), { bind: "127.0.0.1", port: 0, deps, peerDiscovery: false });
+    const stranger = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("<html>router</html>") });
+    let probes = 0;
+    const targets: Record<string, string> = { "100.64.0.2": other.url, "100.64.0.3": `http://127.0.0.1:${stranger.port}`, "100.64.0.4": "http://127.0.0.1:1" };
+    const directory = new PeerDirectory(8787, {
+      listPeers: async () => Object.keys(targets),
+      // Route the tailnet addresses to the local stand-ins.
+      fetchImpl: ((input: string, init?: RequestInit) => {
+        probes++;
+        const url = new URL(String(input));
+        expect(url.pathname).toBe("/ping");
+        expect(url.port).toBe("8787");
+        return fetch(`${targets[url.hostname]}/ping`, init);
+      }) as typeof fetch,
+    });
+    const hub = await startLiveServer(config, { bind: "127.0.0.1", port: 0, deps: { ...deps, peers: directory } });
+    try {
+      expect(parseLivePing(await (await fetch(`${hub.url}/ping`)).json()).capabilities).toContain("peer-discovery");
+      const page = parseLivePeersPage(await (await fetch(`${hub.url}/live/peers`)).json());
+      expect(page.peers).toEqual([{ url: "http://100.64.0.2:8787", slug: "laptop", displayName: "Laptop", osKind: "windows" }]);
+      // Answers are cached for a minute rather than re-probing the tailnet.
+      await fetch(`${hub.url}/live/peers`);
+      expect(probes).toBe(3);
+      // A reporter started without discovery neither advertises nor answers it.
+      expect(parseLivePing(await (await fetch(`${other.url}/ping`)).json()).capabilities).not.toContain("peer-discovery");
+      expect((await fetch(`${other.url}/live/peers`)).status).toBe(404);
+    } finally {
+      hub.stop();
+      other.stop();
+      stranger.stop(true);
+    }
+  });
+
+  test("a peer list cannot hand the phone an arbitrary URL", async () => {
+    const { parseLivePeersPage } = await import("@burn/sync-api");
+    const peer = { url: "http://100.64.0.2:8787", slug: "a", displayName: "A", osKind: "linux" };
+    expect(parseLivePeersPage({ peers: [peer] }).peers).toHaveLength(1);
+    for (const url of ["http://evil.example/steal?x=1", "javascript:alert(1)", "http://host/path", "ftp://100.64.0.2"])
+      expect(() => parseLivePeersPage({ peers: [{ ...peer, url }] })).toThrow("invalid endpoint");
+    expect(() => parseLivePeersPage({ peers: [{ ...peer, osKind: "plan9" }] })).toThrow();
+  });
+});

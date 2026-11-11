@@ -10,12 +10,14 @@ import {
   CONTROL_HEADER,
   DAY_DIGESTS_CAPABILITY,
   EVENT_EXPORT_SCHEMA,
+  PEER_DISCOVERY_CAPABILITY,
   POWER_MODE_CAPABILITY,
   POWER_MODE_PATH,
   parsePowerModeRequest,
   type MachineQuotaInput,
 } from "@burn/sync-api";
 import { ControlError, PowerModeController } from "./power-mode.js";
+import { PeerDirectory } from "./peers.js";
 import { configPath, loadOrInitConfig, type BurnConfig } from "./config.js";
 import {
   fetchUsage,
@@ -33,6 +35,8 @@ export interface LiveDeps {
   exporterCheck?: () => Promise<string | null>;
   usage?: (pin: string) => Promise<unknown>;
   powerMode?: PowerModeController;
+  /** Present on a listening server: answers /live/peers and is advertised. */
+  peers?: PeerDirectory;
 }
 
 export interface LiveServerHandle {
@@ -204,7 +208,11 @@ export function createLiveFetch(
     const controls = control !== null && (await control.supported()) ? [POWER_MODE_CAPABILITY] : [];
     return {
       protocol: 1 as const,
-      capabilities: ["paged-events", "content-hash", "machine-metrics", "newest-first-pages", DAY_DIGESTS_CAPABILITY, ...controls],
+      capabilities: [
+        "paged-events", "content-hash", "machine-metrics", "newest-first-pages", DAY_DIGESTS_CAPABILITY,
+        ...(deps.peers ? [PEER_DISCOVERY_CAPABILITY] : []),
+        ...controls,
+      ],
       ready: snapshots.peek() !== null,
       scanAgeMs: snapshots.peek()
         ? now() - Date.parse(snapshots.peek()!.generatedAt)
@@ -360,6 +368,14 @@ export function createLiveFetch(
           );
         }
       }
+      case "/live/peers": {
+        if (!deps.peers) return jsonResponse({ error: "not found" }, 404);
+        try {
+          return respond(req, { peers: await deps.peers.list() });
+        } catch (err) {
+          return jsonResponse({ error: errorText(err) }, 500);
+        }
+      }
       case "/live/digests": {
         try {
           const snapshot = await snapshots.get();
@@ -418,6 +434,8 @@ export async function startLiveServer(
     detect?: () => Promise<string | null>;
     /** Suppress the loopback warning (the supervisor prints its own). */
     quiet?: boolean;
+    /** Answer /live/peers (default on). */
+    peerDiscovery?: boolean;
   } = {},
 ): Promise<LiveServerHandle> {
   const detected = options.bind ? null : await (options.detect ?? tailscaleIp)();
@@ -430,12 +448,17 @@ export async function startLiveServer(
   }
   const metrics = options.deps?.metrics ?? new SystemMetricHistory();
   const sample = () => { void metrics.sample().catch((err) => console.warn(`[systems] ${errorText(err)}`)); };
+  // Peers are probed on the port this server ends up on, known only once it
+  // listens, so the directory is filled in right after.
+  const liveDeps: LiveDeps = { config, ...options.deps, metrics };
   const server = Bun.serve({
     hostname,
     port,
     idleTimeout: 150,
-    fetch: createLiveFetch({ config, ...options.deps, metrics }),
+    fetch: createLiveFetch(liveDeps),
   });
+  if (!liveDeps.peers && options.peerDiscovery !== false)
+    liveDeps.peers = new PeerDirectory(server.port ?? port);
   const sampler = config.osKind === "wsl" ? null : setInterval(sample, 30_000);
   if (sampler) sample();
   // Injected scans (tests, embedders) get their own cold store in

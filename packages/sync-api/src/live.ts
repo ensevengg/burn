@@ -66,6 +66,21 @@ export interface LiveQuotasPage {
   quotas: MachineQuotaInput[];
 }
 
+/** Capability name a reporter advertises when it serves /live/peers. */
+export const PEER_DISCOVERY_CAPABILITY = "peer-discovery";
+
+/** Another burn reporter on the same tailnet, as seen from one machine. */
+export interface LivePeer {
+  url: string;
+  slug: string;
+  displayName: string;
+  osKind: OsKind;
+}
+
+export interface LivePeersPage {
+  peers: LivePeer[];
+}
+
 /** Capability name a reporter advertises when it serves /live/digests. */
 export const DAY_DIGESTS_CAPABILITY = "day-digests";
 export const DAY_MS = 86_400_000;
@@ -131,6 +146,8 @@ export interface LiveApi {
   ): Promise<LiveEventsPage>;
   quotas(signal?: AbortSignal): Promise<LiveQuotasPage>;
   metrics?(sinceMs: number, signal?: AbortSignal): Promise<LiveMetricsPage>;
+  /** Other reporters this machine can see on the tailnet (ADR 0005). */
+  peers?(signal?: AbortSignal): Promise<LivePeersPage>;
   /** Per-day content digests; only reporters advertising the capability answer. */
   digests?(signal?: AbortSignal): Promise<LiveDigestsPage>;
   /** Opt-in control (ADR 0004); only machines advertising it answer. */
@@ -157,6 +174,10 @@ export function validateLiveApi(transport: LiveTransport): LiveApi {
   if (transport.metrics) {
     const metrics = transport.metrics;
     api.metrics = async (...args) => parseLiveMetricsPage(await metrics(...args));
+  }
+  if (transport.peers) {
+    const peers = transport.peers;
+    api.peers = async (...args) => parseLivePeersPage(await peers(...args));
   }
   if (transport.digests) {
     const digests = transport.digests;
@@ -278,6 +299,7 @@ export function httpLiveApiFor(
     quotas: async (signal) => call("/live/quotas", signal),
     metrics: async (sinceMs, signal) => call(`/live/metrics?since=${Math.floor(sinceMs)}`, signal),
     digests: async (signal) => call("/live/digests", signal),
+    peers: async (signal) => call("/live/peers", signal),
     powerMode: async (signal) => call(POWER_MODE_PATH, signal),
     setPowerMode: async (mode, signal) => call(POWER_MODE_PATH, signal, undefined, { mode }),
   });
@@ -444,6 +466,26 @@ function nullableTemperature(value: unknown, where: string): number | null {
   const number = expectNumber(value, where);
   if (number < -50 || number > 200) throw new LiveError(`${where}: invalid temperature`);
   return number;
+}
+
+export function parseLivePeersPage(raw: unknown): LivePeersPage {
+  const page = expectObject(raw, "peers page");
+  if (!Array.isArray(page.peers)) throw new LiveError("peers: expected an array");
+  return {
+    peers: page.peers.map((entry, index) => {
+      const peer = expectObject(entry, `peers[${index}]`);
+      const url = identity(peer.url, `peers[${index}].url`);
+      // A peer list is another machine's word: only plain tailnet-style
+      // endpoints are accepted, never an arbitrary URL to send the phone to.
+      if (!/^https?:\/\/[A-Za-z0-9.\-[\]:]+$/.test(url)) throw new LiveError(`peers[${index}].url: invalid endpoint`);
+      return {
+        url,
+        slug: identity(peer.slug, `peers[${index}].slug`),
+        displayName: identity(peer.displayName, `peers[${index}].displayName`),
+        osKind: choice(peer.osKind, ["windows", "wsl", "linux", "macos"], `peers[${index}].osKind`),
+      };
+    }),
+  };
 }
 
 export function parseLiveDigestsPage(raw: unknown): LiveDigestsPage {

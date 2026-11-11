@@ -692,7 +692,7 @@ test("/live/digests lists one digest per UTC day and only a changed day's digest
   expect(first.days.map(([day]) => day)).toEqual([100, 101, 103]);
   expect(new Set(first.days.map(([, digest]) => digest)).size).toBe(3);
   // The list names the snapshot the event pages come from.
-  const page = await (await fetch(new Request("http://machine/live/events?limit=10"))).json();
+  const page = (await (await fetch(new Request("http://machine/live/events?limit=10"))).json()) as { snapshotId: string; contentHash: string };
   expect(first.snapshotId).toBe(page.snapshotId);
   expect(first.contentHash).toBe(page.contentHash);
 

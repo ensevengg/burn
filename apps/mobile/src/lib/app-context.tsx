@@ -8,8 +8,8 @@ import { openDb, resetDb, kvSet, type SQLiteDatabase } from "./db";
 import { getMode, getReportingTimezone, setReportingTimezone, type AppMode } from "./settings";
 import { seedDemoData } from "./sync";
 import {
-  pullDirectFromMachines, cancelDirectPull, addDirectMachine,
-  removeDirectMachine, type DirectPullStatus, type DirectPullOptions,
+  pullDirectFromMachines, cancelDirectPull, addDirectMachine, discoverPeerMachines,
+  removeDirectMachine, type DirectPullStatus, type DirectPullOptions, type DiscoveredMachine,
 } from "./direct";
 import { removeEnvironmentLocal } from "../data/repository";
 import {
@@ -30,6 +30,8 @@ interface AppState {
   enterDemo: () => Promise<void>;
   connectDirect: () => Promise<void>;
   addDirectMachine: (url: string) => Promise<{ slug: string; displayName: string }>;
+  /** Unregistered reporters the registered machines can see on the tailnet. */
+  discoverMachines: () => Promise<DiscoveredMachine[]>;
   disconnect: () => Promise<void>;
   sync: () => Promise<void>;
   requestSync: (environmentId: string | null) => Promise<void>;
@@ -245,6 +247,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         invalidate();
         void pull({ environmentId: added.id });
         return added;
+      },
+      async discoverMachines() {
+        return db && mode === "direct" ? discoverPeerMachines(db) : [];
       },
       disconnect: clearData,
       clearData,
