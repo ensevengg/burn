@@ -63,16 +63,10 @@ console.log(
 );
 db.close();
 // Exercise the production asynchronous query while a timer represents pending input.
+// The production query reads 15-minute slot totals, not rows.
 const rawRows = rows.map((e) => ({
-  occurred_at_ms: e.occurredAtMs,
-  input_tokens: e.inputTokens,
-  output_tokens: e.outputTokens,
-  cache_read_tokens: e.cacheReadTokens,
-  cache_write_tokens: 0,
-  reasoning_tokens: 0,
-  cost: "0.01",
-  cost_is_complete: 1,
-  duration_ms: null,
+  slot: Math.floor(e.occurredAtMs / 900_000),
+  value: e.inputTokens + e.outputTokens + e.cacheReadTokens,
 }));
 const queryDb = { getAllAsync: async () => rawRows } as unknown as SQLiteDatabase;
 const queryStarted = performance.now();
@@ -89,7 +83,7 @@ try {
   await queryGranularityMax(queryDb, "Asia/Kolkata", "daily");
   console.log(
     JSON.stringify({
-      case: "27000 events cooperative screen query (mock native read)",
+      case: "27000 slot rows through the historical-peak query (mock native read)",
       elapsedMs: Math.round(performance.now() - queryStarted),
       timerTicks: ticks,
       maxTimerGapMs: Math.round(maxGap),
