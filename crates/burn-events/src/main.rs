@@ -290,10 +290,27 @@ fn source_fingerprint() -> Result<String, String> {
 
     // Scanner behavior and pricing affect normalized rows even when transcript
     // files are unchanged. Their cache/config files are therefore sources too.
-    let config_dir = paths::get_config_dir();
-    sources.push(config_dir.join("settings.json"));
-    sources.push(config_dir.join("pricing-litellm.json"));
+    sources.extend(config_sources(&paths::get_config_dir(), &paths::get_cache_dir()));
     fingerprint_paths(&sources)
+}
+
+/// Files outside the transcripts that change priced output: scanner settings,
+/// the user's own price overrides, and the three price lists tokscale keeps in
+/// its cache directory (not beside the settings, where an earlier version of
+/// this probe looked and so never saw a price refresh).
+fn config_sources(config_dir: &std::path::Path, cache_dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut sources = vec![
+        config_dir.join("settings.json"),
+        config_dir.join("custom-pricing.json"),
+    ];
+    for name in [
+        "pricing-litellm.json",
+        "pricing-openrouter.json",
+        "pricing-models-dev.json",
+    ] {
+        sources.push(cache_dir.join(name));
+    }
+    sources
 }
 
 fn fingerprint_paths(paths: &[PathBuf]) -> Result<String, String> {
@@ -360,7 +377,7 @@ fn load_scanner_settings() -> ScannerSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::{capabilities, fingerprint_paths};
+    use super::{capabilities, config_sources, fingerprint_paths};
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -382,6 +399,35 @@ mod tests {
         let second = fingerprint_paths(std::slice::from_ref(&path)).unwrap();
         std::fs::remove_file(path).unwrap();
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn fingerprint_sees_price_lists_and_custom_pricing() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let config = std::env::temp_dir().join(format!("burn-events-config-{nonce}"));
+        let cache = config.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let sources = config_sources(&config, &cache);
+        let empty = fingerprint_paths(&sources).unwrap();
+        // Each file tokscale prices from must move the fingerprint, where
+        // tokscale actually keeps it.
+        let mut seen = vec![empty];
+        for path in [
+            cache.join("pricing-litellm.json"),
+            cache.join("pricing-openrouter.json"),
+            cache.join("pricing-models-dev.json"),
+            config.join("custom-pricing.json"),
+            config.join("settings.json"),
+        ] {
+            std::fs::write(&path, b"{}").unwrap();
+            let next = fingerprint_paths(&sources).unwrap();
+            assert!(!seen.contains(&next), "{} did not change the fingerprint", path.display());
+            seen.push(next);
+        }
+        std::fs::remove_dir_all(config).unwrap();
     }
 
     #[test]
