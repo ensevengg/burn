@@ -40,10 +40,21 @@ describe("fillSeries", () => {
   test("idle days become zero buckets so the line drops instead of bridging", () => {
     const now = Date.parse("2026-10-05T06:00:00Z");
     const filled = fillSeries([bucket("2026-10-01", 5), bucket("2026-10-04", 7)], "daily", IST, now - 7 * 86_400_000, now);
+    // The window opens at 11:30 IST on 28 Sep; that partial day is left off.
     expect(filled.map((b) => b.key)).toEqual([
-      "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05",
+      "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05",
     ]);
-    expect(filled.map((b) => b.cost)).toEqual([0, 0, 0, 5, 0, 0, 7, 0]);
+    expect(filled.map((b) => b.cost)).toEqual([0, 0, 5, 0, 0, 7, 0]);
+  });
+
+  test("a window that opens exactly on a bucket boundary keeps its first bucket", () => {
+    const now = Date.parse("2026-10-05T06:00:00Z");
+    const midnightIst = Date.parse("2026-09-27T18:30:00Z");
+    const filled = fillSeries([bucket("2026-09-28", 3)], "daily", IST, midnightIst, now);
+    expect(filled[0]).toMatchObject({ key: "2026-09-28", cost: 3 });
+    expect(filled).toHaveLength(8);
+    // A rolling 24 hours shows 24 whole hours, not 25 with a sliver in front.
+    expect(fillSeries([], "hourly", IST, now - 86_400_000, now)).toHaveLength(24);
   });
 
   test("an unbounded window starts at the first month with data and keeps skewed future buckets", () => {
