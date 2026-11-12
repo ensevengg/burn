@@ -23,7 +23,8 @@
       "blockedPermissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"
-      ]
+      ],
+      "versionCode": 100
     },
     "extra": {
       "eas": {
@@ -39,7 +40,8 @@
         }
       ],
       "./plugins/with-tailnet-http",
-      "./plugins/with-workspace-bundle"
+      "./plugins/with-workspace-bundle",
+      "./plugins/with-release-signing"
     ]
   }
 }
