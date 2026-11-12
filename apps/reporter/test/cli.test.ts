@@ -17,11 +17,19 @@ test("CLI documents the machine-only workflow and rejects removed upload command
   expect(help.code).toBe(0);
   expect(help.stdout).toContain("Tailscale");
   expect(help.stdout).not.toMatch(/Supabase|--url|--key|scheduled push/);
-  for (const args of [["push"], ["init", "--url", "https://legacy.invalid"], ["daemon", "--no-live"]]) {
+  for (const args of [["push"], ["init", "--url", "https://legacy.invalid"], ["install-service", "--slug", "x"]]) {
     const result = await run(...args);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("Unknown");
   }
+  // Hand-written services from the upload era point at their replacement.
+  const pusher = await run("daemon", "--no-live");
+  expect(pusher.code).toBe(1);
+  expect(pusher.stderr).toContain("install-service");
+  const advertised = await run("serve", "--bind", "127.0.0.1", "--live-url", "https://machine.tailnet.ts.net");
+  expect(advertised.code).toBe(1);
+  expect(advertised.stderr).toContain("Machines");
+  expect((await run("install-service", "--port", "0")).stderr).toContain("--port");
 });
 
 test("controls toggles the opt-in flag and rejects unknown controls", async () => {

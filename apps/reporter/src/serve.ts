@@ -69,19 +69,28 @@ export function tailnetAddress(
   return tunnel;
 }
 
+export function hasLocalAddress(
+  address: string,
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): boolean {
+  return Object.values(interfaces).some((entries) => entries?.some((entry) => entry.address === address));
+}
+
 /** Resolve the tailnet IPv4: the tailscale CLI when it is on PATH (it knows
  * which interface is Tailscale's), else the interface in Tailscale's range. */
 export async function tailscaleIp(timeoutMs = 5_000): Promise<string | null> {
-  try {
-    const { stdout } = await spawnRunner(
-      { command: "tailscale", prefix: [] },
-      ["ip", "-4"],
-      timeoutMs,
-    );
-    const address = /^(\d+\.\d+\.\d+\.\d+)\s*$/m.exec(stdout)?.[1];
-    if (address) return address;
-  } catch {
-    /* no CLI, or Tailscale is stopped */
+  // Under WSL mirrored networking the distro shares the Windows client's
+  // tailnet address, and only the Windows CLI knows it. Under NAT networking
+  // that address is the host's, which the distro cannot bind.
+  const commands = process.env["WSL_DISTRO_NAME"] ? ["tailscale", "tailscale.exe"] : ["tailscale"];
+  for (const command of commands) {
+    try {
+      const { stdout } = await spawnRunner({ command, prefix: [] }, ["ip", "-4"], timeoutMs);
+      const address = /^(\d+\.\d+\.\d+\.\d+)\s*$/m.exec(stdout)?.[1];
+      if (address && (command === "tailscale" || hasLocalAddress(address))) return address;
+    } catch {
+      /* no CLI, or Tailscale is stopped */
+    }
   }
   return tailnetAddress();
 }
@@ -492,7 +501,9 @@ export async function startLiveServer(
  * before Tailscale has an address; binding loopback once and staying there
  * left the machine unreachable until someone restarted it. This keeps
  * looking and moves to the tailnet address when it appears (or changes),
- * starting the new listener before stopping the old one.
+ * starting the new listener before stopping the old one. A listener on an
+ * unchanged address that stops answering (Tailscale restarted or updated and
+ * recreated its adapter) is rebound after two failed self-checks in a row.
  */
 export async function superviseLiveServer(
   config: BurnConfig,
@@ -503,9 +514,14 @@ export async function superviseLiveServer(
     detect?: () => Promise<string | null>;
     pollMs?: number;
     onBound?: (live: LiveServerHandle, tailnet: boolean) => void;
+    /** Whether the listener still answers; injectable for tests. */
+    selfCheck?: (url: string) => Promise<boolean>;
   } = {},
 ): Promise<{ current(): LiveServerHandle; stop(): void }> {
   const detect = options.detect ?? tailscaleIp;
+  const selfCheck = options.selfCheck ?? ((url: string) =>
+    fetch(`${url}/ping`, { signal: AbortSignal.timeout(5_000) }).then((res) => res.ok, () => false));
+  let failedChecks = 0;
   // One history across rebinds: the phone's 24-hour health view survives.
   const deps = { ...options.deps, metrics: options.deps?.metrics ?? new SystemMetricHistory() };
   const base = {
@@ -524,13 +540,23 @@ export async function superviseLiveServer(
     busy = true;
     void (async () => {
       const address = await detect();
-      if (stopped || address === null || address === live.hostname) return;
+      if (stopped || address === null) return;
+      const rebind = address === live.hostname;
+      if (rebind) {
+        // Two misses in a row, so a briefly busy event loop cannot churn it.
+        if (await selfCheck(live.url)) { failedChecks = 0; return; }
+        if (++failedChecks < 2 || stopped) return;
+        console.warn(`[serve] ${live.url} stopped answering — rebinding`);
+        // Same address and port: the old listener has to let go first.
+        live.stop();
+      }
+      failedChecks = 0;
       // Same port on the new address, so a phone that registered this
       // machine by name keeps working.
       const next = await startLiveServer(config, { ...base, bind: address, port: live.port });
       // Stopped while the new listener was starting: it must not outlive us.
       if (stopped) return next.stop();
-      live.stop();
+      if (!rebind) live.stop();
       live = next;
       options.onBound?.(live, true);
     })()

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { runControls, runDaemon, runDoctor, runInit, runUsage } from "./commands.js";
 import { runServe } from "./serve.js";
-import { runInstallService } from "./service.js";
+import { runInstallService, runUninstallService } from "./service.js";
 
 function usage(): void {
   console.log(`burn-report — serve AI token usage to your phone over Tailscale
@@ -15,7 +15,10 @@ Usage: burn-report <command> [flags]
             [--os windows|wsl|linux|macos] [--host-group g] [--tz zone]
             [--tokscale-pin version]
   install-service
-            Start the daemon at every login [--port n] [--bind ip] [--print]
+            Start the daemon at boot (Linux) or sign-in (Windows, WSL) and
+            restart it if it exits [--port n] [--bind ip] [--print]
+  uninstall-service
+            Remove that autostart entry
   doctor    Verify config, tokscale pin, burn-events exporter and Tailscale
   usage     Print vendor quota JSON from tokscale for local diagnostics
   serve     Alias for daemon
@@ -26,6 +29,12 @@ Usage: burn-report <command> [flags]
 Then add the machine's Tailscale name or address on the phone's Machines tab.
 Docs: https://github.com/ensevengg/burn`);
 }
+
+// Options from the removed upload backend point at their replacement.
+const removed = new Map([
+  ["no-live", "--no-live ran the removed upload daemon; replace that service with 'burn-report install-service'"],
+  ["live-url", "--live-url was removed; add the URL the phone should use (e.g. a tailscale serve HTTPS URL) under Machines → +"],
+]);
 
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "help";
@@ -38,6 +47,8 @@ try {
   // `controls` takes positional words, not flags.
   for (let i = 1; command !== "controls" && i < argv.length; i++) {
     const arg = argv[i]!;
+    const hint = arg.startsWith("--") ? removed.get(arg.slice(2)) : undefined;
+    if (hint) throw new Error(hint);
     if (!arg.startsWith("--") || !allowed.includes(arg.slice(2)))
       throw new Error(`Unknown argument: ${arg} (try 'burn-report help')`);
     const name = arg.slice(2);
@@ -54,6 +65,7 @@ try {
     case "daemon": await runDaemon(args); break;
     case "serve": await runServe(args); break;
     case "install-service": process.exitCode = await runInstallService(args); break;
+    case "uninstall-service": process.exitCode = runUninstallService(); break;
     case "controls":
       if (argv.length > 3) throw new Error("usage: burn-report controls [status|enable|disable|polkit-rule] [power-mode]");
       process.exitCode = await runControls(argv[1] ?? "status", argv[2]);
