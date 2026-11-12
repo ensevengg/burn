@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { homedir, platform, tmpdir, userInfo } from "node:os";
 import { delimiter, dirname, join, resolve, win32 } from "node:path";
 import { configDir, loadOrInitConfig } from "./config.js";
+import { tailscaleIp } from "./serve.js";
 
 const UNIT = "burn-report.service";
 const RUN_KEY = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -166,7 +167,7 @@ export function windowsInstallScript(name: string, launcher: string, program: st
   const start = `-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ${windowsArg(launcher)}`;
   return [
     windowsStop(launcher, program),
-    `Set-ItemProperty -Path ${psString(RUN_KEY)} -Name ${psString(name)} -Value ${psString(`powershell.exe ${start}`)}`,
+    `Set-ItemProperty -Path ${psString(RUN_KEY)} -Name ${psString(name)} -Value ${psString(`powershell.exe ${start}`)} -ErrorAction Stop`,
     `Start-Process -FilePath powershell.exe -WindowStyle Hidden -ArgumentList ${psString(start)}`,
   ].join("\r\n");
 }
@@ -207,7 +208,8 @@ function windowsPaths(kind: "windows" | "wsl") {
   const distro = (process.env["WSL_DISTRO_NAME"] ?? "").replace(/[^A-Za-z0-9._-]/g, "-");
   const name = kind === "wsl" ? `burn-report-wsl-${distro}` : "burn-report";
   if (kind === "windows") {
-    const dir = configDir();
+    // The Run key outlives this shell's working directory.
+    const dir = resolve(configDir());
     return { name, dir, local: dir, launcher: win32.join(dir, `${name}.ps1`) };
   }
   const appData = powershell("Locating the Windows app-data folder", "[Environment]::GetFolderPath('ApplicationData')");
@@ -266,8 +268,10 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, unit);
     for (const legacy of legacyUnits(unitDir())) {
-      run(`Disabling ${legacy}`, ["systemctl", "--user", "disable", "--now", legacy], false);
-      console.log(`disabled older reporter unit ${legacy} (its file is kept)`);
+      if (run(`Disabling ${legacy}`, ["systemctl", "--user", "disable", "--now", legacy], false).ok)
+        console.log(`disabled older reporter unit ${legacy} (its file is kept)`);
+      else
+        console.warn(`warning: could not disable ${legacy}; if it still holds the port, run: systemctl --user disable --now ${legacy}`);
     }
     run("systemctl daemon-reload", ["systemctl", "--user", "daemon-reload"]);
     run(`Enabling ${UNIT}`, ["systemctl", "--user", "enable", UNIT]);
@@ -279,6 +283,7 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
       console.warn(`warning: could not enable lingering, so ${UNIT} starts at login rather than boot. Run: sudo loginctl enable-linger ${user}`);
     console.log(`installed ${path}: starts at boot and restarts if it exits`);
     console.log(`Status: systemctl --user status burn-report   Logs: journalctl --user -u burn-report -f`);
+    await printPhoneUrl(args);
     return 0;
   }
 
@@ -306,7 +311,16 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
   console.log(`Logs: ${win32.join(paths.dir, `${paths.name}.log`)} (and .err.log)`);
   if (kind === "wsl")
     console.log("WSL is reachable over the tailnet with mirrored networking (networkingMode=mirrored in .wslconfig) or Tailscale installed in the distro. Give it a different --port from the Windows reporter.");
+  await printPhoneUrl(args);
   return 0;
+}
+
+async function printPhoneUrl(args: Map<string, string>): Promise<void> {
+  const bind = args.get("bind");
+  const port = args.get("port") ?? "8787";
+  const ip = bind ?? await tailscaleIp();
+  if (ip) console.log(`Add on the phone (Machines → +): http://${ip}:${port}`);
+  else console.log(`Tailscale is not connected yet; the daemon moves to http://<tailnet address>:${port} once it is.`);
 }
 
 export function runUninstallService(): number {
@@ -319,6 +333,9 @@ export function runUninstallService(): number {
   }
   if (kind === "linux") {
     run(`Disabling ${UNIT}`, ["systemctl", "--user", "disable", "--now", UNIT], false);
+    // An absent unit is fine; one still running is not.
+    if (run("systemctl is-active", ["systemctl", "--user", "is-active", "--quiet", UNIT], false).ok)
+      throw new Error(`${UNIT} is still running; stop it with: systemctl --user disable --now ${UNIT}`);
     rmSync(systemdUnitPath(), { force: true });
     run("systemctl daemon-reload", ["systemctl", "--user", "daemon-reload"], false);
     console.log(`removed ${UNIT}`);

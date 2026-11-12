@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import {
   legacyUnits, serviceEnv, windowsArg, windowsInstallScript, windowsLauncher, windowsUninstallScript,
 } from "../src/service.js";
@@ -10,13 +10,13 @@ describe("install-service", () => {
   test("the service keeps the shell's tools without bun run's package-local or temporary PATH entries", () => {
     const env = serviceEnv(
       {
-        PATH: ["/repo/node_modules/.bin", join(tmpdir(), "bun-node-1"), "/usr/bin", "/home/me/.cargo/bin", "/usr/bin"].join(":"),
+        PATH: ["/repo/node_modules/.bin", join(tmpdir(), "bun-node-1"), "/usr/bin", "/home/me/.cargo/bin", "/usr/bin"].join(delimiter),
         BURN_CONFIG_DIR: "relative/config",
         BURN_EVENTS_BIN: "burn-events-dev",
       },
       "/home/me/.bun/bin/bun",
     );
-    expect(env["PATH"]).toBe("/home/me/.bun/bin:/usr/bin:/home/me/.cargo/bin");
+    expect(env["PATH"]).toBe(["/home/me/.bun/bin", "/usr/bin", "/home/me/.cargo/bin"].join(delimiter));
     expect(env["BURN_CONFIG_DIR"]).toBe(join(process.cwd(), "relative/config"));
     expect(env["BURN_EVENTS_BIN"]).toBe("burn-events-dev");
     expect(serviceEnv({ PATH: "/usr/bin" }, "/usr/bin/bun")).toEqual({ PATH: "/usr/bin" });
@@ -55,6 +55,7 @@ describe("install-service", () => {
       "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'burn-report' " +
         "-Value 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"C:\\Users\\Jo Doe\\AppData\\Roaming\\burn\\burn-report.ps1\"'",
     );
+    expect(install).toContain("-ErrorAction Stop");
     expect(install).toContain("Start-Process -FilePath powershell.exe -WindowStyle Hidden");
     const uninstall = windowsUninstallScript("burn-report", launcher, "C:\\burn\\burn-report.exe");
     expect(uninstall).toContain("Remove-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'burn-report'");
