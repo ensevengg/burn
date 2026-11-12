@@ -475,7 +475,7 @@ export async function startLiveServer(
     fetch: createLiveFetch(liveDeps),
   });
   if (!liveDeps.peers && options.peerDiscovery !== false)
-    liveDeps.peers = new PeerDirectory(server.port ?? port);
+    liveDeps.peers = new PeerDirectory(server.port ?? port, { self: detected ?? options.bind ?? null });
   const sampler = config.osKind === "wsl" ? null : setInterval(sample, 30_000);
   if (sampler) sample();
   // Injected scans (tests, embedders) get their own cold store in

@@ -242,8 +242,9 @@ describe("peer discovery (ADR 0005)", () => {
         probes++;
         const url = new URL(String(input));
         expect(url.pathname).toBe("/ping");
-        expect(url.port).toBe("8787");
-        return fetch(`${targets[url.hostname]}/ping`, init);
+        // Each peer is tried on both default ports; only 8787 answers here.
+        expect(["8787", "8788"]).toContain(url.port);
+        return fetch(url.port === "8787" ? `${targets[url.hostname]}/ping` : "http://127.0.0.1:1/ping", init);
       }) as typeof fetch,
     });
     const hub = await startLiveServer(config, { bind: "127.0.0.1", port: 0, deps: { ...deps, peers: directory } });
@@ -253,7 +254,7 @@ describe("peer discovery (ADR 0005)", () => {
       expect(page.peers).toEqual([{ url: "http://100.64.0.2:8787", slug: "laptop", displayName: "Laptop", osKind: "windows" }]);
       // Answers are cached for a minute rather than re-probing the tailnet.
       await fetch(`${hub.url}/live/peers`);
-      expect(probes).toBe(3);
+      expect(probes).toBe(6);
       // A reporter started without discovery neither advertises nor answers it.
       expect(parseLivePing(await (await fetch(`${other.url}/ping`)).json()).capabilities).not.toContain("peer-discovery");
       expect((await fetch(`${other.url}/live/peers`)).status).toBe(404);
@@ -316,4 +317,30 @@ test("an uplink in the carrier-NAT range is never taken for the tailnet", () => 
     expect(tailnetAddress({ en0: [entry("100.72.3.4")], "Ethernet 2": [entry("100.100.1.1")] }, os)).toBeNull();
   }
   expect(tailnetAddress({ utun3: [entry("100.96.0.7")] }, "linux")).toBeNull();
+});
+
+describe("peer discovery on the default ports", () => {
+  test("finds the WSL reporter that shares this node's address on the other port", async () => {
+    const { PeerDirectory } = await import("../src/peers");
+    const seen: string[] = [];
+    const ping = (slug: string, osKind: string) => Response.json({
+      protocol: 1, slug, displayName: slug, osKind, hostGroup: null, reporterVersion: "0.1.0",
+      tokscaleVersion: "4.21.0", serverNowMs: Date.now(),
+    });
+    const directory = new PeerDirectory(8787, {
+      self: "100.64.0.1",
+      listPeers: async () => ["100.64.0.2"],
+      fetchImpl: (async (input: string) => {
+        const url = String(input);
+        seen.push(url);
+        if (url === "http://100.64.0.1:8788/ping") return ping("box-wsl", "wsl");
+        if (url === "http://100.64.0.2:8788/ping") return ping("laptop-wsl", "wsl");
+        throw new Error("refused");
+      }) as typeof fetch,
+    });
+    const peers = await directory.list();
+    expect(peers.map((peer) => peer.url)).toEqual(["http://100.64.0.1:8788", "http://100.64.0.2:8788"]);
+    // Never this reporter itself.
+    expect(seen).not.toContain("http://100.64.0.1:8787/ping");
+  });
 });

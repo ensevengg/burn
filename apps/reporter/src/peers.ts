@@ -5,8 +5,10 @@
  * instead of being typed in one by one.
  *
  * The only addresses contacted are the peers Tailscale itself reports for
- * this node, on this reporter's own port, with `GET /ping`. Nothing from the
- * request chooses a target.
+ * this node (and this node's own address), on this reporter's port and the
+ * two default ports, with `GET /ping`. Nothing from the request chooses a
+ * target. The default ports matter because Windows and its WSL share one
+ * tailnet address under mirrored networking, on 8787 and 8788.
  */
 import { parseLivePing, type LivePeer } from "@burn/sync-api";
 import { spawnRunner } from "./tokscale.js";
@@ -16,7 +18,12 @@ export interface PeerDeps {
   /** Online peers' tailnet IPv4 addresses. */
   listPeers?: () => Promise<string[]>;
   fetchImpl?: typeof fetch;
+  /** This node's tailnet address, probed on the other ports only. */
+  self?: string | null;
 }
+
+/** The defaults for a machine and for the WSL beside it (see config.ts). */
+export const DEFAULT_REPORTER_PORTS = [8787, 8788] as const;
 
 /** Online peers from `tailscale status --json`; empty when the CLI is absent. */
 export async function tailscalePeers(timeoutMs = 5_000): Promise<string[]> {
@@ -64,10 +71,13 @@ export class PeerDirectory {
 
   private async probe(): Promise<LivePeer[]> {
     const addresses = (await (this.deps.listPeers ?? tailscalePeers)()).slice(0, MAX_PEERS);
+    const ports = [...new Set([this.port, ...DEFAULT_REPORTER_PORTS])];
+    const targets = addresses.flatMap((address) => ports.map((port) => `http://${address}:${port}`));
+    const self = this.deps.self;
+    if (self) for (const port of ports) if (port !== this.port) targets.push(`http://${self}:${port}`);
     const fetchImpl = this.deps.fetchImpl ?? fetch;
     const found = await Promise.all(
-      addresses.map(async (address): Promise<LivePeer | null> => {
-        const url = `http://${address}:${this.port}`;
+      targets.map(async (url): Promise<LivePeer | null> => {
         try {
           const response = await fetchImpl(`${url}/ping`, {
             headers: { accept: "application/json" },
