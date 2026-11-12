@@ -2,7 +2,7 @@
 
 **Every token you burn. Every machine. One phone.**
 
-Track your AI coding agents across Windows, WSL, Linux and macOS:
+Track your AI coding agents across Windows, WSL and Linux:
 
 - **Spend**: dollars and tokens per agent, model, workspace and session
 - **Cache hits**: how much of your input came from cache
@@ -42,7 +42,7 @@ burn-report install-service    # runs it now and at every startup; prints what t
 # or, in the foreground for this session only: burn-report daemon
 ```
 
-Binaries are attached to each `burn-events-v*` release; until one exists for your platform, use [From source](#from-source) below. That is the whole setup: the machine is named after its hostname and the daemon waits for Tailscale if it is not up yet. The installer covers Linux x86_64 and Apple-silicon macOS and verifies checksums. On Windows, download `burn-report-windows-x64.exe` and `burn-events-x86_64-pc-windows-msvc.exe` from the [latest release](https://github.com/ensevengg/burn/releases/latest) into one folder, rename them `burn-report.exe` and `burn-events.exe`, and run `burn-report.exe daemon`.
+Binaries are attached to each `burn-events-v*` release; until one exists for your platform, use [From source](#from-source) below. That is the whole setup: the machine is named after its hostname and the daemon waits for Tailscale if it is not up yet. The installer covers Linux x86_64 and verifies checksums. On Windows, download `burn-report-windows-x64.exe` and `burn-events-x86_64-pc-windows-msvc.exe` from the [latest release](https://github.com/ensevengg/burn/releases/latest) into one folder, rename them `burn-report.exe` and `burn-events.exe`, and run `burn-report.exe install-service`.
 
 **3. Open the app.** Run `bun run mobile` and open it in Expo Go on Android. Tap **Connect my machines**, then **Machines → +** and enter the machine's Tailscale name or address. Your other machines are offered right there once the first is added.
 
@@ -64,7 +64,7 @@ bun run reporter -- daemon
 - **One slug per install:** Windows, WSL and each dual-boot side. By default Windows gets a `-windows` slug and WSL a `-wsl` slug.
 - **Same box?** Share a `--host-group`. Windows and WSL share their hostname automatically.
 - **Flags:** `--port 8787`, `--bind <address>`. `serve` is an alias for `daemon`.
-- **Autostart:** `install-service` keeps the daemon running and restarts it if it exits. Linux gets a systemd user unit with lingering, so it starts at boot. Windows gets a hidden launcher in the per-user Run key that starts at sign-in, with no administrator rights needed. Inside WSL it registers a Windows sign-in launcher that starts the distro; WSL needs mirrored networking or Tailscale in the distro, and a different `--port` from the Windows reporter. macOS prints a launchd agent. `--print` shows what would be installed; `uninstall-service` removes it.
+- **Autostart:** `install-service` keeps the daemon running and restarts it if it exits. Linux gets a systemd user unit with lingering, so it starts at boot. Windows gets a hidden launcher in the per-user Run key that starts at sign-in, with no administrator rights needed. Inside WSL it registers a Windows sign-in launcher that starts the distro; WSL needs mirrored networking or Tailscale in the distro, and a different `--port` from the Windows reporter. `--print` shows what would be installed; `uninstall-service` removes it.
 - **Check a machine:** `burn-report doctor`.
 - **Limits** (vendor quotas) need the tokscale CLI, which the reporter runs through Bun or Node if either is installed. Usage syncs without it.
 
