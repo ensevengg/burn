@@ -38,8 +38,8 @@ machine: tokscale + burn-events → burn-report daemon ← Tailscale → phone: 
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ensevengg/burn/main/scripts/install.sh | sh
-burn-report daemon             # prints what to add on the phone
-burn-report install-service    # optional: start it with the machine
+burn-report install-service    # runs it now and at every startup; prints what to add on the phone
+# or, in the foreground for this session only: burn-report daemon
 ```
 
 Binaries are attached to each `burn-events-v*` release; until one exists for your platform, use [From source](#from-source) below. That is the whole setup: the machine is named after its hostname and the daemon waits for Tailscale if it is not up yet. The installer covers Linux x86_64 and Apple-silicon macOS and verifies checksums. On Windows, download `burn-report-windows-x64.exe` and `burn-events-x86_64-pc-windows-msvc.exe` from the [latest release](https://github.com/ensevengg/burn/releases/latest) into one folder, rename them `burn-report.exe` and `burn-events.exe`, and run `burn-report.exe daemon`.
