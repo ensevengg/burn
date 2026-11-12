@@ -19,4 +19,4 @@ Adding machines was the slowest part of setup: each reporter's address had to be
 
 ## Not in scope
 
-Discovery without any registered machine (the phone would need tailnet credentials), QR onboarding, and registering a machine without the user's tap.
+Discovery without any registered machine (the phone would need tailnet credentials; the first machine comes from a QR code, ADR 0006) and registering a machine without the user's tap.
