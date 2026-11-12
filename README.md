@@ -39,7 +39,7 @@ machine: tokscale + burn-events → burn-report daemon ← Tailscale → phone: 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ensevengg/burn/main/scripts/install.sh | sh
 burn-report daemon             # prints what to add on the phone
-burn-report install-service    # optional: start it at every login
+burn-report install-service    # optional: start it with the machine
 ```
 
 Binaries are attached to each `burn-events-v*` release; until one exists for your platform, use [From source](#from-source) below. That is the whole setup: the machine is named after its hostname and the daemon waits for Tailscale if it is not up yet. The installer covers Linux x86_64 and Apple-silicon macOS and verifies checksums. On Windows, download `burn-report-windows-x64.exe` and `burn-events-x86_64-pc-windows-msvc.exe` from the [latest release](https://github.com/ensevengg/burn/releases/latest) into one folder, rename them `burn-report.exe` and `burn-events.exe`, and run `burn-report.exe daemon`.
@@ -64,6 +64,7 @@ bun run reporter -- daemon
 - **One slug per install:** Windows, WSL and each dual-boot side. By default Windows gets a `-windows` slug and WSL a `-wsl` slug.
 - **Same box?** Share a `--host-group`. Windows and WSL share their hostname automatically.
 - **Flags:** `--port 8787`, `--bind <address>`. `serve` is an alias for `daemon`.
+- **Autostart:** `install-service` keeps the daemon running and restarts it if it exits. Linux gets a systemd user unit with lingering, so it starts at boot. Windows gets a hidden launcher in the per-user Run key that starts at sign-in, with no administrator rights needed. Inside WSL it registers a Windows sign-in launcher that starts the distro; WSL needs mirrored networking or Tailscale in the distro, and a different `--port` from the Windows reporter. macOS prints a launchd agent. `--print` shows what would be installed; `uninstall-service` removes it.
 - **Check a machine:** `burn-report doctor`.
 - **Limits** (vendor quotas) need the tokscale CLI, which the reporter runs through Bun or Node if either is installed. Usage syncs without it.
 
@@ -95,7 +96,7 @@ bun run reporter -- daemon
 
 - **Restart reporters.**
 - **Exporter:** rebuild or re-download `burn-events` with each release; the reporter refuses one built for another tokscale pin.
-- **`push` is gone:** run `daemon` instead.
+- **`push` is gone:** run `install-service` instead. Services that still pass `--no-live` or `--live-url` exit with a hint, and `install-service` disables older hand-written Linux units that ran the reporter, keeping their files.
 - **Kept:** reporter identity, phone history, settings and machine URLs.
 
 Deep dives: [transfer behavior](docs/connection-transfer-fixes.md) · [why Tailscale-only](docs/adr/0003-tailscale-only-backend.md)
