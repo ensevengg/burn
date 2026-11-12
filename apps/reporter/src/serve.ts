@@ -72,16 +72,17 @@ export function tailnetAddress(
 /** Resolve the tailnet IPv4: the tailscale CLI when it is on PATH (it knows
  * which interface is Tailscale's), else the interface in Tailscale's range. */
 export async function tailscaleIp(timeoutMs = 5_000): Promise<string | null> {
-  try {
-    const { stdout } = await spawnRunner(
-      { command: "tailscale", prefix: [] },
-      ["ip", "-4"],
-      timeoutMs,
-    );
-    const address = /^(\d+\.\d+\.\d+\.\d+)\s*$/m.exec(stdout)?.[1];
-    if (address) return address;
-  } catch {
-    /* no CLI, or Tailscale is stopped */
+  // Under WSL mirrored networking the distro shares the Windows client's
+  // tailnet address, and only the Windows CLI knows it.
+  const commands = process.env["WSL_DISTRO_NAME"] ? ["tailscale", "tailscale.exe"] : ["tailscale"];
+  for (const command of commands) {
+    try {
+      const { stdout } = await spawnRunner({ command, prefix: [] }, ["ip", "-4"], timeoutMs);
+      const address = /^(\d+\.\d+\.\d+\.\d+)\s*$/m.exec(stdout)?.[1];
+      if (address) return address;
+    } catch {
+      /* no CLI, or Tailscale is stopped */
+    }
   }
   return tailnetAddress();
 }
