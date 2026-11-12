@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { parseLivePing } from "@burn/sync-api";
 import { configPath, configSchema, defaultIdentity, loadConfig, loadOrInitConfig } from "../src/config";
 import { runInit } from "../src/commands";
-import { superviseLiveServer, tailnetAddress } from "../src/serve";
+import { hasLocalAddress, superviseLiveServer, tailnetAddress } from "../src/serve";
 import { daemonCommand, systemdUnit } from "../src/service";
 
 let dir: string;
@@ -66,6 +66,13 @@ describe("tailnet address", () => {
     expect(tailnetAddress({ eth0: [entry("192.168.1.9"), entry("100.63.0.1"), entry("100.128.0.1"), entry("10.100.64.1")] })).toBeNull();
     expect(tailnetAddress({ utun4: [entry("100.64.0.1")] }, "darwin")).toBe("100.64.0.1");
     expect(tailnetAddress({})).toBeNull();
+  });
+
+  test("a CLI answer counts only when this machine holds the address", () => {
+    // WSL under NAT: tailscale.exe reports the Windows host's address.
+    const nat = { eth0: [entry("172.20.0.5")], lo: [entry("127.0.0.1", true)] };
+    expect(hasLocalAddress("100.101.102.103", nat)).toBe(false);
+    expect(hasLocalAddress("100.101.102.103", { ...nat, eth1: [entry("100.101.102.103")] })).toBe(true);
   });
 });
 
