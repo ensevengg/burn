@@ -55,7 +55,7 @@ Needs Bun and a Rust toolchain.
 ```bash
 bun install
 cargo install --path crates/burn-events   # once per machine
-bun run reporter -- daemon
+bun run reporter -- install-service   # or `daemon` to run in this terminal only
 ```
 
 ### Reporter tips
