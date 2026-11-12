@@ -2,13 +2,14 @@
 import { runControls, runDaemon, runDoctor, runInit, runUsage } from "./commands.js";
 import { runServe } from "./serve.js";
 import { runInstallService, runUninstallService } from "./service.js";
+import { runPair } from "./pair.js";
 
 function usage(): void {
   console.log(`burn-report — serve AI token usage to your phone over Tailscale
 
 Usage: burn-report <command> [flags]
 
-  daemon    Resident machine backend [--port 8787] [--bind ip]. On a new
+  daemon    Resident machine backend [--port n] [--bind ip]. On a new
             machine this is the only command needed: it names the machine
             after its hostname and waits for Tailscale.
   init      Name this machine (all optional): [--slug s] [--name "Name"]
@@ -19,6 +20,7 @@ Usage: burn-report <command> [flags]
             restart it if it exits [--port n] [--bind ip] [--print]
   uninstall-service
             Remove that autostart entry
+  pair      Show the QR code and URL that add this machine on the phone
   doctor    Verify config, tokscale pin, burn-events exporter and Tailscale
   usage     Print vendor quota JSON from tokscale for local diagnostics
   serve     Alias for daemon
@@ -26,7 +28,7 @@ Usage: burn-report <command> [flags]
             disable power-mode | polkit-rule
   help      This text
 
-Then add the machine's Tailscale name or address on the phone's Machines tab.
+Then scan 'burn-report pair' on the phone (Machines → + → Scan QR).
 Docs: https://github.com/ensevengg/burn`);
 }
 
@@ -66,6 +68,7 @@ try {
     case "serve": await runServe(args); break;
     case "install-service": process.exitCode = await runInstallService(args); break;
     case "uninstall-service": process.exitCode = runUninstallService(); break;
+    case "pair": process.exitCode = await runPair(); break;
     case "controls":
       if (argv.length > 3) throw new Error("usage: burn-report controls [status|enable|disable|polkit-rule] [power-mode]");
       process.exitCode = await runControls(argv[1] ?? "status", argv[2]);

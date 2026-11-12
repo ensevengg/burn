@@ -13,8 +13,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, platform, tmpdir, userInfo } from "node:os";
 import { delimiter, dirname, join, resolve, win32 } from "node:path";
-import { configDir, loadOrInitConfig } from "./config.js";
-import { tailscaleIp } from "./serve.js";
+import { configDir, loadOrInitConfig, reporterPort, saveConfig } from "./config.js";
+import { printPairing } from "./pair.js";
 
 const UNIT = "burn-report.service";
 const RUN_KEY = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -238,10 +238,8 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
     const value = args.get(flag);
     if (value) extra.push(`--${flag}`, value);
   }
-  const port = args.get("port");
-  const portNumber = port === undefined ? 8787 : Number(port);
-  if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535)
-    throw new Error("--port must be an integer between 1 and 65535");
+  // Validated before anything is written.
+  if (args.has("port")) reporterPort({}, args.get("port"));
   const command = daemonCommand();
   const env = serviceEnv();
   const printOnly = args.has("print");
@@ -262,8 +260,7 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
       console.error(`\nWould be written to ${path}`);
       return 0;
     }
-    // Name the machine now rather than on the service's first start.
-    loadOrInitConfig();
+    prepareConfig(args);
     run("systemd user manager", ["systemctl", "--user", "show-environment"]);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, unit);
@@ -300,7 +297,7 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
     process.stdout.write(launcherFor(kind === "wsl" ? `burn-report-wsl-${distro}` : "burn-report", "<config dir>"));
     return 0;
   }
-  loadOrInitConfig();
+  prepareConfig(args);
   const paths = windowsPaths(kind);
   mkdirSync(paths.local, { recursive: true });
   // Windows PowerShell reads BOM-less scripts in the ANSI code page.
@@ -315,12 +312,18 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
   return 0;
 }
 
+/** Name the machine now rather than on the service's first start, and save
+ * the port so `pair`, `doctor` and a later reinstall agree with the daemon. */
+function prepareConfig(args: Map<string, string>): void {
+  const { config } = loadOrInitConfig();
+  const port = args.get("port");
+  if (port !== undefined && config.port !== Number(port)) saveConfig({ ...config, port: Number(port) });
+}
+
 async function printPhoneUrl(args: Map<string, string>): Promise<void> {
-  const bind = args.get("bind");
-  const port = args.get("port") ?? "8787";
-  const ip = bind ?? await tailscaleIp();
-  if (ip) console.log(`Add on the phone (Machines → +): http://${ip}:${port}`);
-  else console.log(`Tailscale is not connected yet; the daemon moves to http://<tailnet address>:${port} once it is.`);
+  console.log();
+  // The service was just (re)started; give it a moment to bind.
+  await printPairing(args.get("bind"), { wait: true });
 }
 
 export function runUninstallService(): number {

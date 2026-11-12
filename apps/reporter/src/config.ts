@@ -31,7 +31,22 @@ export const configSchema = z
     /** Opt-in machine controls (ADR 0004). Absent means every control is off;
      * optional so configs without it are not rewritten on load. */
     controls: z.object({ powerMode: z.boolean().optional() }).optional(),
+    /** Port the daemon listens on. Absent means 8787; fresh WSL installs get
+     * 8788 because mirrored networking shares the Windows reporter's address. */
+    port: z.number().int().min(1).max(65535).optional(),
   });
+
+export const DEFAULT_PORT = 8787;
+export const WSL_DEFAULT_PORT = 8788;
+
+/** `--port` when given, else the saved port, else the default. */
+export function reporterPort(config: Pick<BurnConfig, "port">, flag?: string): number {
+  if (flag === undefined) return config.port ?? DEFAULT_PORT;
+  const port = Number(flag);
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error("--port must be an integer between 1 and 65535");
+  return port;
+}
 
 /**
  * `init` saves the pin it ran with, but a checkout builds burn-events at one
@@ -143,7 +158,12 @@ export function loadConfig(): BurnConfig {
  * on a fresh machine needs no `init` first. */
 export function loadOrInitConfig(): { config: BurnConfig; created: boolean } {
   if (existsSync(configPath())) return { config: loadConfig(), created: false };
-  const config = configSchema.parse({ ...defaultIdentity(), osKind: detectOsKind() });
+  const osKind = detectOsKind();
+  const config = configSchema.parse({
+    ...defaultIdentity(osKind),
+    osKind,
+    ...(osKind === "wsl" ? { port: WSL_DEFAULT_PORT } : {}),
+  });
   saveConfig(config);
   return { config, created: true };
 }

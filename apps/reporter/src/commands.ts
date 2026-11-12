@@ -1,7 +1,8 @@
 import { TOKSCALE_PIN } from "@burn/sync-api";
 import { platform, userInfo } from "node:os";
 import {
-  configSchema, loadConfig, saveConfig, configPath, defaultIdentity, detectOsKind, type BurnConfig,
+  configSchema, loadConfig, saveConfig, configPath, defaultIdentity, detectOsKind, reporterPort,
+  WSL_DEFAULT_PORT, type BurnConfig,
 } from "./config.js";
 import { fetchUsage, tokscaleVersion } from "./tokscale.js";
 import { exporterVersion, exporterCapabilities } from "./exporter.js";
@@ -22,7 +23,12 @@ export function runInit(args: Map<string, string>): void {
   // Every flag is optional: an unnamed machine is named after its hostname.
   const osKind = configSchema.shape.osKind.parse(args.get("os") ?? detectOsKind());
   const defaults = defaultIdentity(osKind);
+  // Renaming keeps the port the phone already uses and any enabled controls.
+  let previous: Partial<BurnConfig> = {};
+  try { previous = loadConfig(); } catch { /* first init */ }
   const config = configSchema.parse({
+    ...(previous.controls === undefined ? {} : { controls: previous.controls }),
+    ...(previous.port !== undefined ? { port: previous.port } : osKind === "wsl" ? { port: WSL_DEFAULT_PORT } : {}),
     environmentSlug: args.get("slug") ?? defaults.environmentSlug,
     environmentName: args.get("name") ?? defaults.environmentName,
     hostGroup: args.get("host-group") ?? defaults.hostGroup,
@@ -33,7 +39,7 @@ export function runInit(args: Map<string, string>): void {
   saveConfig(config);
   printConfigured(config);
   console.log(`config       ${configPath()}`);
-  console.log("\nRun burn-report daemon, then add this machine on your phone's Machines tab. Both devices must be on your tailnet.");
+  console.log("\nRun burn-report install-service, then scan burn-report pair on the phone (Machines → + → Scan QR).");
 }
 
 export async function runDoctor(): Promise<number> {
@@ -53,7 +59,7 @@ export async function runDoctor(): Promise<number> {
   ];
   for (const check of checks)
     console.log(`${check.ok ? "ok" : "optional" in check ? "warn" : "FAIL"} ${check.name}: ${check.detail}`);
-  if (address !== null) console.log(`\nOn the phone, add: http://${address}:8787 (or this machine's Tailscale name)`);
+  if (address !== null) console.log(`\nOn the phone, add: http://${address}:${reporterPort(config)} (or run: burn-report pair)`);
   return checks.every((check) => check.ok || "optional" in check) ? 0 : 1;
 }
 
