@@ -39,6 +39,9 @@ interface AppState {
   setReportingTimezone: (tz: string) => Promise<void>;
   clearData: () => Promise<void>;
   fullSync: (environmentId: string) => Promise<void>;
+  /** A machine URL from an opened pairing link, waiting for the add sheet. */
+  pairing: string | null;
+  setPairing: (url: string | null) => void;
 }
 
 export type MachineState = DirectPullStatus["state"];
@@ -64,6 +67,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [db, setDb] = useState<SQLiteDatabase | null>(null);
   const [mode, setMode] = useState<AppMode>("unconfigured");
   const [reportingTimezone, setTzState] = useState("Asia/Kolkata");
+  const [pairing, setPairing] = useState<string | null>(null);
   const [status, setStatus] = useState<SyncStatus>({
     lastSync: null, syncError: null, syncNotice: null,
     refreshingMachines: false, checkingMachines: false, liveMachines: [],
@@ -220,7 +224,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       invalidate();
     };
     return {
-      db, mode, reportingTimezone, sync,
+      db, mode, reportingTimezone, sync, pairing, setPairing,
       async enterDemo() {
         if (!db) return;
         await prepareReset();
@@ -283,7 +287,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         invalidate();
       },
     };
-  }, [db, mode, reportingTimezone, sync, stop, cancelActive, pull, refresh, queryClient, patchStatus]);
+  }, [db, mode, reportingTimezone, pairing, sync, stop, cancelActive, pull, refresh, queryClient, patchStatus]);
 
   return <AppContext.Provider value={value}>
     <SyncStatusContext.Provider value={status}>{children}</SyncStatusContext.Provider>

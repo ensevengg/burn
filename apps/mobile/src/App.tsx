@@ -3,6 +3,7 @@ import { AppState, StatusBar } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { ThemeProvider, useTheme } from "./lib/theme-context";
 import { AppProvider } from "./lib/app-context";
+import { PairingLinks } from "./lib/pairing-links";
 import Navigation from "./navigation";
 
 // React Native has no visibility events, so TanStack would treat the app as
@@ -30,6 +31,7 @@ function ThemedShell() {
     <>
       <StatusBar barStyle={C.statusBar} backgroundColor={C.bg} />
       <AppProvider>
+        <PairingLinks />
         <Navigation />
       </AppProvider>
     </>
