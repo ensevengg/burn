@@ -45,8 +45,10 @@ export interface MachineQuotaInput {
   status: "ok" | "error";
   error: string | null;
   sourceOffsetMinutes: number | null;
+  /** When the provider was actually read, if the source served an older cached
+   * reading than the page's generatedAt. Absent means the page time applies. */
+  fetchedAt?: string | null;
 }
-
 
 /** One physical-machine sample. Unsupported sensors are explicitly null. */
 export interface MachineMetricInput {

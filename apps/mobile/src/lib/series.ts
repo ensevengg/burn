@@ -70,6 +70,10 @@ function emptyBucket(key: string, granularity: Granularity): SeriesBucket {
  * Zero-fill a sparse series across its window. An unbounded window (`null`)
  * starts at the first bucket with data. Buckets outside the computed range
  * (machine clock skew) are kept rather than dropped.
+ *
+ * A rolling window ("last 7 days") starts mid-bucket, so its first bucket
+ * holds only the hours after the cut and would read as a dip beside whole
+ * days. That partial lead is left off the chart; totals still count it.
  */
 export function fillSeries(
   series: readonly SeriesBucket[],
@@ -84,6 +88,11 @@ export function fillSeries(
   const byKey = new Map(series.map((bucket) => [bucket.key, bucket]));
   const keys = new Set(keysBetweenParts(start, end, granularity));
   for (const key of byKey.keys()) keys.add(key);
+  if (windowStartMs !== null && keys.size > 1) {
+    const lead = keyFromParts(start.y, start.m, start.d, start.h, granularity);
+    const before = calendarParts(windowStartMs - 1, timeZone);
+    if (keyFromParts(before.y, before.m, before.d, before.h, granularity) === lead) keys.delete(lead);
+  }
   return [...keys].sort().map((key) => byKey.get(key) ?? emptyBucket(key, granularity));
 }
 

@@ -6,6 +6,7 @@ import { useApp, useSyncStatus } from "../lib/app-context";
 import { confirmDestructive } from "../lib/confirm-destructive";
 import { formatRelative } from "../lib/format";
 import { useTheme, type ThemeMode } from "../lib/theme-context";
+import { useNow } from "../lib/use-now";
 import { hairline, radius, spacing, type } from "../theme";
 import { Card, Chip, Row, SectionTitle, Segmented } from "../ui/primitives";
 import { PressableScale } from "../ui/motion";
@@ -37,6 +38,7 @@ function Chevron({ open, color }: { open: boolean; color: string }) {
 export function SettingsScreen() {
   const { mode, reportingTimezone, setReportingTimezone, disconnect, clearData, sync } = useApp();
   const { lastSync } = useSyncStatus();
+  const now = useNow();
   const { C, mode: themeMode, setMode: setThemeMode } = useTheme();
   const [tzPicker, setTzPicker] = useState(false);
   const confirmWipe = () =>
@@ -74,7 +76,7 @@ export function SettingsScreen() {
         {mode === "direct" && (
           <Row
             title="Sync machines now"
-            subtitle={`Last pulled ${lastSync === null ? "never" : formatRelative(lastSync.toISOString())}`}
+            subtitle={`Last pulled ${lastSync === null ? "never" : formatRelative(lastSync.toISOString(), now)}`}
             onPress={() => void sync()}
             trailing={<Chevron open={false} color={C.faint} />}
           />

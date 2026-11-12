@@ -8,11 +8,20 @@ import { openDb, resetDb, kvSet, type SQLiteDatabase } from "./db";
 import { getMode, getReportingTimezone, setReportingTimezone, type AppMode } from "./settings";
 import { seedDemoData } from "./sync";
 import {
-  pullDirectFromMachines, cancelDirectPull, addDirectMachine,
-  removeDirectMachine, type DirectPullStatus, type DirectPullOptions,
+  pullDirectFromMachines, cancelDirectPull, addDirectMachine, discoverPeerMachines,
+  removeDirectMachine, type DirectPullStatus, type DirectPullOptions, type DiscoveredMachine,
 } from "./direct";
 import { removeEnvironmentLocal } from "../data/repository";
-import { advanceSyncGeneration, subscribeMirrorChanges, subscribePullProgress } from "./sync-state";
+import {
+  advanceSyncGeneration, coalesce, subscribeMirrorChanges, subscribePullProgress, type MirrorChange,
+} from "./sync-state";
+
+const EVENT_REFETCH_MS = 900;
+/** Pause between passes of a multi-pass backfill: long enough for a queued
+ * refresh or tap to get in, short enough not to be most of the wait. */
+const BACKFILL_PAUSE_MS = 50;
+/** See DirectPullOptions.quotaFollowUpMs; provider reads take a few seconds. */
+const QUOTA_FOLLOW_UP_MS = 4_000;
 
 interface AppState {
   db: SQLiteDatabase | null;
@@ -21,6 +30,8 @@ interface AppState {
   enterDemo: () => Promise<void>;
   connectDirect: () => Promise<void>;
   addDirectMachine: (url: string) => Promise<{ slug: string; displayName: string }>;
+  /** Unregistered reporters the registered machines can see on the tailnet. */
+  discoverMachines: () => Promise<DiscoveredMachine[]>;
   disconnect: () => Promise<void>;
   sync: () => Promise<void>;
   requestSync: (environmentId: string | null) => Promise<void>;
@@ -99,14 +110,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => { active = false; };
   }, [patchStatus]);
 
-  useEffect(() => subscribeMirrorChanges((changedDb, kind) => {
-    if (changedDb !== db) return;
-    void queryClient.invalidateQueries({
+  useEffect(() => {
+    const invalidate = (kind: MirrorChange) => void queryClient.invalidateQueries({
       predicate: (query) => kind === "events"
         ? query.queryKey[0] !== "quotas" && query.queryKey[0] !== "machines" && query.queryKey[0] !== "systems"
         : query.queryKey[0] === kind || (kind === "machines" && query.queryKey[0] === "systems"),
     });
-  }), [db, queryClient]);
+    // A backfill commits a page every few hundred milliseconds, and every
+    // event screen re-reads its whole window per invalidation. The first
+    // change shows at once; the rest arrive together, at most once a window.
+    const eventRefetch = coalesce(() => invalidate("events"), EVENT_REFETCH_MS);
+    const unsubscribe = subscribeMirrorChanges((changedDb, kind) => {
+      if (changedDb !== db) return;
+      if (kind === "events") eventRefetch.request();
+      else invalidate(kind);
+    });
+    return () => {
+      unsubscribe();
+      eventRefetch.cancel();
+    };
+  }, [db, queryClient]);
 
   useEffect(() => subscribePullProgress((changedDb, event) => {
     if (changedDb !== db) return;
@@ -125,14 +148,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!db || mode !== "direct") return;
     const epoch = lifecycle.current;
     try {
-      const statuses = await pullDirectFromMachines(db, options);
+      const statuses = await pullDirectFromMachines(db, { quotaFollowUpMs: QUOTA_FOLLOW_UP_MS, ...options });
       if (epoch !== lifecycle.current) return;
       if (statuses.some((s) => s.hasMore) && NativeAppState.currentState === "active") {
         if (backfillTimer.current) clearTimeout(backfillTimer.current);
         backfillTimer.current = setTimeout(() => {
           backfillTimer.current = null;
           void continueSync.current();
-        }, 1000);
+        }, BACKFILL_PAUSE_MS);
       }
       setStatus((current) => {
         // Targeted and continuation passes report a subset of machines.
@@ -225,6 +248,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         void pull({ environmentId: added.id });
         return added;
       },
+      async discoverMachines() {
+        return db && mode === "direct" ? discoverPeerMachines(db) : [];
+      },
       disconnect: clearData,
       clearData,
       requestSync: (environmentId) => refresh(environmentId),
@@ -232,7 +258,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       async removeMachine(environmentId) {
         if (!db) return;
         // In-flight pulls must not write the removed machine back. Other
-        // machines keep their status and resume pending backfills afterwards.
+        // machines keep their status and are pulled again afterwards.
         cancelActive();
         setStatus((current) => {
           const { [environmentId]: _removed, ...machineStates } = current.machineStates;
@@ -245,7 +271,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (mode === "direct") await removeDirectMachine(db, environmentId);
         else await removeEnvironmentLocal(db, environmentId);
         invalidate();
-        if (mode === "direct") void pull({ continuation: true });
+        // A full pass, not a continuation: the cancel above also dropped
+        // queued first pulls (a machine added moments ago has no saved
+        // backfill to resume) and other machines' in-flight refreshes.
+        if (mode === "direct") void pull();
       },
       async setReportingTimezone(tz) {
         if (!db) return;

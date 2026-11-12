@@ -557,3 +557,227 @@ describe("power mode control (ADR 0004)", () => {
     expect((await fetcher(new Request("http://machine/live/quotas", { method: "POST" }))).status).toBe(405);
   });
 });
+
+test("a warm store answers from the finished snapshot while the next scan runs", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  let time = 1000;
+  let scans = 0;
+  let release: (() => void) | null = null;
+  let fail = false;
+  const reported: string[] = [];
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    now: () => time, check: async () => CONFIG.tokscalePin,
+    scan: async () => {
+      const n = ++scans;
+      if (n > 1) await new Promise<void>((resolve) => (release = resolve));
+      if (fail) throw new Error("exporter crashed");
+      return JSON.stringify({ ...EXPORTER_ROW_WITH_KEY, dedup_key: `k${n}` });
+    },
+  });
+  const stop = snapshots.keepWarm(1_000_000, (message) => reported.push(message));
+  // The daemon scans at startup, before any phone asks.
+  const first = await snapshots.get();
+  expect(scans).toBe(1);
+  expect(snapshots.peek()).toBe(first);
+
+  // Past the TTL a request is answered at once and starts the refresh itself.
+  time += 31_000;
+  expect(await snapshots.get()).toBe(first);
+  expect(await snapshots.get()).toBe(first);
+  expect(scans).toBe(2);
+  release!();
+  await Bun.sleep(1);
+  const second = await snapshots.get();
+  expect(second.events[0]!.dedupKey).toBe("k2");
+  expect(snapshots.pageSnapshot(first.id)).toBe(first);
+
+  // An explicit full refresh still waits for its own scan.
+  const forced = snapshots.get(true);
+  await Bun.sleep(1);
+  release!();
+  expect((await forced).events[0]!.dedupKey).toBe("k3");
+
+  // A failed background scan is not hidden behind the old snapshot.
+  fail = true;
+  time += 31_000;
+  expect((await snapshots.get()).events[0]!.dedupKey).toBe("k3");
+  await Bun.sleep(1);
+  release!();
+  await Bun.sleep(1);
+  const waiting = snapshots.get();
+  await Bun.sleep(1);
+  release!();
+  await expect(waiting).rejects.toThrow("exporter crashed");
+  fail = false;
+  const recovered = snapshots.get();
+  await Bun.sleep(1);
+  release!();
+  expect((await recovered).events[0]!.dedupKey).toBe("k6");
+  stop();
+});
+
+test("the warm timer reports a failing scan once and stays quiet while it repeats", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  const reported: string[] = [];
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    check: async () => null,
+    scan: async () => "",
+  });
+  const stop = snapshots.keepWarm(5, (message) => reported.push(message));
+  await Bun.sleep(40);
+  stop();
+  expect(reported).toEqual(["burn-events exporter not found on this machine"]);
+});
+
+test("stale-tolerant quotas answer immediately with their true collection time", async () => {
+  const { QuotaSnapshots } = await import("../src/snapshots");
+  let time = Date.parse("2026-09-07T10:00:00.000Z");
+  let loads = 0;
+  let release: (() => void) | null = null;
+  const quotas = new QuotaSnapshots(async () => {
+    if (++loads > 1) await new Promise<void>((resolve) => (release = resolve));
+    return [];
+  }, () => time, 600_000);
+  const first = await quotas.get();
+  time += 44_000;
+  expect(await quotas.get()).toBe(first);
+  expect(loads).toBe(1);
+  // Stale but tolerable: answered now, refreshed behind the response.
+  time += 60_000;
+  const stale = await quotas.get();
+  expect(stale).toBe(first);
+  expect(stale.generatedAt).toBe("2026-09-07T10:00:00.000Z");
+  expect(await quotas.get()).toBe(first);
+  expect(loads).toBe(2);
+  release!();
+  await Bun.sleep(1);
+  expect((await quotas.get()).generatedAt).toBe("2026-09-07T10:01:44.000Z");
+  // Too old to show: the request waits for a real reading.
+  time += 700_000;
+  const waiting = quotas.get();
+  await Bun.sleep(1);
+  release!();
+  expect((await waiting).generatedAt).toBe("2026-09-07T10:13:24.000Z");
+  expect(loads).toBe(3);
+});
+
+test("health requests reuse the resident sampler's reading instead of probing each time", async () => {
+  const { SystemMetricHistory } = await import("../src/system-metrics");
+  let now = 100_000;
+  let calls = 0;
+  const history = new SystemMetricHistory(async () => {
+    calls++;
+    return { capturedAtMs: now, cpuLoadPct: 1, cpuTempC: null, ramUsedPct: 2, ramTempC: null, gpuUtilPct: null, gpuTempC: null };
+  }, () => now);
+  expect(await history.since(0)).toHaveLength(1);
+  now += 20_000;
+  expect(await history.since(0)).toHaveLength(1);
+  expect(calls).toBe(1);
+  now += 20_000;
+  expect(await history.since(0)).toHaveLength(2);
+  expect(calls).toBe(2);
+});
+
+test("/live/digests lists one digest per UTC day and only a changed day's digest moves", async () => {
+  const { parseLiveDigestsPage, parseLivePing } = await import("@burn/sync-api");
+  const DAY = 86_400_000;
+  const row = (key: string, timestamp: number, cost = 0.1) => ({ ...EXPORTER_ROW_WITH_KEY, dedup_key: key, timestamp, cost });
+  let rows = [row("a", 100 * DAY + 5), row("b", 100 * DAY + 9), row("c", 101 * DAY + 1), row("d", 103 * DAY)];
+  let time = Date.parse("2026-09-07T10:05:00.000Z");
+  const fetch = createLiveFetch(deps({ now: () => time, exporterScan: async () => rows.map((r) => JSON.stringify(r)).join("\n") }));
+  const digests = async () => parseLiveDigestsPage(await (await fetch(new Request("http://machine/live/digests"))).json());
+  expect(parseLivePing(await (await fetch(new Request("http://machine/ping"))).json()).capabilities).toContain("day-digests");
+
+  const first = await digests();
+  expect(first.days.map(([day]) => day)).toEqual([100, 101, 103]);
+  expect(new Set(first.days.map(([, digest]) => digest)).size).toBe(3);
+  // The list names the snapshot the event pages come from.
+  const page = (await (await fetch(new Request("http://machine/live/events?limit=10"))).json()) as { snapshotId: string; contentHash: string };
+  expect(first.snapshotId).toBe(page.snapshotId);
+  expect(first.contentHash).toBe(page.contentHash);
+
+  // A correction on day 101 and a new day leave days 100 and 103 untouched.
+  rows = [rows[0]!, rows[1]!, row("c", 101 * DAY + 1, 0.2), rows[3]!, row("e", 104 * DAY)];
+  time += 31_000;
+  const second = await digests();
+  const by = (page: typeof first) => Object.fromEntries(page.days);
+  expect(by(second)[100]).toBe(by(first)[100]!);
+  expect(by(second)[103]).toBe(by(first)[103]!);
+  expect(by(second)[101]).not.toBe(by(first)[101]);
+  expect(second.days.map(([day]) => day)).toEqual([100, 101, 103, 104]);
+  expect(second.snapshotId).not.toBe(first.snapshotId);
+
+  expect(() => parseLiveDigestsPage({ ...second, days: [[5, "x"], [5, "y"]] })).toThrow("ascend");
+  expect(() => parseLiveDigestsPage({ ...second, days: [[5]] })).toThrow("expected [day, digest]");
+});
+
+test("a scan that keeps failing is retried less and less often by the warm timer", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  let time = 0;
+  let scans = 0;
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    now: () => time, check: async () => CONFIG.tokscalePin,
+    scan: async () => { scans++; throw new Error("schema drift"); },
+  });
+  const stop = snapshots.keepWarm(5, () => {});
+  // Two real seconds of 5 ms ticks on a stopped clock: one attempt, then waiting.
+  await Bun.sleep(60);
+  expect(scans).toBe(1);
+  // Attempts follow the doubling delay (10, 20, 40 ms ...), not every tick.
+  for (const [advance, expected] of [[9, 1], [1, 2], [19, 2], [1, 3], [39, 3], [1, 4]] as const) {
+    time += advance;
+    await Bun.sleep(15);
+    expect(scans).toBe(expected);
+  }
+  // A phone asking still gets an immediate attempt and its error.
+  await expect(snapshots.get()).rejects.toThrow("schema drift");
+  expect(scans).toBe(5);
+  stop();
+});
+
+test("a forced read scans again instead of joining an unforced scan in flight", async () => {
+  const { MachineSnapshots } = await import("../src/snapshots");
+  let time = 1000;
+  let scans = 0;
+  let release: (() => void) | null = null;
+  let probing = false;
+  const snapshots = new MachineSnapshots(CONFIG.tokscalePin, {
+    now: () => time, check: async () => CONFIG.tokscalePin,
+    // The unforced refresh is still probing sources when the forced read arrives.
+    fingerprint: async () => {
+      if (probing) await new Promise<void>((resolve) => (release = resolve));
+      return "same";
+    },
+    scan: async () => JSON.stringify({ ...EXPORTER_ROW_WITH_KEY, dedup_key: `k${++scans}` }),
+  });
+  const first = await snapshots.get();
+  time += 31_000;
+  probing = true;
+  const unforced = snapshots.get();
+  await Bun.sleep(1);
+  probing = false;
+  const forced = snapshots.get(true);
+  release!();
+  // The unforced one reuses the snapshot by fingerprint; the forced one does not.
+  expect(await unforced).toBe(first);
+  expect((await forced).events[0]!.dedupKey).toBe("k2");
+  expect(scans).toBe(2);
+});
+
+test("health never serves readings stamped after the machine's current time", async () => {
+  const { SystemMetricHistory } = await import("../src/system-metrics");
+  let now = 10 * 3_600_000;
+  const history = new SystemMetricHistory(async () => ({
+    capturedAtMs: now, cpuLoadPct: 1, cpuTempC: null, ramUsedPct: 2, ramTempC: null, gpuUtilPct: null, gpuTempC: null,
+  }), () => now);
+  await history.sample();
+  now += 30_000;
+  await history.sample();
+  // NTP pulls the clock back five and a half hours while the daemon runs.
+  now -= 5.5 * 3_600_000;
+  const served = await history.since(0);
+  expect(served).toHaveLength(1);
+  expect(served[0]!.capturedAtMs).toBe(now);
+  now += 40_000;
+  expect((await history.since(0)).map((sample) => sample.capturedAtMs)).toEqual([now - 40_000, now]);
+});

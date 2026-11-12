@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Alert, LayoutAnimation, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import Svg, { Path } from "react-native-svg";
 import { reporterIssue } from "../lib/system-health";
@@ -7,8 +7,9 @@ import type { EnvironmentRow } from "../data/repository";
 import { formatRelative } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp, useSyncStatus } from "../lib/app-context";
-import type { DirectPullStatus } from "../lib/direct";
+import type { DirectPullStatus, DiscoveredMachine } from "../lib/direct";
 import { useTheme } from "../lib/theme-context";
+import { useNow } from "../lib/use-now";
 import { confirmDestructive } from "../lib/confirm-destructive";
 import { hairline, radius, spacing, type } from "../theme";
 import { Button, Card, Empty, SectionTitle } from "../ui/primitives";
@@ -18,7 +19,7 @@ import { Sheet } from "../ui/sheet";
 
 export function MachinesScreen() {
   const machines = useMachinesQuery();
-  const { mode, addDirectMachine } = useApp();
+  const { mode, addDirectMachine, discoverMachines } = useApp();
   const { C } = useTheme();
   const [showAdd, setShowAdd] = useState(false);
 
@@ -59,7 +60,7 @@ export function MachinesScreen() {
 
       {mode === "direct" && (
         <Sheet visible={showAdd} onClose={() => setShowAdd(false)}>
-          <AddMachine onAdded={() => setShowAdd(false)} addMachine={addDirectMachine} />
+          <AddMachine onAdded={() => setShowAdd(false)} addMachine={addDirectMachine} discover={discoverMachines} />
         </Sheet>
       )}
     </Screen>
@@ -71,10 +72,11 @@ function describe(
   machine: EnvironmentRow,
   live: DirectPullStatus | undefined,
   demo: boolean,
+  now: number,
 ): { text: string; tone: "ok" | "muted" | "warn" } {
-  if (demo) return { text: `Demo machine · last report ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
-  if (live === undefined) return { text: `Not checked yet · last contact ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
-  if (live.state === "offline") return { text: `Unreachable · showing cached history · seen ${formatRelative(machine.lastHeartbeatAt)}`, tone: "muted" };
+  if (demo) return { text: `Demo machine · last report ${formatRelative(machine.lastHeartbeatAt, now)}`, tone: "muted" };
+  if (live === undefined) return { text: `Not checked yet · last contact ${formatRelative(machine.lastHeartbeatAt, now)}`, tone: "muted" };
+  if (live.state === "offline") return { text: `Unreachable · showing cached history · seen ${formatRelative(machine.lastHeartbeatAt, now)}`, tone: "muted" };
   if (live.state === "skipped") return { text: "Endpoint answered as a different machine", tone: "warn" };
   if (live.state === "error") return { text: "Pull failed · showing cached history", tone: "warn" };
   if (live.quotaError) return { text: "Live · quota refresh failed", tone: "warn" };
@@ -90,8 +92,9 @@ function MachineCard({ machine }: { machine: EnvironmentRow }) {
   const { refreshingMachines, liveMachines, pass } = useSyncStatus();
   const [details, setDetails] = useState(false);
   const live = liveMachines.find((status) => status.slug === machine.slug);
-  const issue = reporterIssue(machine, live);
-  const summary = describe(machine, live, mode === "demo");
+  const now = useNow();
+  const issue = reporterIssue(machine, live, now);
+  const summary = describe(machine, live, mode === "demo", now);
   const pending = pass !== null && pass.ids.includes(machine.id) && pass.settled[machine.id] === undefined;
   const dot = pending ? C.text : summary.tone === "ok" ? C.ok : summary.tone === "warn" ? C.warn : C.faint;
   const toneColor = summary.tone === "ok" ? C.ok : summary.tone === "warn" ? C.warn : C.muted;
@@ -135,7 +138,7 @@ function MachineCard({ machine }: { machine: EnvironmentRow }) {
         {[
           machine.reporterVersion === null ? null : `reporter ${machine.reporterVersion}`,
           machine.tokscaleVersion === null ? null : `tokscale ${machine.tokscaleVersion}`,
-          `pulled ${formatRelative(machine.lastSuccessAt)}`,
+          `pulled ${formatRelative(machine.lastSuccessAt, now)}`,
         ]
           .filter(Boolean)
           .join(" · ")}
@@ -193,15 +196,39 @@ function MachineCard({ machine }: { machine: EnvironmentRow }) {
 function AddMachine({
   onAdded,
   addMachine,
+  discover,
 }: {
   onAdded: () => void;
   addMachine: (url: string) => Promise<{ slug: string; displayName: string }>;
+  discover: () => Promise<DiscoveredMachine[]>;
 }) {
   const { C } = useTheme();
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const valid = /^https?:\/\//.test(url.trim());
+  const valid = url.trim().length > 0;
+  // Machines already registered can see the rest of the tailnet; offer those
+  // so only the first machine ever has to be typed.
+  const [found, setFound] = useState<DiscoveredMachine[]>([]);
+  useEffect(() => {
+    let open = true;
+    void discover().then(
+      (machines) => open && setFound(machines),
+      () => {},
+    );
+    return () => {
+      open = false;
+    };
+  }, [discover]);
+  const addFound = (machine: DiscoveredMachine) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    void addMachine(machine.url)
+      .then(() => setFound((current) => current.filter((other) => other.slug !== machine.slug)))
+      .catch((err: Error) => setError(err.message))
+      .finally(() => setBusy(false));
+  };
 
   const submit = () => {
     if (!valid || busy) return;
@@ -217,19 +244,20 @@ function AddMachine({
     <View>
       <Text style={[type.title, { color: C.text, fontSize: 24 }]}>Add a machine</Text>
       <Text style={[type.muted, { color: C.muted, marginTop: 6, lineHeight: 18 }]}>
-        Run this on the machine and keep the daemon running. With both devices on your tailnet, paste the URL it
-        prints.
+        Run this on the machine and keep the daemon running. With both devices on your tailnet, enter the
+        machine's Tailscale name or address (or paste the URL the daemon prints).
       </Text>
       <Text selectable style={[styles.command, { color: C.text, backgroundColor: C.panelAlt, borderColor: C.border }]}>
-        {'npx burn-report init --slug <machine-slug> --name "<Display Name>"\nnpx burn-report daemon'}
+        {"burn-report daemon"}
       </Text>
       <Text style={[type.muted, { color: C.faint, marginTop: 8, lineHeight: 17 }]}>
-        Give each Windows, WSL or dual-boot installation its own slug; share --host-group across one physical machine.
+        The machine is named after its hostname; rename it with burn-report init. Installing burn-report is one
+        line in the README.
       </Text>
       <TextInput
         value={url}
         onChangeText={setUrl}
-        placeholder="http://machine-name:8787"
+        placeholder="machine-name or 100.x.y.z"
         placeholderTextColor={C.faint}
         autoCapitalize="none"
         autoCorrect={false}
@@ -239,6 +267,24 @@ function AddMachine({
         style={[styles.input, { backgroundColor: C.panelAlt, borderColor: valid ? C.muted : C.border, color: C.text }]}
       />
       {error !== null && <Text style={{ color: C.err, marginTop: 8 }}>{error}</Text>}
+      {found.length > 0 && (
+        <View style={{ marginTop: spacing.m }}>
+          <Text style={[type.muted, { color: C.muted }]}>Also on your tailnet</Text>
+          {found.map((machine) => (
+            <View key={machine.slug} style={styles.foundRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={[type.body, { color: C.text, fontWeight: "600" }]} numberOfLines={1}>
+                  {machine.displayName}
+                </Text>
+                <Text style={[type.muted, { color: C.faint }]} numberOfLines={1}>
+                  {`${humanize(machine.osKind)} · ${machine.url.replace(/^https?:\/\//, "")}`}
+                </Text>
+              </View>
+              <Button label="Add" disabled={busy} onPress={() => addFound(machine)} style={styles.foundAdd} />
+            </View>
+          ))}
+        </View>
+      )}
       <Button
         label={busy ? "Checking…" : "Add machine"}
         variant="solid"
@@ -251,6 +297,8 @@ function AddMachine({
 }
 
 const styles = StyleSheet.create({
+  foundRow: { flexDirection: "row", alignItems: "center", gap: spacing.m, marginTop: spacing.s },
+  foundAdd: { paddingVertical: 7, paddingHorizontal: 16 },
   trailing: { flexDirection: "row", alignItems: "center", gap: 8 },
   addButton: { width: 30, height: 30, borderRadius: 15, alignItems: "center", justifyContent: "center" },
   cardTop: { flexDirection: "row", alignItems: "center", gap: 10 },

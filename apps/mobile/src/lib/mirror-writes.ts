@@ -206,21 +206,25 @@ async function writeEvents(
   trackInsertedFor: string | null = null,
 ): Promise<number> {
   let changed = 0;
+  // Which ids already exist is asked once per 500 rows, not once per insert
+  // batch: a reconciliation of unchanged history is mostly these lookups.
+  let known: Set<string> | null = null;
+  if (trackInsertedFor !== null) {
+    known = new Set();
+    for (let i = 0; i < events.length; i += 500) {
+      assertActive();
+      const ids = events.slice(i, i + 500).map((e) => e.eventId);
+      const rows = await db.getAllAsync<{ event_id: string }>(
+        `select event_id from usage_events where event_id in (${ids.map(() => "?").join(",")})`,
+        ids,
+      );
+      for (const row of rows) known.add(row.event_id);
+    }
+  }
   // 32 × 27 bindings stays below the classic 999-parameter SQLite limit.
   for (let i = 0; i < events.length; i += 32) {
     assertActive();
     const chunk = events.slice(i, i + 32);
-    const known =
-      trackInsertedFor === null
-        ? null
-        : new Set(
-            (
-              await db.getAllAsync<{ event_id: string }>(
-                `select event_id from usage_events where event_id in (${chunk.map(() => "?").join(",")})`,
-                chunk.map((e) => e.eventId),
-              )
-            ).map((row) => row.event_id),
-          );
     const conflict = `
       on conflict(event_id) do update set ${contentColumns
         .map((c) => `${c}=excluded.${c}`)
@@ -232,7 +236,8 @@ async function writeEvents(
       chunk.flatMap(eventBindings),
     );
     changed += result.changes;
-    const inserted = known === null ? [] : chunk.filter((e) => !known.has(e.eventId));
+    const seen = known;
+    const inserted = seen === null ? [] : chunk.filter((e) => !seen.has(e.eventId));
     if (inserted.length > 0)
       await db.runAsync(
         `insert or ignore into reconcile_new_events (environment_id, event_id)
@@ -245,12 +250,17 @@ async function writeEvents(
 }
 
 /** Last success survives failed attempts; stale responses never replace newer
- * state. Collection time belongs to the source, never to the phone merge. */
+ * state. Collection time belongs to the source, never to the phone merge.
+ * `latestPlausibleMs` is the newest collection time that can be real (the
+ * phone's clock plus a tolerance): a stored reading stamped later than it was
+ * taken on a machine clock that ran ahead, and would otherwise block every
+ * newer reading until real time caught up with the bad stamp. */
 export async function mergeQuota(
   db: SQLiteDatabase,
   environmentId: string | null,
   q: MachineQuotaInput,
   fetchedAt: string,
+  latestPlausibleMs: number | null = null,
 ): Promise<void> {
   await db.runAsync(
     `insert into quota_snapshots
@@ -261,7 +271,8 @@ export async function mergeQuota(
       remaining_label=excluded.remaining_label,resets_at=excluded.resets_at,
       credit_status=excluded.credit_status,spend_control=excluded.spend_control,
       error=excluded.error,fetched_at=excluded.fetched_at
-    where julianday(excluded.fetched_at)>=julianday(quota_snapshots.fetched_at)`,
+    where julianday(excluded.fetched_at)>=julianday(quota_snapshots.fetched_at)
+       or julianday(quota_snapshots.fetched_at)>julianday(?)`,
     [
       quotaMirrorKey(
         environmentId,
@@ -285,6 +296,8 @@ export async function mergeQuota(
       q.status,
       q.error,
       fetchedAt,
+      // julianday(null) is null, which leaves the guard as it was.
+      latestPlausibleMs === null ? null : new Date(latestPlausibleMs).toISOString(),
     ],
   );
 }
@@ -297,11 +310,21 @@ export async function mergeMetrics(
   metrics: import("@burn/sync-api").MachineMetricInput[],
   now: number,
   assertActive: () => void,
+  /** Machine clock after a rollback: samples stamped later than this were
+   * taken on the wrong clock and would sit on top as the "latest" reading. */
+  dropAfterMs: number | null = null,
 ): Promise<number> {
   const columns = ["id", "environment_id", "captured_at_ms", "cpu_load_pct", "cpu_temp_c",
     "ram_used_pct", "ram_temp_c", "gpu_util_pct", "gpu_temp_c"];
   const content = columns.slice(3);
   let changed = 0;
+  if (dropAfterMs !== null)
+    changed += (
+      await db.runAsync("delete from machine_metrics where environment_id=? and captured_at_ms>?", [
+        environmentId,
+        dropAfterMs,
+      ])
+    ).changes;
   for (let start = 0; start < metrics.length; start += 32) {
     assertActive();
     const chunk = metrics.slice(start, start + 32);

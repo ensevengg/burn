@@ -79,6 +79,34 @@ describe("tokscale adapter", () => {
     });
   });
 
+  test("a provider's prose reset time becomes unknown instead of poisoning the page", async () => {
+    const { parseLiveQuotasPage } = await import("@burn/sync-api");
+    const inputs = tokscaleQuotaInputs(
+      usageReportSchema.parse([
+        { provider: "Sakana", metrics: [{ label: "Weekly", used_percent: 10, remaining_percent: 90, resets_at: "June 22, 2026 at 9:58 AM" }] },
+        { provider: "Copilot", metrics: [{ label: "Monthly", used_percent: 10, remaining_percent: 90, resets_at: "2026-12-01" }] },
+        { provider: "Codex", metrics: [{ label: "Weekly", used_percent: 10, remaining_percent: 90, resets_at: "2026-09-09T00:00:00Z" }] },
+      ]),
+    );
+    expect(inputs.map((i) => i.resetsAt)).toEqual([null, "2026-12-01", "2026-09-09T00:00:00Z"]);
+    expect(parseLiveQuotasPage({ generatedAt: "2026-09-06T10:00:00.000Z", quotas: inputs }).quotas).toHaveLength(3);
+  });
+
+  test("a reading tokscale served from its cache keeps its collection time", async () => {
+    const { parseLiveQuotasPage } = await import("@burn/sync-api");
+    const fetched = Date.UTC(2026, 8, 6, 9, 10) / 1000;
+    const inputs = tokscaleQuotaInputs(
+      usageReportSchema.parse([
+        { provider: "Claude", metrics: [{ label: "5h", used_percent: 10, remaining_percent: 90 }], freshness: { fetched_at: fetched, stale: true } },
+        { provider: "Codex", metrics: [{ label: "5h", used_percent: 10, remaining_percent: 90 }] },
+      ]),
+    );
+    expect(inputs[0]!.fetchedAt).toBe("2026-09-06T09:10:00.000Z");
+    expect("fetchedAt" in inputs[1]!).toBe(false);
+    const page = parseLiveQuotasPage({ generatedAt: "2026-09-06T10:00:00.000Z", quotas: inputs });
+    expect(page.quotas[0]!.fetchedAt).toBe("2026-09-06T09:10:00.000Z");
+  });
+
   test("schema drift fails loudly (D2)", () => {
     expect(() =>
       usageReportSchema.parse([
@@ -118,5 +146,42 @@ describe("init artifacts", () => {
     expect(loadConfig()).toEqual(baseConfig);
     expect(JSON.parse(readFileSync(configPath(), "utf8"))).toEqual(baseConfig);
     expect(existsSync(join(dir, "setup-tokens.sql"))).toBe(false);
+  });
+});
+
+describe("spawnRunner", () => {
+  test("keeps multibyte characters that straddle pipe chunks", async () => {
+    const { spawnRunner } = await import("../src/tokscale");
+    // 3-byte characters at every offset: any chunk boundary splits one.
+    const script = `const line = "é" + "日本語".repeat(700) + "\\n"; for (let i = 0; i < 400; i++) process.stdout.write(line);`;
+    const { stdout } = await spawnRunner({ command: process.execPath, prefix: [] }, ["-e", script], 30_000);
+    expect(stdout.includes("�")).toBe(false);
+    expect(stdout.length).toBe(400 * (1 + 2100 + 1));
+  });
+});
+
+describe("exporter pin check", () => {
+  test.skipIf(platform() === "win32")("sees an exporter rebuilt under a running daemon", async () => {
+    const { exporterVersion, exporterCapabilities } = await import("../src/exporter");
+    const { chmodSync } = await import("node:fs");
+    const bin = join(dir, "burn-events");
+    const versionFile = join(dir, "version");
+    writeFileSync(versionFile, "4.21.0");
+    writeFileSync(
+      bin,
+      `#!/bin/sh\nv=$(cat "${versionFile}")\ncase "$1" in\n  --version) echo "burn-events $v";;\n  --capabilities) echo "{\\"protocol\\":2,\\"tokscale_version\\":\\"$v\\",\\"capabilities\\":[\\"fingerprint-v1\\"]}";;\nesac\n`,
+    );
+    chmodSync(bin, 0o755);
+    const previous = process.env["BURN_EVENTS_BIN"];
+    process.env["BURN_EVENTS_BIN"] = bin;
+    try {
+      expect(await exporterVersion()).toBe("4.21.0");
+      writeFileSync(versionFile, "4.22.0");
+      expect(await exporterVersion()).toBe("4.22.0");
+      expect((await exporterCapabilities())?.tokscaleVersion).toBe("4.22.0");
+    } finally {
+      if (previous === undefined) delete process.env["BURN_EVENTS_BIN"];
+      else process.env["BURN_EVENTS_BIN"] = previous;
+    }
   });
 });

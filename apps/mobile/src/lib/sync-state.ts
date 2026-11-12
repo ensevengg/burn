@@ -38,3 +38,36 @@ export function subscribePullProgress(
 export function publishPullProgress(db: SQLiteDatabase, event: PullProgress): void {
   for (const listener of progressListeners) listener(db, event);
 }
+
+/**
+ * Leading-and-trailing rate limit: the first request runs immediately, later
+ * ones inside the window collapse into one run when it closes.
+ */
+export function coalesce(run: () => void, windowMs: number): { request(): void; cancel(): void } {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let again = false;
+  const open = () => {
+    timer = setTimeout(() => {
+      timer = null;
+      if (!again) return;
+      again = false;
+      run();
+      open();
+    }, windowMs);
+  };
+  return {
+    request() {
+      if (timer !== null) {
+        again = true;
+        return;
+      }
+      run();
+      open();
+    },
+    cancel() {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      again = false;
+    },
+  };
+}

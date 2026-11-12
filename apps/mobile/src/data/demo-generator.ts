@@ -210,8 +210,13 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
             million;
           const isTurnStart = m > 0 && m % 6 === 0;
           const revision = revisions[env.slug]!;
+          const durationMs = 2_000 + Math.floor(rand() * 88_000);
+          const costSource = rand() < model.providerReportedChance ? "provider_reported" : "estimated";
 
-          events.push({
+          // Today's work hours may not have happened yet. Only the row is
+          // skipped: every draw above is made either way, so the rest of the
+          // dataset does not depend on the time of day.
+          if (cursorMs <= now) events.push({
             eventId: `${env.slug}|${model.client}|v1:${model.client}:${sessionId}:${cursorMs}:${m}`,
             environmentSlug: env.slug,
             client: model.client,
@@ -233,10 +238,9 @@ export function generateDemoDataset(now = Date.now()): DemoDataset {
             reasoningTokens: reasoning,
             messageCount: 1,
             isTurnStart,
-            durationMs: 2_000 + Math.floor(rand() * 88_000),
+            durationMs,
             cost: cost.toFixed(6),
-            costSource:
-              rand() < model.providerReportedChance ? "provider_reported" : "estimated",
+            costSource,
             costIsComplete: true,
             modelAttributionConflicted: false,
             parserVersion: `tokscale-${TOKSCALE_PIN}`,

@@ -30,7 +30,8 @@ const KNOWN: Record<string, Omit<ModeMeta, "label">> = {
 const ORDER = Object.keys(KNOWN);
 
 export function modeMeta(mode: string): ModeMeta {
-  const known = KNOWN[mode];
+  // Own keys only: mode ids come from the machine ("constructor" is a valid id).
+  const known = Object.prototype.hasOwnProperty.call(KNOWN, mode) ? KNOWN[mode] : undefined;
   const label = humanize(mode);
   if (known === undefined) return { label, description: "Set by the machine's own power manager.", glyph: "dot", heat: 0.5 };
   return { label, ...known };

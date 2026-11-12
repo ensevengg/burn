@@ -11,7 +11,7 @@ import {
   renameSync,
   unlinkSync,
 } from "node:fs";
-import { homedir, platform } from "node:os";
+import { homedir, hostname, platform } from "node:os";
 import { join } from "node:path";
 import { TOKSCALE_PIN } from "@burn/sync-api";
 import { z } from "zod";
@@ -52,6 +52,40 @@ function atLeastCheckoutPin(saved: string): string {
 
 export type BurnConfig = z.infer<typeof configSchema>;
 
+export function detectOsKind(): BurnConfig["osKind"] {
+  if (platform() === "win32") return "windows";
+  if (platform() === "darwin") return "macos";
+  if (process.env["WSL_DISTRO_NAME"]) return "wsl";
+  return "linux";
+}
+
+/**
+ * Identity for a machine nobody has named: its hostname. Slugs must differ
+ * per install, and the phone keeps one history per slug, so the installs
+ * that commonly share a hostname get a suffix: WSL reports its Windows
+ * host's name (`-wsl`), and a dual-boot box is often given one name on both
+ * sides (`-windows`). Windows and WSL share the name as their host group.
+ */
+export function defaultIdentity(
+  osKind: BurnConfig["osKind"] = detectOsKind(),
+  host: string = hostname(),
+): Pick<BurnConfig, "environmentSlug" | "environmentName" | "hostGroup" | "reportingTimezone"> {
+  const short = host.split(".")[0] || "machine";
+  const base = short.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "machine";
+  let zone = "Asia/Kolkata";
+  try {
+    zone = Intl.DateTimeFormat().resolvedOptions().timeZone || zone;
+  } catch {
+    /* keep the schema default */
+  }
+  return {
+    environmentSlug: osKind === "wsl" || osKind === "windows" ? `${base}-${osKind}` : base,
+    environmentName: osKind === "wsl" ? `${short} (WSL)` : short,
+    hostGroup: osKind === "wsl" || osKind === "windows" ? base : null,
+    reportingTimezone: zone,
+  };
+}
+
 export function configDir(): string {
   const override = process.env["BURN_CONFIG_DIR"];
   if (override) return override;
@@ -85,7 +119,7 @@ export function atomicJson(path: string, data: unknown): void {
 export function loadConfig(): BurnConfig {
   const path = configPath();
   if (!existsSync(path)) {
-    throw new Error(`No config at ${path}. Run: npx burn-report init`);
+    throw new Error(`No config at ${path}. Run: burn-report daemon (or burn-report init to choose a name)`);
   }
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
   const parsed = configSchema.safeParse(raw);
@@ -103,6 +137,15 @@ export function loadConfig(): BurnConfig {
   }
   removeLegacySetup();
   return parsed.data;
+}
+
+/** The saved config, or one created from this machine's defaults: `daemon`
+ * on a fresh machine needs no `init` first. */
+export function loadOrInitConfig(): { config: BurnConfig; created: boolean } {
+  if (existsSync(configPath())) return { config: loadConfig(), created: false };
+  const config = configSchema.parse({ ...defaultIdentity(), osKind: detectOsKind() });
+  saveConfig(config);
+  return { config, created: true };
 }
 
 export function saveConfig(config: BurnConfig): void {

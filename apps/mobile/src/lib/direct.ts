@@ -12,7 +12,9 @@ import {
  * scan-start cursors, atomically commits page continuation, and periodically
  * reconciles full history to pick up old parser/pricing corrections. */
 import {
+  DAY_DIGESTS_CAPABILITY,
   LIVE_OVERLAP_MS,
+  earliestChangedDayMs,
   httpLiveApiFor,
   validateLiveApi,
   LiveError,
@@ -67,6 +69,9 @@ export interface DirectPullOptions {
   continuation?: boolean;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+  /** When a machine answers with an older cached quota reading (it refreshes
+   * behind the response), ask once more after this delay. Off by default. */
+  quotaFollowUpMs?: number;
   /** Test seam. */
   apiFor?: (endpoint: string) => LiveApi;
   now?: () => number;
@@ -108,6 +113,44 @@ export function capabilitiesKey(envId: string): string {
 
 function legacyCursorKey(envId: string): string {
   return `direct_since_${envId}`;
+}
+
+/** Content hash of the snapshot the last completed full reconciliation
+ * downloaded. Unlike the incremental hash, it proves this phone holds that
+ * snapshot's whole history, so an identical snapshot needs no re-download. */
+function fullHashKey(envId: string): string {
+  return `direct_full_hash_${envId}`;
+}
+
+/** Per-UTC-day digests of the snapshot the last completed reconciliation
+ * brought this phone level with (JSON `{[day]: digest}`); `pending` holds
+ * the digests of the snapshot a reconciliation in progress is downloading. */
+function digestsKey(envId: string, pending = false): string {
+  return `direct_digests_${pending ? "pending_" : ""}${envId}`;
+}
+
+/** Machine clocks within this of the phone's are taken at their word. */
+const QUOTA_SKEW_TOLERANCE_MS = 60_000;
+
+/**
+ * When a quota was read, as the timestamp to store. A reading the source
+ * served from its own cache keeps its real collection time (never later than
+ * the page). Quotas are account-level and the freshest reading across
+ * machines wins, so timestamps from different machines must be comparable: a
+ * machine whose clock is off by more than the tolerance (a dual-boot box that
+ * booted with local-time RTC) has its reading moved onto the phone's clock,
+ * or its "future" reading would outrank every correct machine's.
+ */
+function quotaCollectedAt(
+  quota: { fetchedAt?: string | null },
+  generatedAt: string,
+  machineAheadMs: number,
+): string {
+  const source =
+    quota.fetchedAt && Date.parse(quota.fetchedAt) < Date.parse(generatedAt) ? quota.fetchedAt : generatedAt;
+  return Math.abs(machineAheadMs) > QUOTA_SKEW_TOLERANCE_MS
+    ? new Date(Date.parse(source) - machineAheadMs).toISOString()
+    : source;
 }
 
 /** Set when a machine reports a different tokscale pin; a parser change can
@@ -188,6 +231,69 @@ export async function listDirectMachines(
   }));
 }
 
+/** The reporter's default port; `burn-report daemon --port` overrides it. */
+export const DEFAULT_REPORTER_PORT = 8787;
+
+/**
+ * What people type is a machine name or a tailnet address, not a URL:
+ * `cachyos` and `100.101.102.103` mean plain HTTP on the reporter port, and
+ * `cachyos:9000` plain HTTP on that one. Anything with a scheme is a full URL
+ * and is kept exactly as written.
+ */
+export function normalizeMachineUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (trimmed === "") throw new LiveError("enter the machine's name or address");
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
+  if (hasScheme && !/^https?:\/\//i.test(trimmed))
+    throw new LiveError("machine URL must start with http:// or https://");
+  const url = hasScheme ? trimmed : `http://${trimmed}`;
+  const match = /^(https?):\/\/(\[[^\]]+\]|[^/:?#\s]+)(:\d+)?([/?#].*)?$/i.exec(url);
+  if (!match) throw new LiveError(`"${raw.trim()}" is not a machine name, address or URL`);
+  const [, scheme, host, port, rest] = match;
+  void scheme;
+  if (!hasScheme && !port && !rest) return `http://${host}:${DEFAULT_REPORTER_PORT}`;
+  return url;
+}
+
+export interface DiscoveredMachine {
+  url: string;
+  slug: string;
+  displayName: string;
+  osKind: string;
+}
+
+/**
+ * Other reporters on the tailnet that are not registered yet, as reported by
+ * the machines that are (ADR 0005). Best effort and read-only: unreachable
+ * machines and reporters without the endpoint simply contribute nothing.
+ */
+export async function discoverPeerMachines(
+  db: SQLiteDatabase,
+  options: { timeoutMs?: number; apiFor?: (endpoint: string) => LiveApi } = {},
+): Promise<DiscoveredMachine[]> {
+  const registered = await listDirectMachines(db);
+  const known = new Set(registered.map((machine) => machine.slug));
+  const lists = await Promise.all(
+    registered.map(async (machine) => {
+      const api = validateLiveApi(
+        options.apiFor ? options.apiFor(machine.baseUrl) : httpLiveApiFor(machine.baseUrl, fetch),
+      );
+      if (!api.peers) return [];
+      const timeout = withTimeout(undefined, options.timeoutMs ?? 4_000);
+      try {
+        return (await api.peers(timeout.signal)).peers;
+      } catch {
+        return [];
+      } finally {
+        timeout.cancel();
+      }
+    }),
+  );
+  const found = new Map<string, DiscoveredMachine>();
+  for (const peer of lists.flat()) if (!known.has(peer.slug) && !found.has(peer.slug)) found.set(peer.slug, peer);
+  return [...found.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
 /**
  * Validate an endpoint with /ping and register it. The environment id reuses
  * an existing environment row with the same slug when one exists, preserving
@@ -207,9 +313,7 @@ export async function addDirectMachine(
     if (syncGeneration(db) !== generation)
       throw new LiveError("add machine cancelled");
   };
-  const base = rawUrl.trim().replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(base))
-    throw new LiveError("machine URL must start with http:// or https://");
+  const base = normalizeMachineUrl(rawUrl);
   const now = options.now ?? Date.now;
   const pingTimeout = withTimeout(undefined, options.pingTimeoutMs ?? 3_000);
   const api = validateLiveApi(
@@ -325,6 +429,9 @@ export async function removeDirectMachine(
         `direct_hash_${environmentId}`,
         `direct_backfill_${environmentId}`,
         `direct_full_at_${environmentId}`,
+        fullHashKey(environmentId),
+        digestsKey(environmentId),
+        digestsKey(environmentId, true),
         reparseKey(environmentId),
         capabilitiesKey(environmentId),
       ])
@@ -481,7 +588,8 @@ async function pullDirectUnlocked(
             elapsedMs: now() - started,
           };
         }
-        const clockSkewMs = Math.abs(ping.serverNowMs - now());
+        const skewMs = ping.serverNowMs - now();
+        const clockSkewMs = Math.abs(skewMs);
         base.capabilities = ping.capabilities ?? [];
         base.initialSyncComplete = (await kvGetNumber(db, cursorKey(machine.id))) !== null;
 
@@ -521,12 +629,44 @@ async function pullDirectUnlocked(
           );
           try {
             const page = await api.quotas(timeout.signal);
+            // The reporter may answer with its last reading and refresh behind
+            // the response; collect the fresh one without holding this pass.
+            const followUpMs = options.quotaFollowUpMs;
+            if (followUpMs !== undefined && ping.serverNowMs - Date.parse(page.generatedAt) > 60_000)
+              void (async () => {
+                await new Promise((resolve) => setTimeout(resolve, followUpMs));
+                assertActive();
+                const again = withTimeout(probeSignal, options.quotaTimeoutMs ?? 45_000);
+                try {
+                  const fresh = await api.quotas(again.signal);
+                  await withWriteLock(async () => {
+                    assertActive();
+                    await db.withTransactionAsync(async () => {
+                      for (const quota of fresh.quotas) {
+                        await mergeQuota(
+                          db, machine.id, quota,
+                          quotaCollectedAt(quota, fresh.generatedAt, skewMs),
+                          now() + QUOTA_SKEW_TOLERANCE_MS,
+                        );
+                        assertActive();
+                      }
+                    });
+                  });
+                  publishMirrorChange(db, "quotas");
+                } finally {
+                  again.cancel();
+                }
+              })().catch(() => {});
             let quotaError: string | null = null;
             await withWriteLock(async () => {
               assertActive();
               await db.withTransactionAsync(async () => {
                 for (const quota of page.quotas) {
-                  await mergeQuota(db, machine.id, quota, page.generatedAt);
+                  await mergeQuota(
+                    db, machine.id, quota,
+                    quotaCollectedAt(quota, page.generatedAt, skewMs),
+                    now() + QUOTA_SKEW_TOLERANCE_MS,
+                  );
                   if (quota.status === "error")
                     quotaError = quota.error ?? "Quota check failed";
                   assertActive();
@@ -562,8 +702,9 @@ async function pullDirectUnlocked(
                   [machine.id],
                 )
               )?.at ?? null;
+            const rolledBack = newest !== null && newest > ping.serverNowMs;
             const since =
-              newest !== null && newest > windowStart && newest <= ping.serverNowMs
+              newest !== null && newest > windowStart && !rolledBack
                 ? newest
                 : windowStart;
             const page = await api.metrics(since, timeout.signal);
@@ -571,7 +712,10 @@ async function pullDirectUnlocked(
               assertActive();
               let changed = 0;
               await db.withTransactionAsync(async () => {
-                changed = await mergeMetrics(db, machine.id, page.metrics, now(), assertActive);
+                changed = await mergeMetrics(
+                  db, machine.id, page.metrics, now(), assertActive,
+                  rolledBack ? ping.serverNowMs : null,
+                );
                 assertActive();
               });
               return changed;
@@ -618,10 +762,15 @@ async function pullDirectUnlocked(
           // rows. Full history covers any unfinished incremental window, so
           // that window restarts as the reconciliation instead of finishing
           // first; so does a reconciliation that was parsing an older pin.
+          // A machine clock set back below the checkpoint invalidates a saved
+          // incremental window too: its `since` was taken on the wrong clock,
+          // so resuming it would skip everything recorded since the correction.
+          const rolledBack = stored !== null && ping.serverNowMs < stored;
           const progress =
-            reparse &&
-            (saved?.reconciliation === false ||
-              (saved?.parserVersion !== undefined && saved.parserVersion !== pinParser(pendingPin)))
+            (reparse &&
+              (saved?.reconciliation === false ||
+                (saved?.parserVersion !== undefined && saved.parserVersion !== pinParser(pendingPin)))) ||
+            (rolledBack && saved?.reconciliation === false)
               ? null
               : saved;
           const lastFull = await kvGetNumber(
@@ -632,14 +781,61 @@ async function pullDirectUnlocked(
             progress?.reconciliation ??
             (options.full === true ||
               reparse ||
-              (stored !== null && ping.serverNowMs < stored) ||
+              rolledBack ||
               stored === null ||
               lastFull === null ||
               now() < lastFull ||
               now() - lastFull >= 86_400_000);
+          // A reconciliation need not re-download days the machine has not
+          // touched. The machine lists a digest per UTC day; the days this
+          // phone already holds at the same digest are skipped by starting
+          // the window at the earliest day that differs. An explicit full
+          // refresh, a parser change, a clock rollback and a first sync still
+          // start from zero. The digests are fetched either way, to be kept
+          // once this reconciliation completes.
+          let digestSince: number | null = null;
+          if (
+            reconciliation &&
+            !progress &&
+            api.digests &&
+            ping.capabilities?.includes(DAY_DIGESTS_CAPABILITY)
+          ) {
+            const timeout = withTimeout(probeSignal, options.eventsTimeoutMs ?? 120_000);
+            try {
+              const listed = await api.digests(timeout.signal);
+              assertActive();
+              const heldRaw = (
+                await db.getFirstAsync<{ value: string }>("select value from kv where key=?", [
+                  digestsKey(machine.id),
+                ])
+              )?.value;
+              const held: Record<string, string> | null = heldRaw ? JSON.parse(heldRaw) : null;
+              if (!options.full && !reparse && !rolledBack && stored !== null && held !== null)
+                digestSince = earliestChangedDayMs(held, listed.days);
+              await withWriteLock(async () => {
+                assertActive();
+                await kvSetString(
+                  db,
+                  digestsKey(machine.id, true),
+                  JSON.stringify({ snapshotId: listed.snapshotId, days: Object.fromEntries(listed.days) }),
+                );
+              });
+            } catch (err) {
+              assertActive();
+              // Digests only save work; without them the window is the whole history.
+              digestSince = null;
+              await withWriteLock(async () => {
+                assertActive();
+                await kvDelete(db, digestsKey(machine.id, true));
+              });
+              if (!(err instanceof LiveError)) throw err;
+            } finally {
+              timeout.cancel();
+            }
+          }
           const since =
             progress?.since ??
-            (reconciliation ? 0 : Math.max(0, stored! - LIVE_OVERLAP_MS));
+            (reconciliation ? (digestSince ?? 0) : Math.max(0, stored! - LIVE_OVERLAP_MS));
           const hashKey = `direct_hash_${machine.id}`;
           const oldHash = options.full
             ? null
@@ -649,6 +845,15 @@ async function pullDirectUnlocked(
                   [hashKey],
                 )
               )?.value;
+          const fullHash =
+            reconciliation && !options.full && !reparse && !progress
+              ? (
+                  await db.getFirstAsync<{ value: string }>(
+                    "select value from kv where key=?",
+                    [fullHashKey(machine.id)],
+                  )
+                )?.value
+              : undefined;
           let cursor = progress?.cursor;
           let scanStartedAtMs: number | null =
             progress?.scanStartedAtMs ?? null;
@@ -683,6 +888,9 @@ async function pullDirectUnlocked(
                 ...(oldHash && !cursor && !reconciliation
                   ? { knownHash: oldHash }
                   : {}),
+                // A reconciliation may only be skipped against the snapshot a
+                // completed reconciliation already downloaded in full.
+                ...(fullHash && !cursor && !restarted ? { knownHash: fullHash } : {}),
                 ...(options.full && !cursor ? { force: true } : {}),
               });
             } catch (err) {
@@ -744,7 +952,7 @@ async function pullDirectUnlocked(
                     db,
                     cursorKey(machine.id),
                     String(
-                      stored !== null && ping.serverNowMs < stored
+                      rolledBack
                         ? scanStartedAtMs!
                         : Math.max(stored ?? 0, scanStartedAtMs!),
                     ),
@@ -753,22 +961,55 @@ async function pullDirectUnlocked(
                   // An empty snapshot (sources unreadable, not yet scanned) proves
                   // nothing and deletes nothing: reconciliation stays pending so
                   // it reruns from full history once rows return.
-                  if (reconciliation && parserVersion !== undefined) {
-                    changed += await dropSupersededEvents(db, machine.id, parserVersion);
+                  // The machine's snapshot is byte-identical to the one this
+                  // phone last reconciled: nothing to download or retire.
+                  if (reconciliation && page.notModified)
+                    await kvSetString(db, `direct_full_at_${machine.id}`, String(now()));
+                  // Day digests describe one snapshot. They are kept only when
+                  // the pages came from that same snapshot; a window that began
+                  // after day zero proves the whole history only in that case.
+                  const pendingRaw = reconciliation
+                    ? (
+                        await db.getFirstAsync<{ value: string }>("select value from kv where key=?", [
+                          digestsKey(machine.id, true),
+                        ])
+                      )?.value
+                    : undefined;
+                  const pendingDigests: { snapshotId: string; days: Record<string, string> } | null =
+                    pendingRaw ? JSON.parse(pendingRaw) : null;
+                  const sameSnapshot = pendingDigests !== null && pendingDigests.snapshotId === snapshotId;
+                  const wholeHistory = since === 0 || sameSnapshot;
+                  // A window that began after day zero can be empty (a day's
+                  // rows disappeared and nothing newer exists) and still be a
+                  // completed reconciliation: the earlier days were verified
+                  // by digest against this very snapshot.
+                  const verifiedEmptyWindow = parserVersion === undefined && since > 0 && sameSnapshot;
+                  if (reconciliation && verifiedEmptyWindow) await forgetReconciliation(db, machine.id);
+                  if (reconciliation && (parserVersion !== undefined || verifiedEmptyWindow)) {
+                    if (parserVersion !== undefined)
+                      changed += await dropSupersededEvents(db, machine.id, parserVersion);
                     await kvSetString(
                       db,
                       `direct_full_at_${machine.id}`,
                       String(now()),
                     );
+                    if (contentHash && wholeHistory) await kvSetString(db, fullHashKey(machine.id), contentHash);
+                    else if (!wholeHistory) await kvDelete(db, fullHashKey(machine.id));
+                    if (sameSnapshot)
+                      await kvSetString(db, digestsKey(machine.id), JSON.stringify(pendingDigests!.days));
                     // A re-registration may have recorded a newer pin while this
                     // pass ran; only the pin this snapshot parsed is satisfied.
                     const pending = await db.getFirstAsync<{ value: string }>(
                       "select value from kv where key=?",
                       [reparseKey(machine.id)],
                     );
-                    if (pending === null || pinParser(pending.value) === parserVersion)
+                    if (
+                      parserVersion !== undefined &&
+                      (pending === null || pinParser(pending.value) === parserVersion)
+                    )
                       await kvDelete(db, reparseKey(machine.id));
                   }
+                  if (reconciliation) await kvDelete(db, digestsKey(machine.id, true));
                   await kvDelete(db, progressKey);
                 } else {
                   await kvSetString(

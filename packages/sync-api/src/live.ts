@@ -66,6 +66,62 @@ export interface LiveQuotasPage {
   quotas: MachineQuotaInput[];
 }
 
+/** Capability name a reporter advertises when it serves /live/peers. */
+export const PEER_DISCOVERY_CAPABILITY = "peer-discovery";
+
+/** Another burn reporter on the same tailnet, as seen from one machine. */
+export interface LivePeer {
+  url: string;
+  slug: string;
+  displayName: string;
+  osKind: OsKind;
+}
+
+export interface LivePeersPage {
+  peers: LivePeer[];
+}
+
+/** Capability name a reporter advertises when it serves /live/digests. */
+export const DAY_DIGESTS_CAPABILITY = "day-digests";
+export const DAY_MS = 86_400_000;
+
+/**
+ * One digest per UTC day of a snapshot's events (`floor(occurredAtMs / DAY_MS)`),
+ * oldest first. A phone that kept the digests of the snapshot it last
+ * reconciled can tell which days changed since and download only from the
+ * earliest of them, instead of the whole history every day.
+ */
+export interface LiveDigestsPage {
+  snapshotId: string;
+  contentHash: string;
+  generatedAt: string;
+  days: [day: number, digest: string][];
+}
+
+/**
+ * Where a reconciliation must start, as an epoch-ms `since`: the start of the
+ * earliest UTC day whose digest differs between what the phone holds and what
+ * the machine now has (a day on only one side differs). Null when every day
+ * matches. With nothing held, everything differs and the answer is 0.
+ */
+export function earliestChangedDayMs(
+  held: Readonly<Record<string, string>> | null,
+  current: readonly (readonly [number, string])[],
+): number | null {
+  if (held === null) return 0;
+  let earliest: number | null = null;
+  const seen = new Set<string>();
+  for (const [day, digest] of current) {
+    seen.add(String(day));
+    if (held[String(day)] !== digest && (earliest === null || day < earliest)) earliest = day;
+  }
+  for (const key of Object.keys(held)) {
+    const day = Number(key);
+    if (!seen.has(key) && (earliest === null || day < earliest)) earliest = day;
+  }
+  return earliest === null ? null : Math.max(0, earliest) * DAY_MS;
+}
+
 export interface LiveMetricsPage {
   generatedAt: string;
   metrics: MachineMetricInput[];
@@ -90,6 +146,10 @@ export interface LiveApi {
   ): Promise<LiveEventsPage>;
   quotas(signal?: AbortSignal): Promise<LiveQuotasPage>;
   metrics?(sinceMs: number, signal?: AbortSignal): Promise<LiveMetricsPage>;
+  /** Other reporters this machine can see on the tailnet (ADR 0005). */
+  peers?(signal?: AbortSignal): Promise<LivePeersPage>;
+  /** Per-day content digests; only reporters advertising the capability answer. */
+  digests?(signal?: AbortSignal): Promise<LiveDigestsPage>;
   /** Opt-in control (ADR 0004); only machines advertising it answer. */
   powerMode?(signal?: AbortSignal): Promise<PowerModeState>;
   /** Apply a mode; resolves with the state read back after the change. */
@@ -114,6 +174,14 @@ export function validateLiveApi(transport: LiveTransport): LiveApi {
   if (transport.metrics) {
     const metrics = transport.metrics;
     api.metrics = async (...args) => parseLiveMetricsPage(await metrics(...args));
+  }
+  if (transport.peers) {
+    const peers = transport.peers;
+    api.peers = async (...args) => parseLivePeersPage(await peers(...args));
+  }
+  if (transport.digests) {
+    const digests = transport.digests;
+    api.digests = async (...args) => parseLiveDigestsPage(await digests(...args));
   }
   if (transport.powerMode) {
     const read = transport.powerMode;
@@ -230,6 +298,8 @@ export function httpLiveApiFor(
     },
     quotas: async (signal) => call("/live/quotas", signal),
     metrics: async (sinceMs, signal) => call(`/live/metrics?since=${Math.floor(sinceMs)}`, signal),
+    digests: async (signal) => call("/live/digests", signal),
+    peers: async (signal) => call("/live/peers", signal),
     powerMode: async (signal) => call(POWER_MODE_PATH, signal),
     setPowerMode: async (mode, signal) => call(POWER_MODE_PATH, signal, undefined, { mode }),
   });
@@ -339,6 +409,9 @@ export function parseLiveQuotasPage(raw: unknown): LiveQuotasPage {
       status: choice(q.status ?? "ok", ["ok", "error"], where("status")),
       error: orNullString(q.error),
       sourceOffsetMinutes: orNullNumber(q.sourceOffsetMinutes),
+      ...(q.fetchedAt === null || q.fetchedAt === undefined
+        ? {}
+        : { fetchedAt: timestamp(q.fetchedAt, where("fetchedAt")) }),
     };
   });
   return { generatedAt: timestamp(page.generatedAt, "generatedAt"), quotas };
@@ -393,6 +466,51 @@ function nullableTemperature(value: unknown, where: string): number | null {
   const number = expectNumber(value, where);
   if (number < -50 || number > 200) throw new LiveError(`${where}: invalid temperature`);
   return number;
+}
+
+export function parseLivePeersPage(raw: unknown): LivePeersPage {
+  const page = expectObject(raw, "peers page");
+  if (!Array.isArray(page.peers)) throw new LiveError("peers: expected an array");
+  return {
+    peers: page.peers.map((entry, index) => {
+      const peer = expectObject(entry, `peers[${index}]`);
+      const url = identity(peer.url, `peers[${index}].url`);
+      // A peer list is another machine's word: only an address in
+      // Tailscale's range (100.64.0.0/10) is accepted, which is all a
+      // reporter ever lists, never a name or URL to send the phone elsewhere.
+      // Octets are plain decimals: a leading zero reads as octal to a URL
+      // parser, which would turn 100.064.x.x into an address outside the range.
+      const address = /^http:\/\/100\.([1-9]\d{1,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})(?::\d{1,5})?$/.exec(url);
+      if (!address || Number(address[1]) < 64 || Number(address[1]) > 127 || Number(address[2]) > 255 || Number(address[3]) > 255)
+        throw new LiveError(`peers[${index}].url: invalid endpoint`);
+      return {
+        url,
+        slug: identity(peer.slug, `peers[${index}].slug`),
+        displayName: identity(peer.displayName, `peers[${index}].displayName`),
+        osKind: choice(peer.osKind, ["windows", "wsl", "linux", "macos"], `peers[${index}].osKind`),
+      };
+    }),
+  };
+}
+
+export function parseLiveDigestsPage(raw: unknown): LiveDigestsPage {
+  const page = expectObject(raw, "digests page");
+  if (!Array.isArray(page.days)) throw new LiveError("digests: expected an array");
+  let previous = -1;
+  const days = page.days.map((entry, index): [number, string] => {
+    if (!Array.isArray(entry) || entry.length !== 2) throw new LiveError(`days[${index}]: expected [day, digest]`);
+    const day = integer(entry[0], `days[${index}].day`);
+    const digest = identity(entry[1], `days[${index}].digest`);
+    if (day <= previous) throw new LiveError(`days[${index}]: days must ascend`);
+    previous = day;
+    return [day, digest];
+  });
+  return {
+    snapshotId: identity(page.snapshotId, "snapshotId"),
+    contentHash: identity(page.contentHash, "contentHash"),
+    generatedAt: timestamp(page.generatedAt, "generatedAt"),
+    days,
+  };
 }
 
 /** Validate peer-provided vitals before they reach the phone mirror. */

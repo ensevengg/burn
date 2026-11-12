@@ -11,6 +11,9 @@ import { Screen } from "../ui/screen";
 import { eventTokens, type BreakdownRow, type SessionRow } from "../data/repository";
 import { EXPLORE_RANGES, USAGE_RANGES, type UsageRangeId } from "../lib/usage-range";
 
+/** The sessions query's row cap: at the cap, the count is not the total. */
+const SESSION_LIMIT = 60;
+
 type Tab = "models" | "clients" | "workspaces" | "sessions";
 
 const TABS = [
@@ -43,8 +46,19 @@ export function ExploreScreen() {
   const sessions = useSessionsQuery(windowDays, tab === "sessions");
   const breakdown = tab === "models" ? models : tab === "clients" ? clients : workspaces;
   const modelMode = tab === "models";
-  const rows = tab === "sessions" ? sessions.data : breakdown.data;
+  // The read layer ranks by tokens; agents and workspaces show cost, so they
+  // are ranked by cost here or "01" could carry a smaller figure than "02".
+  const ranked = useMemo(
+    () =>
+      modelMode || breakdown.data === undefined
+        ? breakdown.data
+        : [...breakdown.data].sort((a, b) => b.cost - a.cost || eventTokens(b) - eventTokens(a)),
+    [breakdown.data, modelMode],
+  );
+  const rows = tab === "sessions" ? sessions.data : ranked;
   const loading = rows === undefined;
+  // Placeholder rows are the previous range's numbers under the new chip.
+  const outdated = tab === "sessions" ? sessions.isPlaceholderData : breakdown.isPlaceholderData;
 
   const { maxValue, totalValue, totalCost, totalTokens } = useMemo(() => {
     const data = breakdown.data ?? [];
@@ -85,6 +99,7 @@ export function ExploreScreen() {
           onScroll={scroll.onScroll}
           scrollEventThrottle={scroll.scrollEventThrottle}
           contentContainerStyle={scroll.contentContainerStyle}
+          style={outdated ? styles.outdated : undefined}
           refreshControl={scroll.refreshControl}
           showsVerticalScrollIndicator={false}
           ListHeaderComponent={
@@ -96,7 +111,7 @@ export function ExploreScreen() {
               </View>
               {loading || tab === "sessions" ? (
                 <Text style={[type.muted, styles.summary, { color: C.faint }]}>
-                  {loading ? " " : `${count} ${noun} · most recent first`}
+                  {loading ? " " : count >= SESSION_LIMIT ? `Latest ${count} sessions` : `${count} ${noun} · most recent first`}
                 </Text>
               ) : (
                 <TotalsLine lead={`${count} ${noun}`} tokens={totalTokens} cost={totalCost} />
@@ -325,6 +340,7 @@ function TotalsLine({ lead, tokens, cost }: { lead: string; tokens: number; cost
 }
 
 const styles = StyleSheet.create({
+  outdated: { opacity: 0.4 },
   controls: { paddingHorizontal: gutter, gap: spacing.s, marginTop: spacing.xs },
   summary: { marginHorizontal: gutter, marginTop: spacing.m, marginBottom: spacing.xs },
   item: { marginHorizontal: gutter, paddingVertical: 14 },

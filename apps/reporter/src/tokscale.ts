@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import { platform } from "node:os";
 import { z } from "zod";
 import {
+  nullableResetTime,
   quotaAccountKey,
   quotaMetricLabel,
   type MachineQuotaInput,
@@ -47,6 +48,12 @@ export const usageOutputSchema = z.object({
     .default([]),
   credit_status: z.record(z.string(), z.unknown()).nullable().optional(),
   spend_control: z.record(z.string(), z.unknown()).nullable().optional(),
+  /** Present when tokscale answered from its own cache (rate-limit cooldown,
+   * another tokscale process holding the request lock). Epoch seconds. */
+  freshness: z
+    .object({ fetched_at: z.number().nonnegative(), stale: z.boolean().optional() })
+    .nullable()
+    .optional(),
 });
 export type TokscaleUsageOutput = z.infer<typeof usageOutputSchema>;
 
@@ -65,6 +72,18 @@ export function currentUtcOffsetMinutes(): number {
  * from any machine sharing the subscription). Shared by `usage` and
  * the live server's /live/quotas.
  */
+/** Providers pass reset text through verbatim; some of it is prose ("June 22,
+ * 2026 at 9:58 AM"). The wire accepts instants and calendar dates only, and
+ * one unparseable row must not cost the phone every other quota, so anything
+ * else is reported as unknown rather than guessed at. */
+export function quotaResetTime(raw: string | null | undefined): string | null {
+  try {
+    return nullableResetTime(raw?.trim() || null, "resets_at");
+  } catch {
+    return null;
+  }
+}
+
 export function tokscaleQuotaInputs(
   outputs: TokscaleUsageReport,
 ): MachineQuotaInput[] {
@@ -72,6 +91,11 @@ export function tokscaleQuotaInputs(
   const inputs: MachineQuotaInput[] = [];
   for (const out of outputs) {
     const accountKey = quotaAccountKey(out.account?.id);
+    const fetchedMs = out.freshness ? out.freshness.fetched_at * 1000 : NaN;
+    const fetchedAt =
+      Number.isFinite(fetchedMs) && fetchedMs > 0 && fetchedMs < 8.64e15
+        ? new Date(fetchedMs).toISOString()
+        : null;
     for (const metric of out.metrics) {
       inputs.push({
         provider: out.provider,
@@ -82,12 +106,13 @@ export function tokscaleQuotaInputs(
         usedPercent: metric.used_percent,
         remainingPercent: metric.remaining_percent,
         remainingLabel: metric.remaining_label ?? null,
-        resetsAt: metric.resets_at ?? null,
+        resetsAt: quotaResetTime(metric.resets_at),
         creditStatus: out.credit_status ?? null,
         spendControl: out.spend_control ?? null,
         status: "ok",
         error: null,
         sourceOffsetMinutes: offset,
+        ...(fetchedAt === null ? {} : { fetchedAt }),
       });
     }
   }
@@ -131,8 +156,12 @@ export function spawnRunner(
         ),
       );
     }, timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+    // Stream decoders hold a multibyte character split across pipe chunks;
+    // decoding each chunk alone turns both halves into U+FFFD.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => (stdout += chunk));
+    child.stderr.on("data", (chunk: string) => (stderr += chunk));
     child.on("error", (err) => {
       clearTimeout(timer);
       reject(

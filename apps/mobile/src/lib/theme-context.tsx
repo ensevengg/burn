@@ -26,8 +26,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       const db = await openDb();
       const saved = await kvGet(db, "theme_mode");
       if (saved === "light" || saved === "dark" || saved === "system") setModeState(saved);
-      setLoaded(true);
-    })();
+    })()
+      // A database that will not open must still render: AppProvider owns
+      // the error message, and it sits below this provider.
+      .catch(() => {})
+      .finally(() => setLoaded(true));
   }, []);
 
   const setMode = (next: ThemeMode) => {
