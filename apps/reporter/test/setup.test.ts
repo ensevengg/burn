@@ -128,6 +128,31 @@ describe("following Tailscale", () => {
     await expect(fetch(`http://127.0.0.1:${port}/ping`)).rejects.toThrow();
   });
 
+  test.skipIf(platform() !== "linux")("a listener that stops answering on the same address is rebound on the same port", async () => {
+    let answering = true;
+    let checks = 0;
+    const bound: string[] = [];
+    const live = await superviseLiveServer(config, {
+      port: 0, deps, pollMs: 10, detect: async () => "127.0.0.2",
+      selfCheck: async () => { checks++; return answering; },
+      onBound: (handle) => bound.push(handle.hostname),
+    });
+    try {
+      const port = live.current().port;
+      while (checks < 3) await Bun.sleep(5);
+      expect(bound).toEqual(["127.0.0.2"]);
+      // One miss is tolerated; two in a row rebind.
+      answering = false;
+      while (bound.length < 2) await Bun.sleep(5);
+      answering = true;
+      expect(bound).toEqual(["127.0.0.2", "127.0.0.2"]);
+      expect(live.current().port).toBe(port);
+      expect(parseLivePing(await (await fetch(`http://127.0.0.2:${port}/ping`)).json()).slug).toBe("boot");
+    } finally {
+      live.stop();
+    }
+  });
+
   test("an explicit --bind is never moved", async () => {
     let asked = 0;
     const live = await superviseLiveServer(config, {
@@ -150,11 +175,23 @@ describe("service install", () => {
   });
 
   test("the systemd unit carries the command, flags and the installing PATH", () => {
-    const unit = systemdUnit(["/opt/my tools/burn-report", "daemon"], "/home/u/.cargo/bin:/usr/bin", ["--port", "9000"]);
+    const unit = systemdUnit(["/opt/my tools/burn-report", "daemon"], { PATH: "/home/u/.cargo/bin:/usr/bin" }, ["--port", "9000"]);
     expect(unit).toContain('ExecStart="/opt/my tools/burn-report" daemon --port 9000\n');
     expect(unit).toContain("Environment=PATH=/home/u/.cargo/bin:/usr/bin\n");
-    expect(unit).toContain("Restart=on-failure");
+    // Restarted whenever it exits, and never given up on.
+    expect(unit).toContain("Restart=always");
+    expect(unit).toContain("StartLimitIntervalSec=0");
     expect(unit).toContain("WantedBy=default.target");
+  });
+
+  test("the systemd unit escapes specifiers and variables", () => {
+    const unit = systemdUnit(
+      ["/opt/bun", '/src/100%/"burn"/$HOME/index.ts', "daemon"],
+      { PATH: "/a b:/usr/bin", BURN_CONFIG_DIR: "/cfg/%h" },
+    );
+    expect(unit).toContain('Environment="PATH=/a b:/usr/bin"');
+    expect(unit).toContain("Environment=BURN_CONFIG_DIR=/cfg/%%h");
+    expect(unit).toContain('ExecStart=/opt/bun "/src/100%%/\\"burn\\"/$$HOME/index.ts" daemon');
   });
 });
 
