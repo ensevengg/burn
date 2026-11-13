@@ -6,9 +6,9 @@
  *
  * The only addresses contacted are the peers Tailscale itself reports for
  * this node (and this node's own address), on this reporter's port and the
- * two default ports, with `GET /ping`. Nothing from the request chooses a
- * target. The default ports matter because Windows and its WSL share one
- * tailnet address under mirrored networking, on 8787 and 8788.
+ * default ports 8787–8790, with `GET /ping`. Nothing from the request
+ * chooses a target. The default ports matter because Windows and its WSL
+ * distros share one tailnet address under mirrored networking.
  */
 import { parseLivePing, type LivePeer } from "@burn/sync-api";
 import { spawnRunner } from "./tokscale.js";
