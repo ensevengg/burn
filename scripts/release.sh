@@ -20,15 +20,23 @@ git fetch --quiet origin main
 git rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo "v$version already exists" >&2; exit 1; }
 
 bun scripts/release-version.ts set "$version"
-bun run typecheck
-bun run test
+# A failed check leaves the tree as it was.
+if ! { bun run typecheck && bun run test; }; then
+  git checkout --quiet -- .
+  echo "checks failed; version fields restored" >&2
+  exit 1
+fi
 
-git commit --quiet -am "chore(release): v$version"
+# Releasing the version already in the tree needs no bump commit.
+git diff --quiet || git commit --quiet -am "chore(release): v$version"
 git tag -a "v$version" -m "burn v$version"
 printf 'Push main and v%s to start the release build? [y/N] ' "$version"
 read -r answer
 case "$answer" in
   y|Y|yes) git push --quiet origin main "v$version" ;;
-  *) echo "Not pushed. To undo: git tag -d v$version && git reset --hard HEAD~1"; exit 0 ;;
+  *)
+    undo="git tag -d v$version"
+    [ "$(git log -1 --format=%s)" = "chore(release): v$version" ] && undo="$undo && git reset --hard HEAD~1"
+    echo "Not pushed. To undo: $undo"; exit 0 ;;
 esac
 echo "Building: https://github.com/ensevengg/burn/actions/workflows/release.yml"
