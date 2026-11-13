@@ -261,7 +261,12 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
     run("launchctl bootout", ["launchctl", "bootout", `${domain}/dev.burn.report`], false);
     mkdirSync(dirname(plist), { recursive: true });
     writeFileSync(plist, body);
-    run("Loading the launch agent", ["launchctl", "bootstrap", domain, plist]);
+    // bootout returns before the old job is gone; bootstrap fails until it is.
+    for (let attempt = 1; ; attempt++) {
+      const loaded = run("Loading the launch agent", ["launchctl", "bootstrap", domain, plist], attempt === 5);
+      if (loaded.ok) break;
+      await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+    }
     console.log(`installed ${plist}: starts when you sign in and restarts if it exits`);
     await printPhoneUrl(args);
     return 0;
