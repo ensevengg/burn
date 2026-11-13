@@ -101,7 +101,7 @@ bun run reporter -- install-service   # or `daemon` to run in this terminal only
 ## Upgrading
 
 - **Machines:** run the install line again. It replaces both binaries and restarts the reporter.
-- **Phone:** install the new `burn.apk` over the old one. History and machines stay. A copy you built yourself is signed with a different key, so Android asks you to uninstall it first. Uninstalling removes the machines from the phone: scan or add them again, and their history downloads again from the machines.
+- **Phone:** install the new `burn.apk` over the old one. History and machines stay. A copy you built yourself is signed with a different key, so Android asks you to uninstall it first. Uninstalling deletes the phone's copy of every machine and its history. Adding the machines back downloads what they still have, but history a machine no longer keeps (sessions an agent deleted or pruned) is gone for good, so uninstall only if you accept that.
 - **From source:** rebuild `burn-events` with each pin bump; the reporter refuses one built for another tokscale pin.
 - **`push` is gone:** run `install-service` instead. Services that still pass `--no-live` or `--live-url` exit with a hint, and `install-service` disables older hand-written Linux units that ran the reporter, keeping their files.
 - **Kept:** reporter identity, phone history, settings and machine URLs.
