@@ -334,10 +334,11 @@ async function prepareConfig(args: Map<string, string>, kind: Target): Promise<v
   const flag = args.get("port");
   let port = flag === undefined ? undefined : Number(flag);
   // Every WSL distro shares Windows' tailnet address under mirrored
-  // networking, so one still on the default port (fresh, or created by an
+  // networking, so one on the fresh-install default (saved by this or an
   // earlier `pair` or `daemon`) moves to the first port no other reporter
-  // holds. A port chosen with --port stays.
-  if (port === undefined && kind === "wsl" && (config.port ?? WSL_DEFAULT_PORT) === WSL_DEFAULT_PORT)
+  // holds. A config without a port predates this and serves on 8787, which
+  // the phone already uses, so it stays; so does a port chosen with --port.
+  if (port === undefined && kind === "wsl" && config.port === WSL_DEFAULT_PORT)
     port = await freeWslPort(config.environmentSlug);
   if (port !== undefined && config.port !== port) saveConfig({ ...config, port });
 }
