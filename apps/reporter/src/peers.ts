@@ -22,8 +22,8 @@ export interface PeerDeps {
   self?: string | null;
 }
 
-/** The defaults for a machine and for the WSL beside it (see config.ts). */
-export const DEFAULT_REPORTER_PORTS = [8787, 8788] as const;
+/** A machine's default and the ports its WSL distros take (see config.ts). */
+export const DEFAULT_REPORTER_PORTS = [8787, 8788, 8789, 8790] as const;
 
 /** Online peers from `tailscale status --json`; empty when the CLI is absent. */
 export async function tailscalePeers(timeoutMs = 5_000): Promise<string[]> {

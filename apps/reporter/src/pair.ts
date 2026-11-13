@@ -36,9 +36,13 @@ async function answers(url: string, attempts: number): Promise<boolean> {
 }
 
 /** Print the QR code and URL. `wait` gives a just-started daemon time to bind. */
-export async function printPairing(bind?: string, options: { wait?: boolean; check?: boolean } = {}): Promise<number> {
+export async function printPairing(
+  bind?: string,
+  options: { wait?: boolean; check?: boolean; port?: string } = {},
+): Promise<number> {
   const { config } = loadOrInitConfig();
-  const port = reporterPort(config);
+  // A daemon started with an unsaved --port needs the same flag here.
+  const port = reporterPort(config, options.port);
   const address = bind ?? await tailscaleIp();
   if (address === null) {
     console.log(`Tailscale is not connected on this machine yet. Start it, then run: burn-report pair`);
@@ -59,6 +63,7 @@ export async function printPairing(bind?: string, options: { wait?: boolean; che
   return 0;
 }
 
-export async function runPair(): Promise<number> {
-  return printPairing(undefined, { wait: false });
+export async function runPair(args: Map<string, string>): Promise<number> {
+  const port = args.get("port");
+  return printPairing(args.get("bind"), { wait: false, ...(port === undefined ? {} : { port }) });
 }

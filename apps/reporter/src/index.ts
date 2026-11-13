@@ -21,6 +21,7 @@ Usage: burn-report <command> [flags]
   uninstall-service
             Remove that autostart entry
   pair      Show the QR code and URL that add this machine on the phone
+            [--port n] [--bind ip] (when the daemon was started with them)
   doctor    Verify config, tokscale pin, burn-events exporter and Tailscale
   usage     Print vendor quota JSON from tokscale for local diagnostics
   serve     Alias for daemon
@@ -44,7 +45,8 @@ try {
   const allowed = command === "init"
     ? ["slug", "name", "os", "host-group", "tz", "tokscale-pin", "direct"]
     : command === "daemon" || command === "serve" ? ["bind", "port"]
-    : command === "install-service" ? ["bind", "port", "print"] : [];
+    : command === "install-service" ? ["bind", "port", "print"]
+    : command === "pair" ? ["bind", "port"] : [];
   const args = new Map<string, string>();
   // `controls` takes positional words, not flags.
   for (let i = 1; command !== "controls" && i < argv.length; i++) {
@@ -68,7 +70,7 @@ try {
     case "serve": await runServe(args); break;
     case "install-service": process.exitCode = await runInstallService(args); break;
     case "uninstall-service": process.exitCode = runUninstallService(); break;
-    case "pair": process.exitCode = await runPair(); break;
+    case "pair": process.exitCode = await runPair(args); break;
     case "controls":
       if (argv.length > 3) throw new Error("usage: burn-report controls [status|enable|disable|polkit-rule] [power-mode]");
       process.exitCode = await runControls(argv[1] ?? "status", argv[2]);

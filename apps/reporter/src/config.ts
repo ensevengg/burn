@@ -38,6 +38,9 @@ export const configSchema = z
 
 export const DEFAULT_PORT = 8787;
 export const WSL_DEFAULT_PORT = 8788;
+/** Further WSL distros share the address too, so `install-service` moves a
+ * fresh one up to the next free port; peer discovery probes these. */
+export const WSL_LAST_PORT = 8790;
 
 /** `--port` when given, else the saved port, else the default. */
 export function reporterPort(config: Pick<BurnConfig, "port">, flag?: string): number {
@@ -78,15 +81,19 @@ export function detectOsKind(): BurnConfig["osKind"] {
  * Identity for a machine nobody has named: its hostname. Slugs must differ
  * per install, and the phone keeps one history per slug, so the installs
  * that commonly share a hostname get a suffix: WSL reports its Windows
- * host's name (`-wsl`), and a dual-boot box is often given one name on both
- * sides (`-windows`). Windows and WSL share the name as their host group.
+ * host's name (`-wsl-<distro>`, so two distros stay two machines), and a
+ * dual-boot box is often given one name on both sides (`-windows`). Windows
+ * and WSL share the name as their host group.
  */
 export function defaultIdentity(
   osKind: BurnConfig["osKind"] = detectOsKind(),
   host: string = hostname(),
+  distro: string = process.env["WSL_DISTRO_NAME"] ?? "",
 ): Pick<BurnConfig, "environmentSlug" | "environmentName" | "hostGroup" | "reportingTimezone"> {
+  const kebab = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   const short = host.split(".")[0] || "machine";
-  const base = short.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "machine";
+  const base = kebab(short) || "machine";
+  const distroSlug = kebab(distro);
   let zone = "Asia/Kolkata";
   try {
     zone = Intl.DateTimeFormat().resolvedOptions().timeZone || zone;
@@ -94,8 +101,10 @@ export function defaultIdentity(
     /* keep the schema default */
   }
   return {
-    environmentSlug: osKind === "wsl" || osKind === "windows" ? `${base}-${osKind}` : base,
-    environmentName: osKind === "wsl" ? `${short} (WSL)` : short,
+    environmentSlug: osKind === "wsl"
+      ? (distroSlug ? `${base}-wsl-${distroSlug}` : `${base}-wsl`)
+      : osKind === "windows" ? `${base}-windows` : base,
+    environmentName: osKind === "wsl" ? (distro ? `${short} (WSL ${distro})` : `${short} (WSL)`) : short,
     hostGroup: osKind === "wsl" || osKind === "windows" ? base : null,
     reportingTimezone: zone,
   };

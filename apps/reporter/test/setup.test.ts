@@ -30,9 +30,14 @@ describe("identity defaults", () => {
     });
     // A dual-boot box named the same on both sides is still two machines.
     expect(defaultIdentity("windows", "Nerve-PC").environmentSlug).not.toBe(defaultIdentity("linux", "Nerve-PC").environmentSlug);
-    expect(defaultIdentity("wsl", "DESKTOP_7")).toMatchObject({
+    expect(defaultIdentity("wsl", "DESKTOP_7", "")).toMatchObject({
       environmentSlug: "desktop-7-wsl", environmentName: "DESKTOP_7 (WSL)", hostGroup: "desktop-7",
     });
+    // Each distro reports the same hostname; each is its own machine.
+    expect(defaultIdentity("wsl", "DESKTOP_7", "Ubuntu-22.04")).toMatchObject({
+      environmentSlug: "desktop-7-wsl-ubuntu-22-04", environmentName: "DESKTOP_7 (WSL Ubuntu-22.04)", hostGroup: "desktop-7",
+    });
+    expect(defaultIdentity("wsl", "DESKTOP_7", "Debian").environmentSlug).toBe("desktop-7-wsl-debian");
     expect(defaultIdentity("linux", "").environmentSlug).toBe("machine");
     expect(defaultIdentity("linux", "東京").environmentSlug).toBe("machine");
     // The machine's own zone, not a fixed one; always a valid config.
@@ -242,8 +247,8 @@ describe("peer discovery (ADR 0005)", () => {
         probes++;
         const url = new URL(String(input));
         expect(url.pathname).toBe("/ping");
-        // Each peer is tried on both default ports; only 8787 answers here.
-        expect(["8787", "8788"]).toContain(url.port);
+        // Each peer is tried on every default port; only 8787 answers here.
+        expect(["8787", "8788", "8789", "8790"]).toContain(url.port);
         return fetch(url.port === "8787" ? `${targets[url.hostname]}/ping` : "http://127.0.0.1:1/ping", init);
       }) as typeof fetch,
     });
@@ -254,7 +259,7 @@ describe("peer discovery (ADR 0005)", () => {
       expect(page.peers).toEqual([{ url: "http://100.64.0.2:8787", slug: "laptop", displayName: "Laptop", osKind: "windows" }]);
       // Answers are cached for a minute rather than re-probing the tailnet.
       await fetch(`${hub.url}/live/peers`);
-      expect(probes).toBe(6);
+      expect(probes).toBe(12);
       // A reporter started without discovery neither advertises nor answers it.
       expect(parseLivePing(await (await fetch(`${other.url}/ping`)).json()).capabilities).not.toContain("peer-discovery");
       expect((await fetch(`${other.url}/live/peers`)).status).toBe(404);

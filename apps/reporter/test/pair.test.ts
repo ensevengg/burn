@@ -59,3 +59,23 @@ describe("pairing code", () => {
     expect(plain.some((line) => line.includes("\x1b"))).toBe(false);
   });
 });
+
+describe("WSL port choice", () => {
+  test("a port another distro holds is not free", async () => {
+    const { portFree } = await import("../src/service");
+    const held = Bun.serve({ hostname: "0.0.0.0", port: 0, fetch: () => new Response("pong") });
+    try {
+      expect(await portFree(held.port!, null)).toBe(false);
+      // Bound only on the tailnet address (here loopback): still answers.
+      const other = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("pong") });
+      try {
+        expect(await portFree(other.port!, "127.0.0.1")).toBe(false);
+      } finally {
+        other.stop(true);
+      }
+    } finally {
+      held.stop(true);
+    }
+    expect(await portFree(held.port!, null)).toBe(true);
+  });
+});
