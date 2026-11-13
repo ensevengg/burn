@@ -54,7 +54,10 @@ jobs:
           - os: windows-latest
             exe: burn-events.exe
             artifact: burn-events-x86_64-pc-windows-msvc.exe
-          - os: ubuntu-latest
+          # The oldest supported runner: the binary needs the glibc it was
+          # built against, and 24.04's (2.38) is newer than Ubuntu 22.04's
+          # or Debian 12's, WSL defaults among them.
+          - os: ubuntu-22.04
             exe: burn-events
             artifact: burn-events-x86_64-unknown-linux-gnu
           - os: macos-latest
@@ -177,8 +180,13 @@ jobs:
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
         env:
           GH_TOKEN: ${{ github.token }}
+        # A re-run of a failed build replaces the assets of the release it made.
         run: |
-          gh release create "${GITHUB_REF_NAME}" release/* \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "burn ${GITHUB_REF_NAME}" \
-            --generate-notes
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" release/* --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" release/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "burn ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
