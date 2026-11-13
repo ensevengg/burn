@@ -36,16 +36,23 @@ machine: tokscale + burn-events → burn-report daemon ← Tailscale → phone: 
 
 **2. Run one line on each machine.**
 
+Linux / macOS / WSL:
+
+```sh
+curl -fsSL https://github.com/ensevengg/burn/releases/latest/download/install.sh | sh
 ```
-Linux / macOS / WSL:  curl -fsSL https://github.com/ensevengg/burn/releases/latest/download/install.sh | sh
-Windows:              irm https://github.com/ensevengg/burn/releases/latest/download/install.ps1 | iex
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/ensevengg/burn/releases/latest/download/install.ps1 | iex
 ```
 
 It installs `burn-report`, starts it now and with the machine, and prints a QR code. On Windows it offers to set up each WSL distro too, including the mirrored networking WSL needs to be reachable. Run it again to upgrade.
 
 **3. On the phone.** Install [`burn.apk`](https://github.com/ensevengg/burn/releases/latest/download/burn.apk), tap **Connect my machines**, then **Machines → + → Scan QR code**. Your other machines appear in the same sheet: tap each one.
 
-**Lost the QR code?** `burn-report pair` shows it again. **Just looking?** Tap **Explore with demo data**.
+**Lost the QR code?** `burn-report pair` shows it again (add `--port` if you started the daemon with one). **Just looking?** Tap **Explore with demo data**.
 
 ### From source
 
@@ -60,9 +67,9 @@ bun run reporter -- install-service   # or `daemon` to run in this terminal only
 ### Reporter tips
 
 - **Rename a machine:** `burn-report init --slug my-machine --name "My Machine"`. Every flag is optional.
-- **One slug per install:** Windows, WSL and each dual-boot side. By default Windows gets a `-windows` slug and WSL a `-wsl` slug.
+- **One slug per install:** Windows, WSL and each dual-boot side. By default Windows gets a `-windows` slug and each WSL distro a `-wsl-<distro>` slug.
 - **Same box?** Share a `--host-group`. Windows and WSL share their hostname automatically.
-- **Ports:** 8787, or 8788 for a fresh WSL install (mirrored networking gives WSL the Windows reporter's address). `--port` on `install-service` is saved for later runs. Discovery checks both. `--bind <address>` pins the address; `serve` is an alias for `daemon`.
+- **Ports:** 8787, or the first free port from 8788 to 8790 for a fresh WSL install (mirrored networking gives every distro the Windows reporter's address). `--port` on `install-service` is saved for later runs. Discovery checks 8787–8790. `--bind <address>` pins the address; `serve` is an alias for `daemon`.
 - **Autostart:** `install-service` keeps the daemon running and restarts it if it exits. Linux gets a systemd user unit with lingering, so it starts at boot. Windows gets a hidden launcher in the per-user Run key that starts at sign-in, with no administrator rights needed. Inside WSL it registers a Windows sign-in launcher that starts the distro; WSL needs mirrored networking or Tailscale in the distro, and a different `--port` from the Windows reporter. `--print` shows what would be installed; `uninstall-service` removes it.
 - **Check a machine:** `burn-report doctor`.
 - **Limits** (vendor quotas) need the tokscale CLI, which the reporter runs through Bun or Node if either is installed. Usage syncs without it.
@@ -94,7 +101,7 @@ bun run reporter -- install-service   # or `daemon` to run in this terminal only
 ## Upgrading
 
 - **Machines:** run the install line again. It replaces both binaries and restarts the reporter.
-- **Phone:** install the new `burn.apk` over the old one. History and machines stay. A copy you built yourself is signed with a different key, so Android asks you to uninstall it first.
+- **Phone:** install the new `burn.apk` over the old one. History and machines stay. A copy you built yourself is signed with a different key, so Android asks you to uninstall it first. Uninstalling removes the machines from the phone: scan or add them again, and their history downloads again from the machines.
 - **From source:** rebuild `burn-events` with each pin bump; the reporter refuses one built for another tokscale pin.
 - **`push` is gone:** run `install-service` instead. Services that still pass `--no-live` or `--live-url` exit with a hint, and `install-service` disables older hand-written Linux units that ran the reporter, keeping their files.
 - **Kept:** reporter identity, phone history, settings and machine URLs.
