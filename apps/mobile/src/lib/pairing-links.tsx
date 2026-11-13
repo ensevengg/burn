@@ -33,7 +33,15 @@ export function PairingLinks() {
     if (url === null || db === null) return;
     setPending(null);
     if (mode === "direct") setPairing(url);
-    else if (mode === "unconfigured") void connectDirect().then(() => setPairing(url));
+    else if (mode === "unconfigured")
+      void connectDirect().then(
+        () => setPairing(url),
+        (err: Error) =>
+          Alert.alert("Could not connect", err.message, [
+            { text: "Cancel", style: "cancel" },
+            { text: "Try again", onPress: () => setPending(url) },
+          ]),
+      );
     else
       confirmDestructive(
         Alert,
