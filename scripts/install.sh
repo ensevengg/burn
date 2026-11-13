@@ -80,7 +80,9 @@ case ":$PATH:" in
   *) echo "($dir is not on your PATH: add it, or use $dir/burn-report)" ;;
 esac
 
-if ! command -v tailscale >/dev/null 2>&1 && ! command -v tailscale.exe >/dev/null 2>&1; then
+# The macOS app (App Store or standalone) puts no tailscale on PATH.
+if ! command -v tailscale >/dev/null 2>&1 && ! command -v tailscale.exe >/dev/null 2>&1 \
+  && [ ! -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
   echo
   echo "Tailscale was not found. Install it and sign in (https://tailscale.com/download);"
   echo "burn waits for it, so nothing needs restarting afterwards."
