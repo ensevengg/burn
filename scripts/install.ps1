@@ -149,15 +149,19 @@
             Write-Host 'Skipped: install Tailscale inside the distro instead, or the phone will not reach it.' -ForegroundColor Yellow
           }
         }
-        # The Linux installer, run inside each distro: it picks port 8788 on a
-        # fresh install so it can share this machine's tailnet address.
+        # The Linux installer, run inside each distro: a fresh install takes
+        # the first free port from 8788, since every distro shares this
+        # machine's tailnet address. Downloaded first, not piped, so a failed
+        # download fails the distro instead of running an empty script.
         $forward = ''
-        if ($env:BURN_RELEASE_BASE) { $forward = "BURN_RELEASE_BASE='$($env:BURN_RELEASE_BASE)' " }
-        elseif ($env:BURN_RELEASE_TAG) { $forward = "BURN_RELEASE_TAG='$($env:BURN_RELEASE_TAG)' " }
+        if ($env:BURN_RELEASE_BASE) { $forward = "BURN_RELEASE_BASE=$($env:BURN_RELEASE_BASE) " }
+        elseif ($env:BURN_RELEASE_TAG) { $forward = "BURN_RELEASE_TAG=$($env:BURN_RELEASE_TAG) " }
+        # No quotes inside: Windows PowerShell mangles them on the way to wsl.exe.
+        $script = "f=`$(mktemp) && curl -fsSL $base/install.sh -o `$f && env ${forward}sh `$f; s=`$?; rm -f `$f; exit `$s"
         foreach ($distro in $distros) {
           Write-Host ''
           Write-Host "== WSL: $distro ==" -ForegroundColor Cyan
-          & wsl.exe -d $distro -- sh -c "curl -fsSL '$base/install.sh' | ${forward}sh"
+          & wsl.exe -d $distro --exec sh -c $script
           if ($LASTEXITCODE -ne 0) {
             Write-Host "WSL $distro was not set up. Inside it, run: curl -fsSL $base/install.sh | sh" -ForegroundColor Yellow
           }
