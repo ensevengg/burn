@@ -330,36 +330,42 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
 /** Name the machine now rather than on the service's first start, and save
  * the port so `pair`, `doctor` and a later reinstall agree with the daemon. */
 async function prepareConfig(args: Map<string, string>, kind: Target): Promise<void> {
-  const { config, created } = loadOrInitConfig();
+  const { config } = loadOrInitConfig();
   const flag = args.get("port");
   let port = flag === undefined ? undefined : Number(flag);
   // Every WSL distro shares Windows' tailnet address under mirrored
-  // networking: a fresh one takes the first port no other distro holds.
-  if (port === undefined && created && kind === "wsl") port = await freeWslPort();
+  // networking, so one still on the default port (fresh, or created by an
+  // earlier `pair` or `daemon`) moves to the first port no other reporter
+  // holds. A port chosen with --port stays.
+  if (port === undefined && kind === "wsl" && (config.port ?? WSL_DEFAULT_PORT) === WSL_DEFAULT_PORT)
+    port = await freeWslPort(config.environmentSlug);
   if (port !== undefined && config.port !== port) saveConfig({ ...config, port });
 }
 
-async function freeWslPort(): Promise<number> {
+async function freeWslPort(slug: string): Promise<number> {
   const address = await tailscaleIp().catch(() => null);
   for (let port = WSL_DEFAULT_PORT; port <= WSL_LAST_PORT; port++)
-    if (await portFree(port, address)) return port;
+    if ((await portHolder(port, address, slug)) !== "other") return port;
   console.warn(`warning: ports ${WSL_DEFAULT_PORT}-${WSL_LAST_PORT} are all taken; using ${WSL_DEFAULT_PORT}. Pick another with: burn-report install-service --port <port>`);
   return WSL_DEFAULT_PORT;
 }
 
-/** Nothing listens on the port here, nor answers on it at the tailnet address. */
-export async function portFree(port: number, address: string | null): Promise<boolean> {
+/** Who holds the port: nobody, this machine's own reporter (a reinstall),
+ * or something else, checked by binding it and asking /ping at the tailnet
+ * address (or loopback without one). */
+export async function portHolder(port: number, address: string | null, slug: string): Promise<"free" | "self" | "other"> {
   const bindable = await new Promise<boolean>((resolve) => {
     const server = createServer();
     server.once("error", () => resolve(false));
     server.listen({ port, host: "0.0.0.0", exclusive: true }, () => server.close(() => resolve(true)));
   });
-  if (!bindable || address === null) return bindable;
   try {
-    await fetch(`http://${address}:${port}/ping`, { signal: AbortSignal.timeout(1_000) });
-    return false;
+    const response = await fetch(`http://${address ?? "127.0.0.1"}:${port}/ping`, { signal: AbortSignal.timeout(1_000) });
+    const body: unknown = await response.json().catch(() => null);
+    const own = typeof body === "object" && body !== null && (body as { slug?: unknown }).slug === slug;
+    return own ? "self" : "other";
   } catch {
-    return true;
+    return bindable ? "free" : "other";
   }
 }
 

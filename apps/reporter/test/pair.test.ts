@@ -61,21 +61,20 @@ describe("pairing code", () => {
 });
 
 describe("WSL port choice", () => {
-  test("a port another distro holds is not free", async () => {
-    const { portFree } = await import("../src/service");
-    const held = Bun.serve({ hostname: "0.0.0.0", port: 0, fetch: () => new Response("pong") });
+  test("a port held by another reporter is taken; this machine's own reporter is not", async () => {
+    const { portHolder } = await import("../src/service");
+    const ping = (slug: string) => () => Response.json({ protocol: 1, slug });
+    const other = Bun.serve({ hostname: "0.0.0.0", port: 0, fetch: ping("box-wsl-debian") });
+    const own = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: ping("box-wsl-ubuntu") });
     try {
-      expect(await portFree(held.port!, null)).toBe(false);
+      expect(await portHolder(other.port!, null, "box-wsl-ubuntu")).toBe("other");
       // Bound only on the tailnet address (here loopback): still answers.
-      const other = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("pong") });
-      try {
-        expect(await portFree(other.port!, "127.0.0.1")).toBe(false);
-      } finally {
-        other.stop(true);
-      }
+      expect(await portHolder(own.port!, "127.0.0.1", "box-wsl-ubuntu")).toBe("self");
+      expect(await portHolder(own.port!, "127.0.0.1", "box-wsl-debian")).toBe("other");
     } finally {
-      held.stop(true);
+      other.stop(true);
+      own.stop(true);
     }
-    expect(await portFree(held.port!, null)).toBe(true);
+    expect(await portHolder(other.port!, null, "box-wsl-ubuntu")).toBe("free");
   });
 });
