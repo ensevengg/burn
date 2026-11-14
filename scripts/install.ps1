@@ -65,24 +65,46 @@
       # ---- Install --------------------------------------------------------
       New-Item -ItemType Directory -Force -Path $dir | Out-Null
       $reporter = Join-Path $dir 'burn-report.exe'
-      # An upgrade: the running reporter and its launcher hold the files.
+      # burn-report looks for burn-events beside itself. Both are staged
+      # first, so a failed copy changes nothing.
+      $targets = @($assets.Keys | ForEach-Object { Join-Path $dir $assets[$_] })
+      try {
+        foreach ($name in $assets.Keys) { Copy-Item -Force (Join-Path $tmp $name) "$(Join-Path $dir $assets[$name]).new" }
+      }
+      catch {
+        foreach ($target in $targets) { Remove-Item -Force "$target.new" -ErrorAction SilentlyContinue }
+        throw "could not write to $dir ($($_.Exception.Message)); nothing was changed"
+      }
+      # An upgrade restarts the reporter on the new files below. With
+      # BURN_NO_SERVICE its autostart is left as it is; the running copy
+      # keeps the old version until it restarts.
       $upgrade = Test-Path $reporter
-      if ($upgrade) {
+      $restart = $upgrade -and $env:BURN_NO_SERVICE -ne '1'
+      if ($restart) {
         & $reporter uninstall-service | Out-Null
         Get-Process burn-report, burn-events -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 500
       }
-      # burn-report looks for burn-events beside itself.
+      # Windows renames a running executable but will not overwrite it.
+      $moved = @()
       try {
-        foreach ($name in $assets.Keys) {
-          Copy-Item -Force (Join-Path $tmp $name) (Join-Path $dir $assets[$name])
+        foreach ($target in $targets) {
+          Remove-Item -Force "$target.old" -ErrorAction SilentlyContinue
+          if (Test-Path $target) { Move-Item -Force $target "$target.old" }
+          $moved += $target
+          Move-Item -Force "$target.new" $target
         }
       }
       catch {
-        # Put the old reporter's autostart back rather than leave none.
-        if ($upgrade) { & $reporter install-service | Out-Null }
-        throw "could not replace the files in $dir ($($_.Exception.Message)); the previous version is still running"
+        # Both old files back, never a new reporter beside an old exporter.
+        foreach ($target in $moved) {
+          if (Test-Path "$target.old") { Move-Item -Force "$target.old" $target }
+          Remove-Item -Force "$target.new" -ErrorAction SilentlyContinue
+        }
+        if ($restart) { & $reporter install-service | Out-Null }
+        throw "could not replace the files in $dir ($($_.Exception.Message)); the previous version is back in place"
       }
+      foreach ($target in $targets) { Remove-Item -Force "$target.old" -ErrorAction SilentlyContinue }
       Write-Host "Installed $dir\burn-report.exe and $dir\burn-events.exe"
     }
     finally {
@@ -151,8 +173,9 @@
           if (Ask 'Turn it on? This restarts WSL now, closing open WSL windows.' $env:BURN_WSL) {
             if ($text -match '(?im)^[ \t]*networkingMode[ \t]*=[^\r\n]*') {
               $text = $text -replace '(?im)^[ \t]*networkingMode[ \t]*=[^\r\n]*', 'networkingMode=mirrored'
-            } elseif ($text -match '(?im)^[ \t]*\[wsl2\][ \t]*\r?$') {
-              $text = $text -replace '(?im)^([ \t]*\[wsl2\][ \t]*)(\r?)$', "`$1`$2`nnetworkingMode=mirrored`$2"
+            } elseif ($text -match '(?im)^[ \t]*\[wsl2\][ \t]*([#;][^\r\n]*)?\r?$') {
+              # The header may carry a comment: [wsl2] # tuning
+              $text = $text -replace '(?im)^([ \t]*\[wsl2\][ \t]*(?:[#;][^\r\n]*)?)(\r?)$', "`$1`$2`nnetworkingMode=mirrored`$2"
             } else {
               $text = $text.TrimEnd() + "`r`n`r`n[wsl2]`r`nnetworkingMode=mirrored`r`n"
             }
