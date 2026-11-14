@@ -31,7 +31,25 @@ export const configSchema = z
     /** Opt-in machine controls (ADR 0004). Absent means every control is off;
      * optional so configs without it are not rewritten on load. */
     controls: z.object({ powerMode: z.boolean().optional() }).optional(),
+    /** Port the daemon listens on. Absent means 8787; fresh WSL installs get
+     * 8788 because mirrored networking shares the Windows reporter's address. */
+    port: z.number().int().min(1).max(65535).optional(),
   });
+
+export const DEFAULT_PORT = 8787;
+export const WSL_DEFAULT_PORT = 8788;
+/** Further WSL distros share the address too, so `install-service` moves a
+ * fresh one up to the next free port; peer discovery probes these. */
+export const WSL_LAST_PORT = 8790;
+
+/** `--port` when given, else the saved port, else the default. */
+export function reporterPort(config: Pick<BurnConfig, "port">, flag?: string): number {
+  if (flag === undefined) return config.port ?? DEFAULT_PORT;
+  const port = Number(flag);
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error("--port must be an integer between 1 and 65535");
+  return port;
+}
 
 /**
  * `init` saves the pin it ran with, but a checkout builds burn-events at one
@@ -63,15 +81,19 @@ export function detectOsKind(): BurnConfig["osKind"] {
  * Identity for a machine nobody has named: its hostname. Slugs must differ
  * per install, and the phone keeps one history per slug, so the installs
  * that commonly share a hostname get a suffix: WSL reports its Windows
- * host's name (`-wsl`), and a dual-boot box is often given one name on both
- * sides (`-windows`). Windows and WSL share the name as their host group.
+ * host's name (`-wsl-<distro>`, so two distros stay two machines), and a
+ * dual-boot box is often given one name on both sides (`-windows`). Windows
+ * and WSL share the name as their host group.
  */
 export function defaultIdentity(
   osKind: BurnConfig["osKind"] = detectOsKind(),
   host: string = hostname(),
+  distro: string = process.env["WSL_DISTRO_NAME"] ?? "",
 ): Pick<BurnConfig, "environmentSlug" | "environmentName" | "hostGroup" | "reportingTimezone"> {
+  const kebab = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   const short = host.split(".")[0] || "machine";
-  const base = short.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "machine";
+  const base = kebab(short) || "machine";
+  const distroSlug = kebab(distro);
   let zone = "Asia/Kolkata";
   try {
     zone = Intl.DateTimeFormat().resolvedOptions().timeZone || zone;
@@ -79,8 +101,10 @@ export function defaultIdentity(
     /* keep the schema default */
   }
   return {
-    environmentSlug: osKind === "wsl" || osKind === "windows" ? `${base}-${osKind}` : base,
-    environmentName: osKind === "wsl" ? `${short} (WSL)` : short,
+    environmentSlug: osKind === "wsl"
+      ? (distroSlug ? `${base}-wsl-${distroSlug}` : `${base}-wsl`)
+      : osKind === "windows" ? `${base}-windows` : base,
+    environmentName: osKind === "wsl" ? (distro ? `${short} (WSL ${distro})` : `${short} (WSL)`) : short,
     hostGroup: osKind === "wsl" || osKind === "windows" ? base : null,
     reportingTimezone: zone,
   };
@@ -143,7 +167,12 @@ export function loadConfig(): BurnConfig {
  * on a fresh machine needs no `init` first. */
 export function loadOrInitConfig(): { config: BurnConfig; created: boolean } {
   if (existsSync(configPath())) return { config: loadConfig(), created: false };
-  const config = configSchema.parse({ ...defaultIdentity(), osKind: detectOsKind() });
+  const osKind = detectOsKind();
+  const config = configSchema.parse({
+    ...defaultIdentity(osKind),
+    osKind,
+    ...(osKind === "wsl" ? { port: WSL_DEFAULT_PORT } : {}),
+  });
   saveConfig(config);
   return { config, created: true };
 }

@@ -34,19 +34,25 @@ machine: tokscale + burn-events → burn-report daemon ← Tailscale → phone: 
 
 **1. Join one tailnet.** Install [Tailscale](https://tailscale.com/) on every machine and your phone.
 
-**2. Start a reporter on each machine.**
+**2. Run one line on each machine.**
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ensevengg/burn/main/scripts/install.sh | sh
-burn-report install-service    # runs it now and at every startup; prints what to add on the phone
-# or, in the foreground for this session only: burn-report daemon
+Linux / macOS / WSL:
+
+```sh
+curl -fsSL https://github.com/ensevengg/burn/releases/latest/download/install.sh | sh
 ```
 
-Binaries are attached to each `burn-events-v*` release; until one exists for your platform, use [From source](#from-source) below. That is the whole setup: the machine is named after its hostname and the daemon waits for Tailscale if it is not up yet. The installer covers Linux x86_64 and verifies checksums. On Windows, download `burn-report-windows-x64.exe` and `burn-events-x86_64-pc-windows-msvc.exe` from the [latest release](https://github.com/ensevengg/burn/releases/latest) into one folder, rename them `burn-report.exe` and `burn-events.exe`, and run `burn-report.exe install-service`.
+Windows (PowerShell):
 
-**3. Open the app.** Run `bun run mobile` and open it in Expo Go on Android. Tap **Connect my machines**, then **Machines → +** and enter the machine's Tailscale name or address. Your other machines are offered right there once the first is added.
+```powershell
+irm https://github.com/ensevengg/burn/releases/latest/download/install.ps1 | iex
+```
 
-**Just looking?** Tap **Explore with demo data**.
+It installs `burn-report`, starts it now and with the machine, and prints a QR code. On Windows it offers to set up each WSL distro too, including the mirrored networking WSL needs to be reachable. Run it again to upgrade.
+
+**3. On the phone.** Install [`burn.apk`](https://github.com/ensevengg/burn/releases/latest/download/burn.apk), tap **Connect my machines**, then **Machines → + → Scan QR code**. Your other machines appear in the same sheet: tap each one.
+
+**Lost the QR code?** `burn-report pair` shows it again (add `--port` if you started the daemon with one). **Just looking?** Tap **Explore with demo data**.
 
 ### From source
 
@@ -61,10 +67,10 @@ bun run reporter -- install-service   # or `daemon` to run in this terminal only
 ### Reporter tips
 
 - **Rename a machine:** `burn-report init --slug my-machine --name "My Machine"`. Every flag is optional.
-- **One slug per install:** Windows, WSL and each dual-boot side. By default Windows gets a `-windows` slug and WSL a `-wsl` slug.
+- **One slug per install:** Windows, WSL and each dual-boot side. By default Windows gets a `-windows` slug and each WSL distro a `-wsl-<distro>` slug.
 - **Same box?** Share a `--host-group`. Windows and WSL share their hostname automatically.
-- **Flags:** `--port 8787`, `--bind <address>`. `serve` is an alias for `daemon`.
-- **Autostart:** `install-service` keeps the daemon running and restarts it if it exits. Linux gets a systemd user unit with lingering, so it starts at boot. Windows gets a hidden launcher in the per-user Run key that starts at sign-in, with no administrator rights needed. Inside WSL it registers a Windows sign-in launcher that starts the distro; WSL needs mirrored networking or Tailscale in the distro, and a different `--port` from the Windows reporter. `--print` shows what would be installed; `uninstall-service` removes it.
+- **Ports:** 8787, or the first free port from 8788 to 8790 for a fresh WSL install (mirrored networking gives every distro the Windows reporter's address). `--port` on `install-service` is saved for later runs. Discovery checks 8787–8790. `--bind <address>` pins the address; `serve` is an alias for `daemon`.
+- **Autostart:** `install-service` keeps the daemon running and restarts it if it exits. Linux gets a systemd user unit with lingering, so it starts at boot. Windows gets a hidden launcher in the per-user Run key that starts at sign-in, with no administrator rights needed. Inside WSL it registers a Windows sign-in launcher that starts the distro; WSL needs mirrored networking or Tailscale in the distro; each distro picks its own port. `--print` shows what would be installed; `uninstall-service` removes it.
 - **Check a machine:** `burn-report doctor`.
 - **Limits** (vendor quotas) need the tokscale CLI, which the reporter runs through Bun or Node if either is installed. Usage syncs without it.
 
@@ -75,7 +81,7 @@ bun run reporter -- install-service   # or `daemon` to run in this terminal only
 | **Overview** | Spend or tokens, 24h to All. Drag the chart for any day. Agents, cache hits, limits. |
 | **Explore** | Models, agents, workspaces, sessions. Ranked. |
 | **Systems** | RAM, GPU, temps. 24h trends. Live fans and power mode on opted-in Linux machines. |
-| **Machines** | Add by URL. Refresh or reconcile. |
+| **Machines** | Scan a QR code, tap the rest. Refresh or reconcile. |
 | **Settings** | Theme, timezone, disconnect. |
 
 - **Pull down** anywhere to refresh.
@@ -94,8 +100,9 @@ bun run reporter -- install-service   # or `daemon` to run in this terminal only
 
 ## Upgrading
 
-- **Restart reporters.**
-- **Exporter:** rebuild or re-download `burn-events` with each release; the reporter refuses one built for another tokscale pin.
+- **Machines:** run the install line again. It replaces both binaries and restarts the reporter.
+- **Phone:** install the new `burn.apk` over the old one. History and machines stay. A copy you built yourself is signed with a different key, so Android asks you to uninstall it first. Uninstalling deletes the phone's copy of every machine and its history. Adding the machines back downloads what they still have, but history a machine no longer keeps (sessions an agent deleted or pruned) is gone for good, so uninstall only if you accept that.
+- **From source:** rebuild `burn-events` with each pin bump; the reporter refuses one built for another tokscale pin.
 - **`push` is gone:** run `install-service` instead. Services that still pass `--no-live` or `--live-url` exit with a hint, and `install-service` disables older hand-written Linux units that ran the reporter, keeping their files.
 - **Kept:** reporter identity, phone history, settings and machine URLs.
 
@@ -119,6 +126,7 @@ bun run test
 bun run --cwd apps/mobile android   # local Android build; needs JDK + Android SDK
 ```
 
+- **Release:** `scripts/release.sh 0.2.0` bumps every version, runs the checks, tags and pushes. The tag builds the APK, both binaries for each platform and the installers into one GitHub release ([how](docs/adr/0006-one-tag-releases.md)).
 - **Rules:** [AGENTS.md](AGENTS.md)
 - **Why Tailscale-only:** [ADR 0003](docs/adr/0003-tailscale-only-backend.md)
 - **Why the one write endpoint:** [ADR 0004](docs/adr/0004-opt-in-machine-controls.md)
@@ -127,8 +135,6 @@ bun run --cwd apps/mobile android   # local Android build; needs JDK + Android S
 
 - Upstream `tokscale events --jsonl`
 - Skia charts
-- APKs on GitHub Releases
-- QR onboarding
 - Accurate model-price reference transport
 
 ## License

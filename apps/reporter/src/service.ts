@@ -6,15 +6,17 @@
  * Linux gets a systemd user unit with lingering, so it starts at boot without
  * a login. Windows gets a hidden sign-in launcher in the per-user Run key (no
  * administrator rights needed). WSL registers the same Windows launcher to
- * start its distro. macOS prints a launchd agent. The daemon follows
+ * start its distro. macOS gets a launchd agent. The daemon follows
  * Tailscale, so it may start before Tailscale connects.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, platform, tmpdir, userInfo } from "node:os";
 import { delimiter, dirname, join, resolve, win32 } from "node:path";
-import { configDir, loadOrInitConfig } from "./config.js";
+import { createServer } from "node:net";
+import { configDir, loadOrInitConfig, reporterPort, saveConfig, WSL_DEFAULT_PORT, WSL_LAST_PORT } from "./config.js";
 import { tailscaleIp } from "./serve.js";
+import { printPairing } from "./pair.js";
 
 const UNIT = "burn-report.service";
 const RUN_KEY = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -238,10 +240,8 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
     const value = args.get(flag);
     if (value) extra.push(`--${flag}`, value);
   }
-  const port = args.get("port");
-  const portNumber = port === undefined ? 8787 : Number(port);
-  if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535)
-    throw new Error("--port must be an integer between 1 and 65535");
+  // Validated before anything is written.
+  if (args.has("port")) reporterPort({}, args.get("port"));
   const command = daemonCommand();
   const env = serviceEnv();
   const printOnly = args.has("print");
@@ -249,8 +249,26 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
 
   if (kind === "macos") {
     const plist = join(homedir(), "Library", "LaunchAgents", "dev.burn.report.plist");
-    console.log(`Save this as ${plist}, then run: launchctl load -w ${plist}\n`);
-    console.log(launchdPlist(command, extra, env));
+    const body = launchdPlist(command, extra, env);
+    if (printOnly) {
+      process.stdout.write(body);
+      console.error(`\nWould be written to ${plist}`);
+      return 0;
+    }
+    await prepareConfig(args, kind);
+    const domain = `gui/${userInfo().uid}`;
+    // A reinstall replaces the running agent; absent is fine.
+    run("launchctl bootout", ["launchctl", "bootout", `${domain}/dev.burn.report`], false);
+    mkdirSync(dirname(plist), { recursive: true });
+    writeFileSync(plist, body);
+    // bootout returns before the old job is gone; bootstrap fails until it is.
+    for (let attempt = 1; ; attempt++) {
+      const loaded = run("Loading the launch agent", ["launchctl", "bootstrap", domain, plist], attempt === 5);
+      if (loaded.ok) break;
+      await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+    }
+    console.log(`installed ${plist}: starts when you sign in and restarts if it exits`);
+    await printPhoneUrl(args);
     return 0;
   }
 
@@ -262,8 +280,7 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
       console.error(`\nWould be written to ${path}`);
       return 0;
     }
-    // Name the machine now rather than on the service's first start.
-    loadOrInitConfig();
+    await prepareConfig(args, kind);
     run("systemd user manager", ["systemctl", "--user", "show-environment"]);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, unit);
@@ -300,7 +317,7 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
     process.stdout.write(launcherFor(kind === "wsl" ? `burn-report-wsl-${distro}` : "burn-report", "<config dir>"));
     return 0;
   }
-  loadOrInitConfig();
+  await prepareConfig(args, kind);
   const paths = windowsPaths(kind);
   mkdirSync(paths.local, { recursive: true });
   // Windows PowerShell reads BOM-less scripts in the ANSI code page.
@@ -310,17 +327,59 @@ export async function runInstallService(args: Map<string, string>): Promise<numb
   console.log(`installed ${paths.launcher}: starts when you sign in to Windows and restarts if it exits`);
   console.log(`Logs: ${win32.join(paths.dir, `${paths.name}.log`)} (and .err.log)`);
   if (kind === "wsl")
-    console.log("WSL is reachable over the tailnet with mirrored networking (networkingMode=mirrored in .wslconfig) or Tailscale installed in the distro. Give it a different --port from the Windows reporter.");
+    console.log("WSL is reachable over the tailnet with mirrored networking (networkingMode=mirrored in .wslconfig) or Tailscale installed in the distro.");
   await printPhoneUrl(args);
   return 0;
 }
 
+/** Name the machine now rather than on the service's first start, and save
+ * the port so `pair`, `doctor` and a later reinstall agree with the daemon. */
+async function prepareConfig(args: Map<string, string>, kind: Target): Promise<void> {
+  const { config } = loadOrInitConfig();
+  const flag = args.get("port");
+  let port = flag === undefined ? undefined : Number(flag);
+  // Every WSL distro shares Windows' tailnet address under mirrored
+  // networking, so one on the fresh-install default (saved by this or an
+  // earlier `pair` or `daemon`) moves to the first port no other reporter
+  // holds. A config without a port predates this and serves on 8787, which
+  // the phone already uses, so it stays; so does a port chosen with --port.
+  if (port === undefined && kind === "wsl" && config.port === WSL_DEFAULT_PORT)
+    port = await freeWslPort(config.environmentSlug);
+  if (port !== undefined && config.port !== port) saveConfig({ ...config, port });
+}
+
+async function freeWslPort(slug: string): Promise<number> {
+  const address = await tailscaleIp().catch(() => null);
+  for (let port = WSL_DEFAULT_PORT; port <= WSL_LAST_PORT; port++)
+    if ((await portHolder(port, address, slug)) !== "other") return port;
+  console.warn(`warning: ports ${WSL_DEFAULT_PORT}-${WSL_LAST_PORT} are all taken; using ${WSL_DEFAULT_PORT}. Pick another with: burn-report install-service --port <port>`);
+  return WSL_DEFAULT_PORT;
+}
+
+/** Who holds the port: nobody, this machine's own reporter (a reinstall),
+ * or something else, checked by binding it and asking /ping at the tailnet
+ * address (or loopback without one). */
+export async function portHolder(port: number, address: string | null, slug: string): Promise<"free" | "self" | "other"> {
+  const bindable = await new Promise<boolean>((resolve) => {
+    const server = createServer();
+    server.once("error", () => resolve(false));
+    server.listen({ port, host: "0.0.0.0", exclusive: true }, () => server.close(() => resolve(true)));
+  });
+  try {
+    const response = await fetch(`http://${address ?? "127.0.0.1"}:${port}/ping`, { signal: AbortSignal.timeout(1_000) });
+    const body: unknown = await response.json().catch(() => null);
+    const own = typeof body === "object" && body !== null && (body as { slug?: unknown }).slug === slug;
+    return own ? "self" : "other";
+  } catch {
+    return bindable ? "free" : "other";
+  }
+}
+
 async function printPhoneUrl(args: Map<string, string>): Promise<void> {
-  const bind = args.get("bind");
-  const port = args.get("port") ?? "8787";
-  const ip = bind ?? await tailscaleIp();
-  if (ip) console.log(`Add on the phone (Machines → +): http://${ip}:${port}`);
-  else console.log(`Tailscale is not connected yet; the daemon moves to http://<tailnet address>:${port} once it is.`);
+  console.log();
+  // The service was just (re)started; give it a moment to bind.
+  const port = args.get("port");
+  await printPairing(args.get("bind"), { wait: true, ...(port === undefined ? {} : { port }) });
 }
 
 export function runUninstallService(): number {
@@ -328,7 +387,9 @@ export function runUninstallService(): number {
   const command = daemonCommand();
   if (kind === "macos") {
     const plist = join(homedir(), "Library", "LaunchAgents", "dev.burn.report.plist");
-    console.log(`Run: launchctl unload -w ${plist} && rm ${plist}`);
+    run("launchctl bootout", ["launchctl", "bootout", `gui/${userInfo().uid}/dev.burn.report`], false);
+    rmSync(plist, { force: true });
+    console.log(`removed ${plist}`);
     return 0;
   }
   if (kind === "linux") {

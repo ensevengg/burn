@@ -18,7 +18,8 @@ import {
 } from "@burn/sync-api";
 import { ControlError, PowerModeController } from "./power-mode.js";
 import { PeerDirectory } from "./peers.js";
-import { configPath, loadOrInitConfig, type BurnConfig } from "./config.js";
+import { pairingLink, renderQr } from "./pair.js";
+import { configPath, loadOrInitConfig, reporterPort, type BurnConfig } from "./config.js";
 import {
   fetchUsage,
   spawnRunner,
@@ -474,7 +475,7 @@ export async function startLiveServer(
     fetch: createLiveFetch(liveDeps),
   });
   if (!liveDeps.peers && options.peerDiscovery !== false)
-    liveDeps.peers = new PeerDirectory(server.port ?? port);
+    liveDeps.peers = new PeerDirectory(server.port ?? port, { self: detected ?? options.bind ?? null });
   const sampler = config.osKind === "wsl" ? null : setInterval(sample, 30_000);
   if (sampler) sample();
   // Injected scans (tests, embedders) get their own cold store in
@@ -584,18 +585,18 @@ export async function runServe(args: Map<string, string>): Promise<void> {
   const options: { bind?: string; port?: number } = {};
   const bind = args.get("bind");
   if (bind) options.bind = bind;
-  const port = args.get("port");
-  if (port) {
-    options.port = Number(port);
-    if (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535)
-      throw new Error("--port must be an integer between 1 and 65535");
-  }
+  options.port = reporterPort(config, args.get("port"));
   const live = await superviseLiveServer(config, {
     ...options,
     onBound: (bound, tailnet) => {
       if (tailnet) {
         console.log(`[serve] ${config.environmentSlug} at ${bound.url}`);
-        console.log("Add this address (or this machine's Tailscale name) on your phone's Machines tab. Keep this process running.");
+        // A terminal gets the QR code; a service log gets one line.
+        if (process.stdout.isTTY) {
+          console.log(`\nScan in burn (Machines → + → Scan QR), or type ${bound.url}:\n`);
+          console.log(renderQr(pairingLink(bound.url), !process.env["NO_COLOR"]));
+          console.log("\nKeep this process running, or run burn-report install-service to start it with the machine.");
+        } else console.log(`Add ${bound.url} on the phone (or run burn-report pair for a QR code).`);
       } else {
         console.warn(
           `[serve] Tailscale has no address yet — listening on ${bound.url} only (the phone cannot reach this). ` +

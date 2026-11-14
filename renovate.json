@@ -29,7 +29,7 @@
       "groupName": "tokscale pin",
       "schedule": ["before 9am on monday"],
       "prBodyNotes": [
-        "Before merging: run `cargo update -p tokscale-core` in `crates/burn-events` (Renovate does not update the lockfile for git dependencies) and `cargo install --path crates/burn-events`. Diff the `(client, dedup_key)` sets of the old and new `burn-events` output on a real machine: phones retire changed keys at the next full reconciliation, but only inside re-reported sessions. New source kinds must join `source_fingerprint` (its exhaustive `ScanResult` destructure fails to compile until they do). Then tag `burn-events-v<version>` to publish binaries."
+        "Before merging: run `cargo update -p tokscale-core` in `crates/burn-events` (Renovate does not update the lockfile for git dependencies) and `cargo install --path crates/burn-events`. Diff the `(client, dedup_key)` sets of the old and new `burn-events` output on a real machine: phones retire changed keys at the next full reconciliation, but only inside re-reported sessions. New source kinds must join `source_fingerprint` (its exhaustive `ScanResult` destructure fails to compile until they do). Then cut a release with `scripts/release.sh <next version>` to publish binaries."
       ]
     }
   ]

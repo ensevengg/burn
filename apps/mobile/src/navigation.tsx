@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Animated, Easing, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { createBottomTabNavigator, type BottomTabBarProps } from "@react-navigation/bottom-tabs";
-import { NavigationContainer, DarkTheme, DefaultTheme } from "@react-navigation/native";
+import {
+  NavigationContainer, DarkTheme, DefaultTheme, useNavigation, type NavigatorScreenParams,
+} from "@react-navigation/native";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import Svg, { Circle, Defs, LinearGradient, Path, Rect, Line, Stop } from "react-native-svg";
 import { darkColors, hairline, lightColors, motion } from "./theme";
@@ -16,14 +19,16 @@ import { MachinesScreen } from "./screens/MachinesScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { SetupScreen } from "./screens/SetupScreen";
 
-const Stack = createNativeStackNavigator<{ setup: undefined; main: undefined }>();
-const Tabs = createBottomTabNavigator<{
+type TabParams = {
   dashboard: undefined;
   systems: undefined;
   explore: undefined;
   machines: undefined;
   settings: undefined;
-}>();
+};
+type StackParams = { setup: undefined; main: NavigatorScreenParams<TabParams> | undefined };
+const Stack = createNativeStackNavigator<StackParams>();
+const Tabs = createBottomTabNavigator<TabParams>();
 
 const TAB_LABELS: Record<string, string> = {
   dashboard: "Overview",
@@ -179,6 +184,12 @@ function FloatingTabBar({ state, navigation, insets }: BottomTabBarProps) {
 }
 
 function MainTabs() {
+  // An opened pairing link shows its add sheet on the Machines tab.
+  const { pairing } = useApp();
+  const navigation = useNavigation<NativeStackNavigationProp<StackParams>>();
+  useEffect(() => {
+    if (pairing !== null) navigation.navigate("main", { screen: "machines" });
+  }, [pairing, navigation]);
   return (
     <Tabs.Navigator
       tabBar={(props) => <FloatingTabBar {...props} />}
