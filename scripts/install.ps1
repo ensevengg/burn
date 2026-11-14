@@ -99,8 +99,8 @@
         # Both old files back, never a new reporter beside an old exporter.
         foreach ($target in $moved) {
           if (Test-Path "$target.old") { Move-Item -Force "$target.old" $target }
-          Remove-Item -Force "$target.new" -ErrorAction SilentlyContinue
         }
+        foreach ($target in $targets) { Remove-Item -Force "$target.new" -ErrorAction SilentlyContinue }
         if ($restart) { & $reporter install-service | Out-Null }
         throw "could not replace the files in $dir ($($_.Exception.Message)); the previous version is back in place"
       }
