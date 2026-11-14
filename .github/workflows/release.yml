@@ -51,11 +51,14 @@ jobs:
       fail-fast: true
       matrix:
         include:
+          # The C runtime linked in, so it starts on a Windows without the
+          # Visual C++ redistributable.
           - os: windows-latest
             exe: burn-events.exe
             artifact: burn-events-x86_64-pc-windows-msvc.exe
+            rustflags: -C target-feature=+crt-static
           # The oldest supported runner: the binary needs the glibc it was
-          # built against, and 24.04's (2.38) is newer than Ubuntu 22.04's
+          # built against, and 24.04's (2.39) is newer than Ubuntu 22.04's
           # or Debian 12's, WSL defaults among them.
           - os: ubuntu-22.04
             exe: burn-events
@@ -72,6 +75,8 @@ jobs:
           workspaces: crates/burn-events
       - name: Build
         working-directory: crates/burn-events
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --release --locked
       - name: Stage
         shell: bash
@@ -96,8 +101,10 @@ jobs:
       - name: Build standalone burn-report
         run: |
           mkdir out
+          # x64 builds use Bun's baseline runtime, which runs on CPUs without AVX2.
           for target in linux-x64 windows-x64 darwin-arm64; do
-            bun build --compile --minify --target="bun-${target}" apps/reporter/src/index.ts --outfile "out/burn-report-${target}"
+            case "$target" in *-x64) runtime="bun-${target}-baseline" ;; *) runtime="bun-${target}" ;; esac
+            bun build --compile --minify --target="$runtime" apps/reporter/src/index.ts --outfile "out/burn-report-${target}"
           done
           ls -la out
       - uses: actions/upload-artifact@v4
@@ -180,13 +187,8 @@ jobs:
         if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        # A re-run of a failed build replaces the assets of the release it made.
         run: |
-          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" release/* --repo "${GITHUB_REPOSITORY}" --clobber
-          else
-            gh release create "${GITHUB_REF_NAME}" release/* \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "burn ${GITHUB_REF_NAME}" \
-              --generate-notes
-          fi
+          gh release create "${GITHUB_REF_NAME}" release/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "burn ${GITHUB_REF_NAME}" \
+            --generate-notes
