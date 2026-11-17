@@ -105,10 +105,30 @@ function deniedMessage(err: unknown): string | null {
   return "Refused: nobody is signed in on this machine. To allow changes while signed out, run `burn-report controls polkit-rule` on it once.";
 }
 
-export function powerProfilesDaemon(run: CommandRunner = runCommand): PowerModeDriver {
+/** The kernel profile in power-profiles-daemon's vocabulary; null when it
+ * has no counterpart (e.g. `custom`). */
+export function daemonProfileFor(kernel: string): string | null {
+  if (["low-power", "quiet", "cool"].includes(kernel)) return "power-saver";
+  if (kernel === "balanced") return "balanced";
+  if (["balanced-performance", "performance", "max-power"].includes(kernel)) return "performance";
+  return null;
+}
+
+/** A firmware hotkey (e.g. Fn+Q) changes the kernel platform_profile first;
+ * the daemon follows seconds later, or not at all. The kernel profile drives
+ * the fan curve, so it wins whenever the two disagree. */
+export function powerProfilesDaemon(run: CommandRunner = runCommand, root = "/sys"): PowerModeDriver {
   return {
     backend: "power-profiles-daemon",
-    read: async () => parseProfilesList(await run("powerprofilesctl", ["list"], 5_000)),
+    read: async () => {
+      const [list, kernel] = await Promise.all([
+        run("powerprofilesctl", ["list"], 5_000),
+        text(`${root}/firmware/acpi/platform_profile`),
+      ]);
+      const reading = parseProfilesList(list);
+      const firmware = kernel ? daemonProfileFor(kernel) : null;
+      return firmware !== null && reading.modes.includes(firmware) ? { ...reading, mode: firmware } : reading;
+    },
     set: async (mode) => {
       try {
         await run("powerprofilesctl", ["set", mode], 8_000);
@@ -158,7 +178,7 @@ export async function detectPowerModeDriver(
   options: { run?: CommandRunner; root?: string; os?: string } = {},
 ): Promise<PowerModeDriver | null> {
   if ((options.os ?? platform()) !== "linux") return null;
-  const ppd = powerProfilesDaemon(options.run);
+  const ppd = powerProfilesDaemon(options.run, options.root);
   try {
     if ((await ppd.read()).modes.length > 0) return ppd;
   } catch {
