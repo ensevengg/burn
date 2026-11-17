@@ -58,6 +58,21 @@ describe("power-profiles-daemon", () => {
     expect((err as Error).message).toContain("polkit-rule");
   });
 
+  test("a firmware hotkey switch shows before the daemon catches up", async () => {
+    const root = sysRoot();
+    const driver = powerProfilesDaemon(async () => PPD_LIST, root);
+    expect((await driver.read()).mode).toBe("balanced");
+    writeFileSync(join(root, "firmware/acpi/platform_profile"), "performance\n");
+    expect((await driver.read()).mode).toBe("performance");
+    writeFileSync(join(root, "firmware/acpi/platform_profile"), "low-power\n");
+    expect((await driver.read()).mode).toBe("power-saver");
+    // No daemon counterpart, or no kernel file: the daemon's answer stands.
+    writeFileSync(join(root, "firmware/acpi/platform_profile"), "custom\n");
+    expect((await driver.read()).mode).toBe("balanced");
+    const bare = mkdtempSync(join(tmpdir(), "burn-sys-"));
+    expect((await powerProfilesDaemon(async () => PPD_LIST, bare).read()).mode).toBe("balanced");
+  });
+
   test("set passes the mode as one argument, never through a shell", async () => {
     const calls: string[][] = [];
     await powerProfilesDaemon(async (command, args) => {
