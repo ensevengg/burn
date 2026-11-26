@@ -104,71 +104,6 @@ export function invalidateEventCache(db: SQLiteDatabase): void {
   eventCache.delete(db);
 }
 
-async function loadEventsUncached(
-  db: SQLiteDatabase,
-  fromMs: number,
-  toMs: number,
-  environmentId: string | null,
-  sessionLimit?: number,
-): Promise<EventRow[]> {
-  const rows = await db.getAllAsync<Record<string, unknown>>(
-    `${
-      sessionLimit === undefined
-        ? ""
-        : `with recent_sessions as (
-       select environment_id, client, session_id from usage_events
-       where occurred_at_ms >= ? and occurred_at_ms < ? ${environmentId !== null ? "and environment_id = ?" : ""}
-       group by environment_id, client, session_id
-       order by max(occurred_at_ms) desc, environment_id, client, session_id limit ?
-     )`
-    }
-     select event_id, environment_id, client, provider_id, model_id, session_id, session_title,
-            workspace_label, occurred_at_ms, input_tokens, output_tokens, cache_read_tokens,
-            cache_write_tokens, reasoning_tokens, message_count, duration_ms, cost, cost_source,
-            cost_is_complete
-       from usage_events
-      where occurred_at_ms >= ? and occurred_at_ms < ? ${environmentId !== null ? "and environment_id = ?" : ""}
-      ${sessionLimit === undefined ? "" : "and (environment_id, client, session_id) in (select environment_id, client, session_id from recent_sessions)"}
-      order by occurred_at_ms asc`,
-    [
-      ...(sessionLimit === undefined
-        ? []
-        : [...(environmentId !== null ? [fromMs, toMs, environmentId] : [fromMs, toMs]), sessionLimit]),
-      ...(environmentId !== null ? [fromMs, toMs, environmentId] : [fromMs, toMs]),
-    ],
-  );
-  const events: EventRow[] = [];
-  const yieldIfNeeded = createYieldBudget();
-  for (let i = 0; i < rows.length; i += 256) {
-    const pause = yieldIfNeeded();
-    if (pause) await pause;
-    events.push(
-      ...rows.slice(i, i + 256).map((r) => ({
-        eventId: String(r["event_id"]),
-        environmentId: String(r["environment_id"]),
-        client: String(r["client"]),
-        providerId: String(r["provider_id"]),
-        modelId: String(r["model_id"]),
-        sessionId: String(r["session_id"]),
-        sessionTitle: (r["session_title"] as string | null) ?? null,
-        workspaceLabel: (r["workspace_label"] as string | null) ?? null,
-        occurredAtMs: Number(r["occurred_at_ms"]),
-        inputTokens: Number(r["input_tokens"] ?? 0),
-        outputTokens: Number(r["output_tokens"] ?? 0),
-        cacheReadTokens: Number(r["cache_read_tokens"] ?? 0),
-        cacheWriteTokens: Number(r["cache_write_tokens"] ?? 0),
-        reasoningTokens: Number(r["reasoning_tokens"] ?? 0),
-        messageCount: Number(r["message_count"] ?? 1),
-        durationMs: r["duration_ms"] === null ? null : Number(r["duration_ms"]),
-        cost: Number(r["cost"] ?? 0),
-        costSource: String(r["cost_source"] ?? "unknown"),
-        costIsComplete: Number(r["cost_is_complete"] ?? 0) === 1,
-      })),
-    );
-  }
-  return events;
-}
-
 export function groupKeyFor(event: EventRow, groupBy: "model" | "client" | "none"): string {
   if (groupBy === "model") return event.modelId;
   if (groupBy === "client") return event.client;
@@ -484,6 +419,8 @@ export interface SessionRow {
   messages: number;
 }
 
+/** The window's most recent sessions, grouped by SQLite: one row per session
+ * plus one per (session, model), however long each session ran. */
 export async function querySessions(
   db: SQLiteDatabase,
   days: UsageWindowDays,
@@ -492,48 +429,67 @@ export async function querySessions(
   signal?: AbortSignal,
 ): Promise<SessionRow[]> {
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEventsUncached(
-    db,
-    usageWindowStart(days),
-    Date.now() + DAY_MS,
-    environmentId,
-    Math.max(0, Math.floor(limit)),
+  const where = `occurred_at_ms >= ? and occurred_at_ms < ?${environmentId !== null ? " and environment_id = ?" : ""}`;
+  const window = [usageWindowStart(days), Date.now() + DAY_MS, ...(environmentId !== null ? [environmentId] : [])];
+  const recent = `with recent as (
+       select environment_id, client, session_id, max(occurred_at_ms) as last_ms,
+              sum(${TOKEN_SUM}) as tokens, sum(cast(cost as real)) as cost, sum(message_count) as messages
+         from usage_events where ${where}
+        group by environment_id, client, session_id
+        order by last_ms desc, environment_id, client, session_id limit ?
+     )`;
+  const bindings = [...window, Math.max(0, Math.floor(limit))];
+  const sessions = await db.getAllAsync<Record<string, unknown>>(
+    `${recent}
+     select r.*, (
+       select session_title from usage_events u
+        where u.environment_id = r.environment_id and u.client = r.client and u.session_id = r.session_id
+          and u.occurred_at_ms >= ? and u.occurred_at_ms < ? and u.session_title is not null
+        order by u.occurred_at_ms asc limit 1
+     ) as title
+       from recent r order by r.last_ms desc, r.environment_id, r.client, r.session_id`,
+    [...bindings, window[0]!, window[1]!],
   );
   if (signal?.aborted) throw new Error("Query cancelled");
-  const bySession = new Map<string, SessionRow>();
-  const yieldIfNeeded = createYieldBudget(signal);
-  for (let i = 0; i < events.length; i++) {
-    if (i % 256 === 0) {
-      const pause = yieldIfNeeded();
-      if (pause) await pause;
-    }
-    if (signal?.aborted) throw new Error("Query cancelled");
-    const e = events[i]!;
-    const key = sessionKey(e);
-    let row = bySession.get(key);
-    if (!row) {
-      row = {
-        key,
-        environmentId: e.environmentId,
-        sessionId: e.sessionId,
-        title: null,
-        lastActivityMs: e.occurredAtMs,
-        client: e.client,
-        models: [],
-        tokens: 0,
-        cost: 0,
-        messages: 0,
-      };
-      bySession.set(key, row);
-    }
-    row.title ??= e.sessionTitle;
-    row.lastActivityMs = e.occurredAtMs;
-    if (!row.models.includes(e.modelId)) row.models.push(e.modelId);
-    row.tokens += eventTokens(e);
-    row.cost += e.cost;
-    row.messages += e.messageCount;
+  const models = await db.getAllAsync<Record<string, unknown>>(
+    `${recent}
+     select u.environment_id, u.client, u.session_id, u.model_id, min(u.occurred_at_ms) as first_ms
+       from usage_events u join recent r
+         on r.environment_id = u.environment_id and r.client = u.client and r.session_id = u.session_id
+      where u.${where.replaceAll(" and ", " and u.")}
+      group by 1, 2, 3, 4 order by first_ms, u.model_id`,
+    [...bindings, ...window],
+  );
+  if (signal?.aborted) throw new Error("Query cancelled");
+  const modelsBySession = new Map<string, string[]>();
+  for (const m of models) {
+    const key = sessionKey({
+      environmentId: String(m["environment_id"]),
+      client: String(m["client"]),
+      sessionId: String(m["session_id"]),
+    });
+    const list = modelsBySession.get(key) ?? [];
+    list.push(String(m["model_id"]));
+    modelsBySession.set(key, list);
   }
-  return [...bySession.values()].sort((a, b) => b.lastActivityMs - a.lastActivityMs);
+  return sessions.map((r) => {
+    const row = {
+      environmentId: String(r["environment_id"]),
+      client: String(r["client"]),
+      sessionId: String(r["session_id"]),
+    };
+    const key = sessionKey(row);
+    return {
+      key,
+      ...row,
+      title: (r["title"] as string | null) ?? null,
+      lastActivityMs: Number(r["last_ms"]),
+      models: modelsBySession.get(key) ?? [],
+      tokens: Number(r["tokens"] ?? 0),
+      cost: Number(r["cost"] ?? 0),
+      messages: Number(r["messages"] ?? 0),
+    };
+  });
 }
 
 export interface QuotaCard {

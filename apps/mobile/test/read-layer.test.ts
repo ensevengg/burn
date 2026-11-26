@@ -3,7 +3,7 @@ import { expect, test } from "bun:test";
 import type { MachineEventInput } from "@burn/sync-api";
 import {
   bucketEvents, buildSeries, eventTokens, invalidateEventCache, queryClients, queryGranularityMax,
-  queryModels, queryWindowOverview, queryWorkspaces, sessionKey, type EventRow,
+  queryModels, querySessions, queryWindowOverview, queryWorkspaces, sessionKey, type EventRow,
 } from "../src/data/repository";
 import { mergePeerEvents } from "../src/lib/mirror-writes";
 import { mirrorFixture } from "./mirror-fixture";
@@ -164,4 +164,39 @@ test("the SQL-side overview equals aggregating every event, in any zone", async 
   expect(read).toBeLessThan(rows.length / 2);
   await queryWindowOverview(fx.db, "Asia/Kolkata", null, "cost", "monthly");
   expect(fx.readRows - before).toBe(read);
+});
+
+test("SQL-grouped sessions match grouping every event", async () => {
+  const { fx, rows } = await seeded();
+  fx.native.exec("update usage_events set session_title = 'T ' || session_id where rowid % 7 = 0");
+  const titled = (fx.native.query("select * from usage_events").all() as Record<string, unknown>[]);
+  const titles = new Map<string, { at: number; title: string }>();
+  for (const r of titled) {
+    if (r["session_title"] === null) continue;
+    const key = sessionKey({ environmentId: String(r["environment_id"]), client: String(r["client"]), sessionId: String(r["session_id"]) });
+    const at = Number(r["occurred_at_ms"]);
+    if (!titles.has(key) || titles.get(key)!.at > at) titles.set(key, { at, title: String(r["session_title"]) });
+  }
+  for (const environmentId of [null, "direct-a"]) {
+    const scoped = rows.filter((e) => environmentId === null || e.environmentId === environmentId);
+    const actual = await querySessions(fx.db, null, environmentId, 25);
+    const grouped = new Map<string, EventRow[]>();
+    for (const e of scoped) grouped.set(sessionKey(e), [...(grouped.get(sessionKey(e)) ?? []), e]);
+    const expected = [...grouped.entries()]
+      .map(([key, own]) => ({ key, last: Math.max(...own.map((e) => e.occurredAtMs)), own }))
+      .sort((a, b) => b.last - a.last)
+      .slice(0, 25);
+    expect(actual.map((row) => row.key)).toEqual(expected.map((row) => row.key));
+    for (const [i, row] of actual.entries()) {
+      const { own, last } = expected[i]!;
+      const ordered = [...own].sort((a, b) => a.occurredAtMs - b.occurredAtMs);
+      expect(row.lastActivityMs).toBe(last);
+      expect(row.tokens).toBe(own.reduce((sum, e) => sum + eventTokens(e), 0));
+      expect(row.messages).toBe(own.reduce((sum, e) => sum + e.messageCount, 0));
+      expect(row.cost).toBeCloseTo(own.reduce((sum, e) => sum + e.cost, 0), 6);
+      expect(row.models).toEqual([...new Set(ordered.map((e) => e.modelId))]);
+      expect(row.title).toBe(titles.get(row.key)?.title ?? null);
+    }
+  }
+  expect(await querySessions(fx.db, 1, null)).toEqual([]);
 });
