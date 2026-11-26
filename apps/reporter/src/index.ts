@@ -25,8 +25,9 @@ Usage: burn-report <command> [flags]
   doctor    Verify config, tokscale pin, burn-events exporter and Tailscale
   usage     Print vendor quota JSON from tokscale for local diagnostics
   serve     Alias for daemon
-  controls  Opt-in machine controls: status | enable power-mode |
-            disable power-mode | polkit-rule
+  controls  Opt-in machine controls: status | enable <control> |
+            disable <control> | polkit-rule
+            (controls: power-mode, keep-awake)
   help      This text
 
 Then scan 'burn-report pair' on the phone (Machines → + → Scan QR).
@@ -72,7 +73,7 @@ try {
     case "uninstall-service": process.exitCode = runUninstallService(); break;
     case "pair": process.exitCode = await runPair(args); break;
     case "controls":
-      if (argv.length > 3) throw new Error("usage: burn-report controls [status|enable|disable|polkit-rule] [power-mode]");
+      if (argv.length > 3) throw new Error("usage: burn-report controls [status|enable|disable|polkit-rule] [power-mode|keep-awake]");
       process.exitCode = await runControls(argv[1] ?? "status", argv[2]);
       break;
     case "help": case "--help": case "-h": usage(); break;

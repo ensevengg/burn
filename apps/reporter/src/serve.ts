@@ -5,7 +5,7 @@ import { MachineSnapshots, QuotaSnapshots, snapshotDayDigests, snapshotsFor } fr
 /** Machine backend bound to the tailnet (or loopback for local diagnostics).
  * Serves validated, priced tokscale rows and vendor quotas from shared
  * snapshots, read-only. The phone owns incremental cursors and history
- * storage. The one write is the opt-in power-mode control (ADR 0004). */
+ * storage. The only writes are the opt-in controls (ADR 0004, ADR 0007). */
 import {
   CONTROL_HEADER,
   DAY_DIGESTS_CAPABILITY,
@@ -13,10 +13,14 @@ import {
   PEER_DISCOVERY_CAPABILITY,
   POWER_MODE_CAPABILITY,
   POWER_MODE_PATH,
+  KEEP_AWAKE_CAPABILITY,
+  KEEP_AWAKE_PATH,
+  parseKeepAwakeRequest,
   parsePowerModeRequest,
   type MachineQuotaInput,
 } from "@burn/sync-api";
 import { ControlError, PowerModeController } from "./power-mode.js";
+import { KeepAwakeController } from "./keep-awake.js";
 import { PeerDirectory } from "./peers.js";
 import { pairingLink, renderQr } from "./pair.js";
 import { configPath, loadOrInitConfig, reporterPort, type BurnConfig } from "./config.js";
@@ -36,6 +40,7 @@ export interface LiveDeps {
   exporterCheck?: () => Promise<string | null>;
   usage?: (pin: string) => Promise<unknown>;
   powerMode?: PowerModeController;
+  keepAwake?: KeepAwakeController;
   /** Present on a listening server: answers /live/peers and is advertised. */
   peers?: PeerDirectory;
 }
@@ -108,17 +113,11 @@ function errorText(err: unknown): string {
   return (err as Error).message ?? String(err);
 }
 
-/** Opt-in control endpoint (ADR 0004). Reads are GET; the single write is a
- * JSON POST that browsers cannot forge cross-origin: it must carry the control
- * header (forcing a CORS preflight the reporter never answers) and no Origin. */
-async function powerModeRoute(req: Request, control: PowerModeController | null): Promise<Response> {
-  if (control === null)
-    return jsonResponse({ error: "power mode control is off on this machine; run: burn-report controls enable power-mode" }, 404);
-  const failed = (err: unknown) =>
-    err instanceof ControlError
-      ? jsonResponse({ error: err.message }, err.status)
-      : jsonResponse({ error: errorText(err) }, 500);
-  if (req.method === "GET") return control.state().then((state) => jsonResponse(state), failed);
+/** Shared rules for every control write (ADR 0004): a JSON POST that
+ * browsers cannot forge cross-origin — it must carry the control header
+ * (forcing a CORS preflight the reporter never answers) and no Origin. Returns
+ * the parsed body, or the refusal to send. */
+async function controlWriteBody(req: Request): Promise<{ body: unknown } | Response> {
   if (req.method !== "POST") {
     const response = jsonResponse({ error: "GET or POST only" }, 405);
     response.headers.set("allow", "GET, POST");
@@ -132,11 +131,31 @@ async function powerModeRoute(req: Request, control: PowerModeController | null)
     return jsonResponse({ error: "expected application/json" }, 415);
   if (Number(req.headers.get("content-length") ?? 0) > 1_024)
     return jsonResponse({ error: "request too large" }, 413);
-  let mode: string;
   try {
     const text = await req.text();
     if (text.length > 1_024) return jsonResponse({ error: "request too large" }, 413);
-    mode = parsePowerModeRequest(JSON.parse(text)).mode;
+    return { body: JSON.parse(text) };
+  } catch (err) {
+    return jsonResponse({ error: `invalid request: ${errorText(err)}` }, 400);
+  }
+}
+
+function controlFailed(err: unknown): Response {
+  return err instanceof ControlError
+    ? jsonResponse({ error: err.message }, err.status)
+    : jsonResponse({ error: errorText(err) }, 500);
+}
+
+/** Opt-in power-mode endpoint (ADR 0004). */
+async function powerModeRoute(req: Request, control: PowerModeController | null): Promise<Response> {
+  if (control === null)
+    return jsonResponse({ error: "power mode control is off on this machine; run: burn-report controls enable power-mode" }, 404);
+  if (req.method === "GET") return control.state().then((state) => jsonResponse(state), controlFailed);
+  const write = await controlWriteBody(req);
+  if (write instanceof Response) return write;
+  let mode: string;
+  try {
+    mode = parsePowerModeRequest(write.body).mode;
   } catch (err) {
     return jsonResponse({ error: `invalid request: ${errorText(err)}` }, 400);
   }
@@ -146,14 +165,37 @@ async function powerModeRoute(req: Request, control: PowerModeController | null)
     return jsonResponse(state);
   } catch (err) {
     console.warn(`[controls] power mode ${mode} failed: ${errorText(err)}`);
-    return failed(err);
+    return controlFailed(err);
+  }
+}
+
+/** Opt-in keep-awake endpoint (ADR 0007). */
+async function keepAwakeRoute(req: Request, control: KeepAwakeController | null): Promise<Response> {
+  if (control === null)
+    return jsonResponse({ error: "keep awake is off on this machine; run: burn-report controls enable keep-awake" }, 404);
+  if (req.method === "GET") return control.state().then((state) => jsonResponse(state), controlFailed);
+  const write = await controlWriteBody(req);
+  if (write instanceof Response) return write;
+  let minutes: number;
+  try {
+    minutes = parseKeepAwakeRequest(write.body).minutes;
+  } catch (err) {
+    return jsonResponse({ error: `invalid request: ${errorText(err)}` }, 400);
+  }
+  try {
+    const state = await control.set(minutes);
+    console.log(minutes === 0 ? "[controls] keep awake released" : `[controls] keep awake for ${minutes} min`);
+    return jsonResponse(state);
+  } catch (err) {
+    console.warn(`[controls] keep awake ${minutes} min failed: ${errorText(err)}`);
+    return controlFailed(err);
   }
 }
 
 /**
  * Pure request handler — Bun.serve-independent so tests exercise it without
  * sockets. `GET /ping`, `GET /live/events`, `GET /live/quotas`, `GET /live/metrics`,
- * and the opt-in `/controls/power-mode`; anything else is a 404/405.
+ * and the opt-in `/controls/power-mode` and `/controls/keep-awake`; anything else is a 404/405.
  */
 export function createLiveFetch(
   deps: LiveDeps,
@@ -183,6 +225,9 @@ export function createLiveFetch(
       : shared.quotas;
   const control = deps.config.controls?.powerMode
     ? (deps.powerMode ?? new PowerModeController())
+    : null;
+  const awake = deps.config.controls?.keepAwake
+    ? (deps.keepAwake ?? new KeepAwakeController({ osKind: deps.config.osKind }))
     : null;
   const encoded = new Map<string, { text: string; gzip?: Uint8Array }>();
   const respond = (
@@ -222,7 +267,10 @@ export function createLiveFetch(
   };
 
   const pingPayload = async () => {
-    const controls = control !== null && (await control.supported()) ? [POWER_MODE_CAPABILITY] : [];
+    const controls = [
+      ...(control !== null && (await control.supported()) ? [POWER_MODE_CAPABILITY] : []),
+      ...(awake !== null && (await awake.supported()) ? [KEEP_AWAKE_CAPABILITY] : []),
+    ];
     return {
       protocol: 1 as const,
       capabilities: [
@@ -252,6 +300,7 @@ export function createLiveFetch(
   return async (req: Request): Promise<Response> => {
     const path = new URL(req.url).pathname;
     if (path === POWER_MODE_PATH) return powerModeRoute(req, control);
+    if (path === KEEP_AWAKE_PATH) return keepAwakeRoute(req, awake);
     if (req.method !== "GET") return jsonResponse({ error: "GET only" }, 405);
     switch (path) {
       case "/ping":

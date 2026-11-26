@@ -30,7 +30,7 @@ export const configSchema = z
     tokscalePin: z.string().default(TOKSCALE_PIN).transform(atLeastCheckoutPin),
     /** Opt-in machine controls (ADR 0004). Absent means every control is off;
      * optional so configs without it are not rewritten on load. */
-    controls: z.object({ powerMode: z.boolean().optional() }).optional(),
+    controls: z.object({ powerMode: z.boolean().optional(), keepAwake: z.boolean().optional() }).optional(),
     /** Port the daemon listens on. Absent means 8787; fresh WSL installs get
      * 8788 because mirrored networking shares the Windows reporter's address. */
     port: z.number().int().min(1).max(65535).optional(),

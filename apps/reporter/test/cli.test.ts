@@ -49,6 +49,8 @@ test("controls toggles the opt-in flag and rejects unknown controls", async () =
   expect(config().controls).toEqual({ powerMode: true });
   expect((await exec("controls", "disable", "power-mode")).code).toBe(0);
   expect(config().controls).toEqual({ powerMode: false });
+  expect((await exec("controls", "enable", "keep-awake")).code).toBe(0);
+  expect(config().controls).toEqual({ powerMode: false, keepAwake: true });
   const unknown = await exec("controls", "enable", "reboot");
   expect(unknown.code).toBe(1);
   expect(unknown.stderr).toContain("power-mode");

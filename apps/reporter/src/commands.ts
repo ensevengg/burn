@@ -8,6 +8,7 @@ import { fetchUsage, tokscaleVersion } from "./tokscale.js";
 import { exporterVersion, exporterCapabilities } from "./exporter.js";
 import { runServe, tailscaleIp } from "./serve.js";
 import { PowerModeController } from "./power-mode.js";
+import { KeepAwakeController } from "./keep-awake.js";
 
 export { REPORTER_VERSION, tokscaleQuotaInputs, currentUtcOffsetMinutes } from "./tokscale.js";
 
@@ -75,7 +76,7 @@ export async function runDaemon(args: Map<string, string>): Promise<void> {
   await runServe(args);
 }
 
-const CONTROLS = ["power-mode"] as const;
+const CONTROLS = ["power-mode", "keep-awake"] as const;
 
 /** Polkit rule letting this user's daemon switch power-profiles-daemon modes
  * with nobody signed in. Without it, changes work only during a desktop session. */
@@ -90,7 +91,7 @@ polkit.addRule(function (action, subject) {
 `;
 }
 
-/** `controls [status|enable|disable|polkit-rule] [power-mode]` — opt-in machine controls (ADR 0004). */
+/** `controls [status|enable|disable|polkit-rule] [power-mode|keep-awake]` — opt-in machine controls (ADR 0004, 0007). */
 export async function runControls(action: string, feature: string | undefined): Promise<number> {
   if (action === "polkit-rule") {
     const rule = polkitRule(userInfo().username);
@@ -102,26 +103,40 @@ export async function runControls(action: string, feature: string | undefined): 
   }
   const config = loadConfig();
   if (action === "enable" || action === "disable") {
-    if (feature !== "power-mode")
+    if (feature !== "power-mode" && feature !== "keep-awake")
       throw new Error(`controls ${action} needs a control name: ${CONTROLS.join(", ")}`);
-    saveConfig({ ...config, controls: { ...config.controls, powerMode: action === "enable" } });
-    console.log(`power-mode ${action === "enable" ? "enabled" : "disabled"}. Restart the daemon to apply.`);
-    if (action === "enable" && platform() !== "linux")
+    const key = feature === "power-mode" ? "powerMode" : "keepAwake";
+    saveConfig({ ...config, controls: { ...config.controls, [key]: action === "enable" } });
+    console.log(`${feature} ${action === "enable" ? "enabled" : "disabled"}. Restart the daemon to apply.`);
+    if (action === "enable" && feature === "power-mode" && platform() !== "linux")
       console.log("Note: power-mode control currently works on Linux only; other systems will not advertise it.");
+    if (action === "enable" && feature === "keep-awake" && config.osKind === "wsl")
+      console.log("Note: WSL cannot hold its host awake; enable keep-awake on the Windows reporter instead.");
     return 0;
   }
   if (action !== "status") throw new Error(`Unknown controls action: ${action} (status, enable, disable, polkit-rule)`);
+  let failed = false;
   const enabled = config.controls?.powerMode === true;
   console.log(`power-mode   ${enabled ? "enabled" : "off (burn-report controls enable power-mode)"}`);
   const controller = new PowerModeController();
   if (!(await controller.supported())) {
     console.log("             no power modes found (needs power-profiles-daemon or /sys/firmware/acpi/platform_profile)");
-    return enabled ? 1 : 0;
+    failed ||= enabled;
+  } else {
+    const state = await controller.state();
+    console.log(`backend      ${state.backend}`);
+    console.log(`mode         ${state.mode ?? "unknown"} (of ${state.modes.join(", ")})${state.degraded ? ` — degraded: ${state.degraded}` : ""}`);
+    for (const fan of state.fans)
+      console.log(`fan          ${fan.label}: ${fan.rpm} rpm${fan.maxRpm ? ` of ${fan.maxRpm}` : ""}`);
   }
-  const state = await controller.state();
-  console.log(`backend      ${state.backend}`);
-  console.log(`mode         ${state.mode ?? "unknown"} (of ${state.modes.join(", ")})${state.degraded ? ` — degraded: ${state.degraded}` : ""}`);
-  for (const fan of state.fans)
-    console.log(`fan          ${fan.label}: ${fan.rpm} rpm${fan.maxRpm ? ` of ${fan.maxRpm}` : ""}`);
-  return 0;
+  const awakeEnabled = config.controls?.keepAwake === true;
+  console.log(`keep-awake   ${awakeEnabled ? "enabled" : "off (burn-report controls enable keep-awake)"}`);
+  const awake = new KeepAwakeController({ osKind: config.osKind });
+  if (!(await awake.supported())) {
+    console.log("             unavailable here (needs systemd-inhibit, caffeinate or Windows PowerShell; never on WSL)");
+    failed ||= awakeEnabled;
+  } else {
+    console.log(`backend      ${(await awake.state()).backend}`);
+  }
+  return failed ? 1 : 0;
 }
