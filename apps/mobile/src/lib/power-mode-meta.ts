@@ -71,13 +71,13 @@ export function formatRpm(rpm: number): string {
 
 /** Plain-language reason a control request failed. Reporter refusals are
  * already written for people; transport failures are not. */
-export function controlFailure(err: unknown, machineName: string): string {
+export function controlFailure(err: unknown, machineName: string, action = "switch"): string {
   const error = err as (Error & { status?: number }) | null | undefined;
   const text = (error?.message ?? String(err)).replace(/^https?:\/\/\S+: /, "");
-  if (/timed out|aborted|cancel/i.test(text)) return `${machineName} didn't answer in time. Showing its mode as it reports it.`;
+  if (/timed out|aborted|cancel/i.test(text)) return `${machineName} didn't answer in time. Showing ${action === "switch" ? "its mode" : "its state"} as it reports it.`;
   if (error?.name === "LiveUnreachableError") return `Couldn't reach ${machineName}. Try again once it's back online.`;
   if (error?.status === 403 || error?.status === 404 || error?.status === 409) return text;
-  return `Couldn't switch: ${text}`;
+  return `Couldn't ${action}: ${text}`;
 }
 
 export type ModeTint = "cool" | "neutral" | "hot";

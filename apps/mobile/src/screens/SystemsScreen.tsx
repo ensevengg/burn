@@ -13,7 +13,8 @@ import { FadeIn, PressableScale, TweenText } from "../ui/motion";
 import { Sparkline } from "../ui/charts";
 import { Screen } from "../ui/screen";
 import { PowerModePanel } from "../ui/power-mode";
-import { supportsPowerMode } from "@burn/sync-api";
+import { KeepAwakePanel } from "../ui/keep-awake";
+import { supportsKeepAwake, supportsPowerMode } from "@burn/sync-api";
 
 type MetricKey = "cpuLoadPct" | "cpuTempC" | "ramUsedPct" | "ramTempC" | "gpuUtilPct" | "gpuTempC";
 
@@ -125,15 +126,25 @@ export function SystemsScreen() {
                 <MetricTile label="GPU temp" unit="°" samples={system.metrics} field="gpuTempC" warnAt={85} />
               </View>
               {/* A fresh probe wins; otherwise the stored capabilities keep the
-                  control visible (offline) for a machine unreachable at launch. */}
-              {supportsPowerMode(probe?.capabilities ?? system.capabilities) && (probe?.endpoint ?? system.endpoint) !== null && (
-                <PowerModePanel
-                  machine={{ environmentId: system.id, endpoint: (probe?.endpoint ?? system.endpoint)! }}
-                  // Data errors (e.g. a broken exporter) still mean the machine answers.
-                  online={probe === undefined ? null : probe.state === "live" || probe.state === "error"}
-                  machineName={system.displayName}
-                />
-              )}
+                  controls visible (offline) for a machine unreachable at launch. */}
+              {(() => {
+                const capabilities = probe?.capabilities ?? system.capabilities;
+                const endpoint = probe?.endpoint ?? system.endpoint;
+                if (endpoint === null) return null;
+                const machine = { environmentId: system.id, endpoint };
+                // Data errors (e.g. a broken exporter) still mean the machine answers.
+                const online = probe === undefined ? null : probe.state === "live" || probe.state === "error";
+                return (
+                  <>
+                    {supportsPowerMode(capabilities) && (
+                      <PowerModePanel machine={machine} online={online} machineName={system.displayName} />
+                    )}
+                    {supportsKeepAwake(capabilities) && (
+                      <KeepAwakePanel machine={machine} online={online} machineName={system.displayName} />
+                    )}
+                  </>
+                );
+              })()}
             </Card>
           </FadeIn>
         );
