@@ -17,9 +17,12 @@ import type { MachineEventInput, MachineQuotaInput, MachineMetricInput } from ".
 import type { OsKind } from "./types";
 import {
   CONTROL_HEADER,
+  KEEP_AWAKE_PATH,
   POWER_MODE_PATH,
+  parseKeepAwakeState,
   parsePowerModeState,
   powerModeId,
+  type KeepAwakeState,
   type PowerModeState,
 } from "./controls";
 
@@ -154,6 +157,10 @@ export interface LiveApi {
   powerMode?(signal?: AbortSignal): Promise<PowerModeState>;
   /** Apply a mode; resolves with the state read back after the change. */
   setPowerMode?(mode: string, signal?: AbortSignal): Promise<PowerModeState>;
+  /** Opt-in keep-awake hold (ADR 0007); only machines advertising it answer. */
+  keepAwake?(signal?: AbortSignal): Promise<KeepAwakeState>;
+  /** Hold off sleep for `minutes` from now; 0 releases. */
+  setKeepAwake?(minutes: number, signal?: AbortSignal): Promise<KeepAwakeState>;
 }
 
 type LiveTransport = {
@@ -191,6 +198,17 @@ export function validateLiveApi(transport: LiveTransport): LiveApi {
     const write = transport.setPowerMode;
     api.setPowerMode = async (mode, signal) =>
       parsePowerModeState(await write(powerModeId(mode, "mode"), signal));
+  }
+  if (transport.keepAwake) {
+    const read = transport.keepAwake;
+    api.keepAwake = async (...args) => parseKeepAwakeState(await read(...args));
+  }
+  if (transport.setKeepAwake) {
+    const write = transport.setKeepAwake;
+    api.setKeepAwake = async (minutes, signal) => {
+      if (!Number.isSafeInteger(minutes) || minutes < 0) throw new LiveError("minutes: invalid");
+      return parseKeepAwakeState(await write(minutes, signal));
+    };
   }
   validatedApis.add(api);
   return api;
@@ -302,6 +320,8 @@ export function httpLiveApiFor(
     peers: async (signal) => call("/live/peers", signal),
     powerMode: async (signal) => call(POWER_MODE_PATH, signal),
     setPowerMode: async (mode, signal) => call(POWER_MODE_PATH, signal, undefined, { mode }),
+    keepAwake: async (signal) => call(KEEP_AWAKE_PATH, signal),
+    setKeepAwake: async (minutes, signal) => call(KEEP_AWAKE_PATH, signal, undefined, { minutes }),
   });
 }
 

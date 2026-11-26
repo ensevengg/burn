@@ -98,3 +98,46 @@ export function parsePowerModeRequest(raw: unknown): { mode: string } {
 export function supportsPowerMode(capabilities: readonly string[] | undefined): boolean {
   return capabilities?.includes(POWER_MODE_CAPABILITY) ?? false;
 }
+
+/**
+ * Keep awake (ADR 0007): hold off idle and system sleep for a bounded time so
+ * a long agent run is not cut short. Every hold expires on its own; there is
+ * no "forever". Same opt-in, advertisement and write rules as power mode.
+ */
+export const KEEP_AWAKE_CAPABILITY = "keep-awake";
+export const KEEP_AWAKE_PATH = "/controls/keep-awake";
+/** Longest single hold: 12 hours. Extending starts a new hold from now. */
+export const KEEP_AWAKE_MAX_MINUTES = 720;
+
+export type KeepAwakeBackend = "systemd-inhibit" | "caffeinate" | "windows-execution-state";
+const KEEP_AWAKE_BACKENDS: readonly KeepAwakeBackend[] = ["systemd-inhibit", "caffeinate", "windows-execution-state"];
+
+export interface KeepAwakeState {
+  generatedAt: string;
+  backend: KeepAwakeBackend;
+  /** When the current hold ends; null when the machine sleeps normally. */
+  until: string | null;
+}
+
+export function parseKeepAwakeState(raw: unknown): KeepAwakeState {
+  const state = expectObject(raw, "keep awake");
+  return {
+    generatedAt: timestamp(state.generatedAt, "generatedAt"),
+    backend: choice(state.backend, KEEP_AWAKE_BACKENDS, "backend"),
+    until: state.until === null || state.until === undefined ? null : timestamp(state.until, "until"),
+  };
+}
+
+/** `{ "minutes": 0 }` releases the hold; 1–720 starts one from now. */
+export function parseKeepAwakeRequest(raw: unknown): { minutes: number } {
+  const body = expectObject(raw, "request");
+  for (const key of Object.keys(body))
+    if (key !== "minutes") throw new LiveError(`request: unexpected field ${key}`);
+  const minutes = integer(body.minutes, "minutes");
+  if (minutes > KEEP_AWAKE_MAX_MINUTES) throw new LiveError(`minutes: at most ${KEEP_AWAKE_MAX_MINUTES}`);
+  return { minutes };
+}
+
+export function supportsKeepAwake(capabilities: readonly string[] | undefined): boolean {
+  return capabilities?.includes(KEEP_AWAKE_CAPABILITY) ?? false;
+}
