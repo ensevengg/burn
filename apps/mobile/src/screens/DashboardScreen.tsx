@@ -17,6 +17,7 @@ import {
 } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp, useSyncStatus } from "../lib/app-context";
+import { setDashboardView, type DashboardView } from "../lib/settings";
 import { useTheme } from "../lib/theme-context";
 import { useNow } from "../lib/use-now";
 import { fillSeries, rollupYears } from "../lib/series";
@@ -44,8 +45,21 @@ const RANGE_WORDS: Record<UsageRangeId, string> = {
 };
 
 export function DashboardScreen() {
-  const [metric, setMetric] = useState<Metric>("cost");
-  const [rangeId, setRangeId] = useState<UsageRangeId>("30");
+  const { db, savedDashboardView } = useApp();
+  const [metric, setMetricState] = useState<Metric>(savedDashboardView.metric);
+  const [rangeId, setRangeState] = useState<UsageRangeId>(savedDashboardView.range);
+  // Remembered for the next launch; a failed save only forgets the choice.
+  const remember = (view: DashboardView) => {
+    if (db !== null) void setDashboardView(db, view).catch(() => {});
+  };
+  const setMetric = (next: Metric) => {
+    setMetricState(next);
+    remember({ metric: next, range: rangeId as DashboardView["range"] });
+  };
+  const setRangeId = (next: UsageRangeId) => {
+    setRangeState(next);
+    remember({ metric, range: next as DashboardView["range"] });
+  };
   return (
     <Screen title="Overview">
       <FadeIn>

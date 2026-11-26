@@ -5,7 +5,15 @@ import {
 import { AppState as NativeAppState } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { openDb, resetDb, kvSet, type SQLiteDatabase } from "./db";
-import { getMode, getReportingTimezone, setReportingTimezone, type AppMode } from "./settings";
+import {
+  DEFAULT_DASHBOARD_VIEW,
+  getDashboardView,
+  getMode,
+  getReportingTimezone,
+  setReportingTimezone,
+  type AppMode,
+  type DashboardView,
+} from "./settings";
 import { seedDemoData } from "./sync";
 import {
   pullDirectFromMachines, cancelDirectPull, addDirectMachine, discoverPeerMachines,
@@ -27,6 +35,10 @@ interface AppState {
   db: SQLiteDatabase | null;
   mode: AppMode;
   reportingTimezone: string;
+  /** Dashboard metric and range saved last session, loaded with the
+   * database (before any tab mounts). The dashboard owns the live value, so
+   * a chip tap never re-renders other screens. */
+  savedDashboardView: DashboardView;
   enterDemo: () => Promise<void>;
   connectDirect: () => Promise<void>;
   addDirectMachine: (url: string) => Promise<{ slug: string; displayName: string }>;
@@ -67,6 +79,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [db, setDb] = useState<SQLiteDatabase | null>(null);
   const [mode, setMode] = useState<AppMode>("unconfigured");
   const [reportingTimezone, setTzState] = useState("Asia/Kolkata");
+  const [savedDashboardView, setDashboardViewState] = useState<DashboardView>(DEFAULT_DASHBOARD_VIEW);
   const [pairing, setPairing] = useState<string | null>(null);
   const [status, setStatus] = useState<SyncStatus>({
     lastSync: null, syncError: null, syncNotice: null,
@@ -104,9 +117,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const opened = await openDb();
       const currentMode = await getMode(opened);
       const tz = await getReportingTimezone(opened);
+      const view = await getDashboardView(opened);
       if (!active) return;
       setDb(opened);
       setTzState(tz);
+      setDashboardViewState(view);
       setMode(currentMode);
     })().catch((err: Error) => {
       if (active) patchStatus({ syncError: err.message });
@@ -224,7 +239,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       invalidate();
     };
     return {
-      db, mode, reportingTimezone, sync, pairing, setPairing,
+      db, mode, reportingTimezone, savedDashboardView, sync, pairing, setPairing,
       async enterDemo() {
         if (!db) return;
         await prepareReset();
@@ -287,7 +302,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         invalidate();
       },
     };
-  }, [db, mode, reportingTimezone, pairing, sync, stop, cancelActive, pull, refresh, queryClient, patchStatus]);
+  }, [db, mode, reportingTimezone, savedDashboardView, pairing, sync, stop, cancelActive, pull, refresh, queryClient, patchStatus]);
 
   return <AppContext.Provider value={value}>
     <SyncStatusContext.Provider value={status}>{children}</SyncStatusContext.Provider>
