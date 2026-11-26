@@ -200,3 +200,27 @@ test("SQL-grouped sessions match grouping every event", async () => {
   }
   expect(await querySessions(fx.db, 1, null)).toEqual([]);
 });
+
+test("the prior window sums the same length just before the selected one", async () => {
+  const { periodChange, queryPreviousWindowTotal } = await import("../src/data/repository");
+  const fx = mirrorFixture();
+  const now = Date.now();
+  const day = 86_400_000;
+  const rows = [
+    { at: now - 2 * day, tokens: 100, cost: "0.10" }, // current 7d
+    { at: now - 8 * day, tokens: 40, cost: "0.04" }, // prior 7d
+    { at: now - 13.9 * day, tokens: 10, cost: "0.01" }, // prior 7d
+    { at: now - 15 * day, tokens: 999, cost: "9" }, // older than both
+  ];
+  const base = history(1)[0]!;
+  await mergePeerEvents(fx.db, "direct-a", "a",
+    rows.map((r, i) => ({ ...base, occurredAtMs: r.at, inputTokens: r.tokens, outputTokens: 0, cacheReadTokens: 0,
+      cacheWriteTokens: 0, reasoningTokens: 0, cost: r.cost, dedupKey: `p${i}` })), () => {});
+  expect(await queryPreviousWindowTotal(fx.db, 7, "tokens")).toBe(50);
+  expect(await queryPreviousWindowTotal(fx.db, 7, "cost")).toBeCloseTo(0.05, 9);
+  expect(await queryPreviousWindowTotal(fx.db, null, "cost")).toBeNull();
+  expect(periodChange(100, 50)).toBe(1);
+  expect(periodChange(25, 50)).toBe(-0.5);
+  expect(periodChange(5, 0)).toBeNull();
+  expect(periodChange(5, null)).toBeNull();
+});

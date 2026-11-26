@@ -717,6 +717,31 @@ export async function queryWindowOverview(
   return { totals: { ...window.totals }, sessions: window.sessions, series, byClient, cacheSavings: window.cacheSavings };
 }
 
+/** The metric's total over the window just before `days` (same length);
+ * null for All, which has nothing before it. One SQL sum, no rows. */
+export async function queryPreviousWindowTotal(
+  db: SQLiteDatabase,
+  days: UsageWindowDays,
+  metric: "cost" | "tokens",
+  signal?: AbortSignal,
+): Promise<number | null> {
+  if (days === null) return null;
+  if (signal?.aborted) throw new Error("Query cancelled");
+  const now = Date.now();
+  const row = await db.getFirstAsync<{ value: number | null }>(
+    `select ${metric === "cost" ? "sum(cast(cost as real))" : `sum(${TOKEN_SUM})`} as value
+       from usage_events where occurred_at_ms >= ? and occurred_at_ms < ?`,
+    [usageWindowStart(days * 2, now), usageWindowStart(days, now)],
+  );
+  return Number(row?.value ?? 0);
+}
+
+/** Relative change; null when there is no earlier usage to compare with. */
+export function periodChange(current: number, previous: number | null): number | null {
+  if (previous === null || previous <= 0) return null;
+  return (current - previous) / previous;
+}
+
 export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {
   // A reading stamped later than now cannot be the freshest; it was written by
   // a machine whose clock ran ahead. It ranks behind every plausible reading
