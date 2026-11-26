@@ -6,7 +6,7 @@
  */
 import type { SQLiteDatabase } from "expo-sqlite";
 import { bucketKey, bucketLabel, type Granularity } from "../lib/format";
-import { createYieldBudget, runCooperatively, runImmediately } from "../lib/cooperative";
+import { createYieldBudget, runImmediately } from "../lib/cooperative";
 import { withWriteLock } from "../lib/writelock";
 import { usageWindowStart, type UsageWindowDays } from "../lib/usage-range";
 
@@ -97,35 +97,11 @@ export function sessionKey(e: Pick<EventRow, "environmentId" | "client" | "sessi
   return JSON.stringify([e.environmentId, e.client, e.sessionId]);
 }
 
-const eventCache = new WeakMap<SQLiteDatabase, Map<string, Promise<EventRow[]>>>();
+/** Overview aggregates keyed by window. The name is historical: callers
+ * evict it whenever mirrored events change. */
+const eventCache = new WeakMap<SQLiteDatabase, Map<string, Promise<WindowAggregates>>>();
 export function invalidateEventCache(db: SQLiteDatabase): void {
   eventCache.delete(db);
-}
-
-function loadEvents(
-  db: SQLiteDatabase,
-  fromMs: number,
-  toMs: number,
-  environmentId: string | null,
-): Promise<EventRow[]> {
-  let cache = eventCache.get(db);
-  if (!cache) {
-    cache = new Map();
-    eventCache.set(db, cache);
-  }
-  // Queries in one minute share a window; rolling ranges revalidate each minute.
-  const key = JSON.stringify([Math.floor(fromMs / 60_000), Math.floor(toMs / 60_000), environmentId]);
-  let pending = cache.get(key);
-  if (!pending) {
-    if (cache.size >= 4) cache.delete(cache.keys().next().value!);
-    pending = loadEventsUncached(db, fromMs, toMs, environmentId);
-    cache.set(key, pending);
-    const current = cache;
-    void pending.catch(() => {
-      if (current.get(key) === pending) current.delete(key);
-    });
-  }
-  return pending;
 }
 
 async function loadEventsUncached(
@@ -191,41 +167,6 @@ async function loadEventsUncached(
     );
   }
   return events;
-}
-
-function* summarizeEventsWork(events: EventRow[]): Generator<void, Totals> {
-  let processed = 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheWriteTokens = 0;
-  let reasoningTokens = 0;
-  let messages = 0;
-  let cost = 0;
-  let costed = 0;
-  for (const e of events) {
-    if (++processed % 256 === 0) yield;
-    inputTokens += e.inputTokens;
-    outputTokens += e.outputTokens;
-    cacheReadTokens += e.cacheReadTokens;
-    cacheWriteTokens += e.cacheWriteTokens;
-    reasoningTokens += e.reasoningTokens;
-    messages += e.messageCount;
-    cost += e.cost;
-    if (e.costIsComplete) costed += 1;
-  }
-  const cacheTotal = cacheReadTokens + inputTokens + cacheWriteTokens;
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-    reasoningTokens,
-    messages,
-    cost,
-    hitRate: cacheTotal === 0 ? 0 : cacheReadTokens / cacheTotal,
-    costCoverage: events.length === 0 ? 0 : costed / events.length,
-  };
 }
 
 export function groupKeyFor(event: EventRow, groupBy: "model" | "client" | "none"): string {
@@ -625,6 +566,149 @@ export interface WindowOverview {
   cacheSavings: number | null;
 }
 
+interface SlotAggregate {
+  slot: number;
+  tokens: number;
+  cost: number;
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+interface WindowAggregates {
+  totals: Totals;
+  sessions: number;
+  slots: SlotAggregate[];
+  byClient: ClientShare[];
+  cacheSavings: number | null;
+}
+
+/**
+ * One window's sums, computed by SQLite: 15-minute UTC slots for the series
+ * (re-bucketed in JS for the reporting timezone, as queryGranularityMax does),
+ * one row per agent for totals and shares, and per-model cache reads for
+ * savings. Reads O(slots + agents + models) rows instead of every event.
+ */
+async function aggregateWindowUncached(db: SQLiteDatabase, fromMs: number, toMs: number): Promise<WindowAggregates> {
+  const where = "occurred_at_ms >= ? and occurred_at_ms < ?";
+  const bindings = [fromMs, toMs];
+  const slotRows = await db.getAllAsync<Record<string, unknown>>(
+    `select occurred_at_ms / ${SLOT_MS} as slot, sum(${TOKEN_SUM}) as tokens, sum(cast(cost as real)) as cost,
+            sum(input_tokens) as input_tokens, sum(cache_read_tokens) as cache_read_tokens,
+            sum(cache_write_tokens) as cache_write_tokens
+       from usage_events where ${where} group by slot order by slot`,
+    bindings,
+  );
+  // A session key includes its agent, so per-agent session counts are disjoint
+  // and their sum is the window's distinct session count.
+  const clientRows = await db.getAllAsync<Record<string, unknown>>(
+    `select client, sum(input_tokens) as input_tokens, sum(output_tokens) as output_tokens,
+            sum(cache_read_tokens) as cache_read_tokens, sum(cache_write_tokens) as cache_write_tokens,
+            sum(reasoning_tokens) as reasoning_tokens, sum(message_count) as messages,
+            sum(cast(cost as real)) as cost, count(*) as events, sum(cost_is_complete) as costed,
+            count(distinct environment_id || char(31) || session_id) as sessions
+       from usage_events where ${where} group by client`,
+    bindings,
+  );
+  const totals: Totals = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    messages: 0,
+    cost: 0,
+    hitRate: 0,
+    costCoverage: 0,
+  };
+  let events = 0;
+  let costed = 0;
+  let sessions = 0;
+  const byClient: ClientShare[] = [];
+  for (const r of clientRows) {
+    const row = {
+      inputTokens: Number(r["input_tokens"] ?? 0),
+      outputTokens: Number(r["output_tokens"] ?? 0),
+      cacheReadTokens: Number(r["cache_read_tokens"] ?? 0),
+      cacheWriteTokens: Number(r["cache_write_tokens"] ?? 0),
+      reasoningTokens: Number(r["reasoning_tokens"] ?? 0),
+    };
+    const cost = Number(r["cost"] ?? 0);
+    const clientSessions = Number(r["sessions"] ?? 0);
+    totals.inputTokens += row.inputTokens;
+    totals.outputTokens += row.outputTokens;
+    totals.cacheReadTokens += row.cacheReadTokens;
+    totals.cacheWriteTokens += row.cacheWriteTokens;
+    totals.reasoningTokens += row.reasoningTokens;
+    totals.messages += Number(r["messages"] ?? 0);
+    totals.cost += cost;
+    events += Number(r["events"] ?? 0);
+    costed += Number(r["costed"] ?? 0);
+    sessions += clientSessions;
+    byClient.push({ key: String(r["client"]), tokens: eventTokens(row), cost, sessions: clientSessions });
+  }
+  const cacheTotal = totals.cacheReadTokens + totals.inputTokens + totals.cacheWriteTokens;
+  totals.hitRate = cacheTotal === 0 ? 0 : totals.cacheReadTokens / cacheTotal;
+  totals.costCoverage = events === 0 ? 0 : costed / events;
+
+  const priceRows = await db.getAllAsync<{
+    model_id: string;
+    input_cost_per_m: number;
+    cache_read_cost_per_m: number;
+  }>("select model_id, input_cost_per_m, cache_read_cost_per_m from model_prices");
+  let cacheSavings: number | null = null;
+  if (priceRows.length > 0) {
+    const prices = new Map(priceRows.map((row) => [row.model_id, row]));
+    const reads = await db.getAllAsync<{ model_id: string; cache_read_tokens: number }>(
+      `select model_id, sum(cache_read_tokens) as cache_read_tokens from usage_events where ${where} group by model_id`,
+      bindings,
+    );
+    cacheSavings = 0;
+    for (const read of reads) {
+      const price = prices.get(String(read.model_id));
+      if (price === undefined) continue;
+      cacheSavings +=
+        (Number(read.cache_read_tokens) / 1e6) * Math.max(0, price.input_cost_per_m - price.cache_read_cost_per_m);
+    }
+  }
+  return {
+    totals,
+    sessions,
+    slots: slotRows.map((r) => ({
+      slot: Number(r["slot"]),
+      tokens: Number(r["tokens"] ?? 0),
+      cost: Number(r["cost"] ?? 0),
+      inputTokens: Number(r["input_tokens"] ?? 0),
+      cacheReadTokens: Number(r["cache_read_tokens"] ?? 0),
+      cacheWriteTokens: Number(r["cache_write_tokens"] ?? 0),
+    })),
+    byClient,
+    cacheSavings,
+  };
+}
+
+/** Queries in one minute share a window's aggregates (metric, granularity and
+ * timezone only re-bucket them); rolling ranges revalidate each minute. */
+function aggregateWindow(db: SQLiteDatabase, fromMs: number, toMs: number): Promise<WindowAggregates> {
+  let cache = eventCache.get(db);
+  if (!cache) {
+    cache = new Map();
+    eventCache.set(db, cache);
+  }
+  const key = JSON.stringify([Math.floor(fromMs / 60_000), Math.floor(toMs / 60_000)]);
+  let pending = cache.get(key);
+  if (!pending) {
+    if (cache.size >= 4) cache.delete(cache.keys().next().value!);
+    pending = aggregateWindowUncached(db, fromMs, toMs);
+    cache.set(key, pending);
+    const current = cache;
+    void pending.catch(() => {
+      if (current.get(key) === pending) current.delete(key);
+    });
+  }
+  return pending;
+}
+
 /** Everything the restructured dashboard headline/strip/table needs, per window. */
 export async function queryWindowOverview(
   db: SQLiteDatabase,
@@ -636,48 +720,45 @@ export async function queryWindowOverview(
 ): Promise<WindowOverview> {
   const now = Date.now();
   if (signal?.aborted) throw new Error("Query cancelled");
-  const events = await loadEvents(db, usageWindowStart(days, now), now + DAY_MS, null);
+  const window = await aggregateWindow(db, usageWindowStart(days, now), now + DAY_MS);
   if (signal?.aborted) throw new Error("Query cancelled");
-  const totals = await runCooperatively(summarizeEventsWork(events), signal);
-  const sessionKeys = new Set<string>();
-  const series = await runCooperatively(buildSeriesWork(events, timeZone, granularity, "none"), signal);
-
-  const byClientMap = new Map<string, { tokens: number; cost: number; sessions: Set<string> }>();
+  const byKey = new Map<string, SeriesBucket>();
   const yieldIfNeeded = createYieldBudget(signal);
-  for (let i = 0; i < events.length; i++) {
+  for (let i = 0; i < window.slots.length; i++) {
     if (i % 256 === 0) {
       const pause = yieldIfNeeded();
       if (pause) await pause;
     }
-    if (signal?.aborted) throw new Error("Query cancelled");
-    const e = events[i]!;
-    sessionKeys.add(sessionKey(e));
-    const entry = byClientMap.get(e.client) ?? {
-      tokens: 0,
-      cost: 0,
-      sessions: new Set<string>(),
-    };
-    entry.tokens += eventTokens(e);
-    entry.cost += e.cost;
-    entry.sessions.add(sessionKey(e));
-    byClientMap.set(e.client, entry);
+    const slot = window.slots[i]!;
+    const key = bucketKey(slot.slot * SLOT_MS, timeZone, granularity);
+    let bucket = byKey.get(key);
+    if (bucket === undefined) {
+      bucket = {
+        key,
+        label: bucketLabel(key, granularity),
+        tokens: 0,
+        cost: 0,
+        stacks: {},
+        inputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      };
+      byKey.set(key, bucket);
+    }
+    bucket.tokens += slot.tokens;
+    bucket.cost += slot.cost;
+    bucket.inputTokens += slot.inputTokens;
+    bucket.cacheReadTokens += slot.cacheReadTokens;
+    bucket.cacheWriteTokens += slot.cacheWriteTokens;
   }
-  const byClient: ClientShare[] = [...byClientMap.entries()]
-    .map(([key, value]) => ({ key, tokens: value.tokens, cost: value.cost, sessions: value.sessions.size }))
-    .sort((a, b) => (metric === "cost" ? b.cost - a.cost : b.tokens - a.tokens));
-
-  const priceRows = await db.getAllAsync<{
-    model_id: string;
-    input_cost_per_m: number;
-    cache_read_cost_per_m: number;
-  }>("select model_id, input_cost_per_m, cache_read_cost_per_m from model_prices");
-  const prices: Record<string, { input: number; cacheRead: number }> = {};
-  for (const row of priceRows) {
-    prices[row.model_id] = { input: row.input_cost_per_m, cacheRead: row.cache_read_cost_per_m };
-  }
-  const cacheSavings = priceRows.length === 0 ? null : computeCacheSavings(events, prices);
-
-  return { totals, sessions: sessionKeys.size, series, byClient, cacheSavings };
+  if (signal?.aborted) throw new Error("Query cancelled");
+  const series = [...byKey.values()]
+    .map((bucket) => ({ ...bucket, stacks: { All: bucket.tokens } }))
+    .sort((a, b) => (a.key < b.key ? -1 : 1));
+  const byClient = [...window.byClient].sort((a, b) =>
+    metric === "cost" ? b.cost - a.cost : b.tokens - a.tokens,
+  );
+  return { totals: { ...window.totals }, sessions: window.sessions, series, byClient, cacheSavings: window.cacheSavings };
 }
 
 export async function queryQuotas(db: SQLiteDatabase): Promise<QuotaCard[]> {

@@ -2,8 +2,8 @@
 import { expect, test } from "bun:test";
 import type { MachineEventInput } from "@burn/sync-api";
 import {
-  bucketEvents, eventTokens, queryClients, queryGranularityMax, queryModels, queryWorkspaces,
-  sessionKey, type EventRow,
+  bucketEvents, buildSeries, eventTokens, invalidateEventCache, queryClients, queryGranularityMax,
+  queryModels, queryWindowOverview, queryWorkspaces, sessionKey, type EventRow,
 } from "../src/data/repository";
 import { mergePeerEvents } from "../src/lib/mirror-writes";
 import { mirrorFixture } from "./mirror-fixture";
@@ -119,4 +119,49 @@ test("the historical peak from 15-minute slots equals bucketing every event, in 
   }
   const empty = mirrorFixture();
   expect(await queryGranularityMax(empty.db, "UTC", "daily", "cost")).toBe(0);
+});
+
+test("the SQL-side overview equals aggregating every event, in any zone", async () => {
+  const { fx, rows } = await seeded();
+  for (const zone of ["Asia/Kolkata", "America/New_York", "Asia/Kathmandu", "Pacific/Chatham"]) {
+    for (const granularity of ["hourly", "daily", "monthly"] as const) {
+      const overview = await queryWindowOverview(fx.db, zone, null, "tokens", granularity);
+      const expected = buildSeries(rows, zone, granularity, "none");
+      expect(overview.series.map((b) => [b.key, b.label, b.tokens, b.inputTokens, b.cacheReadTokens, b.cacheWriteTokens]))
+        .toEqual(expected.map((b) => [b.key, b.label, b.tokens, b.inputTokens, b.cacheReadTokens, b.cacheWriteTokens]));
+      overview.series.forEach((b, i) => {
+        expect(b.cost).toBeCloseTo(expected[i]!.cost, 6);
+        expect(b.stacks).toEqual(expected[i]!.stacks);
+      });
+    }
+  }
+  const { totals, sessions, byClient, cacheSavings } = await queryWindowOverview(fx.db, "UTC", null, "cost");
+  expect(eventTokens(totals)).toBe(rows.reduce((sum, e) => sum + eventTokens(e), 0));
+  expect(totals.messages).toBe(rows.reduce((sum, e) => sum + e.messageCount, 0));
+  expect(totals.cost).toBeCloseTo(rows.reduce((sum, e) => sum + e.cost, 0), 6);
+  expect(totals.costCoverage).toBeCloseTo(rows.filter((e) => e.costIsComplete).length / rows.length, 12);
+  expect(sessions).toBe(new Set(rows.map(sessionKey)).size);
+  expect(cacheSavings).toBeNull();
+  for (const share of byClient) {
+    const own = rows.filter((e) => e.client === share.key);
+    expect(share.tokens).toBe(own.reduce((sum, e) => sum + eventTokens(e), 0));
+    expect(share.sessions).toBe(new Set(own.map(sessionKey)).size);
+  }
+  expect(byClient.map((c) => c.cost)).toEqual([...byClient.map((c) => c.cost)].sort((a, b) => b - a));
+
+  // Savings use per-model cache reads.
+  fx.native.exec("insert into model_prices (model_id, input_cost_per_m, cache_read_cost_per_m) values ('glm-4.7', 1, 0.25)");
+  invalidateEventCache(fx.db);
+  const priced = await queryWindowOverview(fx.db, "UTC", null, "cost");
+  const reads = rows.filter((e) => e.modelId === "glm-4.7").reduce((sum, e) => sum + e.cacheReadTokens, 0);
+  expect(priced.cacheSavings).toBeCloseTo((reads / 1e6) * 0.75, 9);
+
+  // Far fewer rows than events reach JS, and a second metric reuses the window.
+  invalidateEventCache(fx.db);
+  const before = fx.readRows;
+  await queryWindowOverview(fx.db, "UTC", null, "tokens", "daily");
+  const read = fx.readRows - before;
+  expect(read).toBeLessThan(rows.length / 2);
+  await queryWindowOverview(fx.db, "Asia/Kolkata", null, "cost", "monthly");
+  expect(fx.readRows - before).toBe(read);
 });
