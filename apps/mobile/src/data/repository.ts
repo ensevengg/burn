@@ -1,11 +1,12 @@
 /**
  * Read layer: pure db → view-model functions. All screens render from these;
- * TanStack Query just wraps them. Aggregation happens in JS because buckets
- * are computed in the reporting timezone (D8). Shared window reads and
- * cooperative reducers keep large histories from monopolizing the UI thread.
+ * TanStack Query just wraps them. SQLite does the summing; JS only maps its
+ * groups into reporting-timezone buckets (D8), so no screen reads one row per
+ * event. Pure per-event reducers remain as the reference the tests compare
+ * against.
  */
 import type { SQLiteDatabase } from "expo-sqlite";
-import { bucketKey, bucketLabel, type Granularity } from "../lib/format";
+import { bucketKey, bucketLabel, constantZoneOffset, type Granularity } from "../lib/format";
 import { createYieldBudget, runImmediately } from "../lib/cooperative";
 import { withWriteLock } from "../lib/writelock";
 import { usageWindowStart, type UsageWindowDays } from "../lib/usage-range";
@@ -99,7 +100,7 @@ export function sessionKey(e: Pick<EventRow, "environmentId" | "client" | "sessi
 
 /** Overview aggregates keyed by window. The name is historical: callers
  * evict it whenever mirrored events change. */
-const eventCache = new WeakMap<SQLiteDatabase, Map<string, Promise<WindowAggregates>>>();
+const eventCache = new WeakMap<SQLiteDatabase, Map<string, Promise<unknown>>>();
 export function invalidateEventCache(db: SQLiteDatabase): void {
   eventCache.delete(db);
 }
@@ -267,20 +268,16 @@ export async function queryGranularityMax(
   signal?: AbortSignal,
 ): Promise<number> {
   if (signal?.aborted) throw new Error("Query cancelled");
-  const slots = await db.getAllAsync<{ slot: number; value: number }>(
-    `select occurred_at_ms / ${SLOT_MS} as slot,
-            ${metric === "cost" ? "sum(cast(cost as real))" : `sum(${TOKEN_SUM})`} as value
-       from usage_events where occurred_at_ms >= 0 and occurred_at_ms < ? group by slot`,
-    [Date.now() + DAY_MS],
+  // All history's buckets; both metrics share one read.
+  const toMs = Date.now() + DAY_MS;
+  const buckets = await cachedRead(db, windowKey("series", 0, toMs, timeZone, granularity), () =>
+    windowSeriesUncached(db, 0, toMs, timeZone, granularity),
   );
   if (signal?.aborted) throw new Error("Query cancelled");
-  const buckets = new Map<string, number>();
   let max = 0;
-  for (const { slot, value } of slots) {
-    const key = bucketKey(Number(slot) * SLOT_MS, timeZone, granularity);
-    const total = (buckets.get(key) ?? 0) + Number(value);
-    buckets.set(key, total);
-    if (total > max) max = total;
+  for (const bucket of buckets) {
+    const value = metric === "cost" ? bucket.cost : bucket.tokens;
+    if (value > max) max = value;
   }
   return max;
 }
@@ -419,8 +416,8 @@ export interface SessionRow {
   messages: number;
 }
 
-/** The window's most recent sessions, grouped by SQLite: one row per session
- * plus one per (session, model), however long each session ran. */
+/** The window's most recent sessions, grouped by SQLite in one pass: one row
+ * per (session, model) for the newest `limit` sessions, however long each ran. */
 export async function querySessions(
   db: SQLiteDatabase,
   days: UsageWindowDays,
@@ -429,67 +426,50 @@ export async function querySessions(
   signal?: AbortSignal,
 ): Promise<SessionRow[]> {
   if (signal?.aborted) throw new Error("Query cancelled");
-  const where = `occurred_at_ms >= ? and occurred_at_ms < ?${environmentId !== null ? " and environment_id = ?" : ""}`;
+  const scope = environmentId !== null ? " and environment_id = ?" : "";
   const window = [usageWindowStart(days), Date.now() + DAY_MS, ...(environmentId !== null ? [environmentId] : [])];
-  const recent = `with recent as (
-       select environment_id, client, session_id, max(occurred_at_ms) as last_ms,
-              sum(${TOKEN_SUM}) as tokens, sum(cast(cost as real)) as cost, sum(message_count) as messages
-         from usage_events where ${where}
+  // The earliest title wins: zero-padded instants sort as numbers, so the
+  // smallest "<instant><title>" string is the earliest titled row's.
+  const groups = await db.getAllAsync<Record<string, unknown>>(
+    `with recent as (
+       select environment_id, client, session_id from usage_events
+        where occurred_at_ms >= ? and occurred_at_ms < ?${scope}
         group by environment_id, client, session_id
-        order by last_ms desc, environment_id, client, session_id limit ?
-     )`;
-  const bindings = [...window, Math.max(0, Math.floor(limit))];
-  const sessions = await db.getAllAsync<Record<string, unknown>>(
-    `${recent}
-     select r.*, (
-       select session_title from usage_events u
-        where u.environment_id = r.environment_id and u.client = r.client and u.session_id = r.session_id
-          and u.occurred_at_ms >= ? and u.occurred_at_ms < ? and u.session_title is not null
-        order by u.occurred_at_ms asc limit 1
-     ) as title
-       from recent r order by r.last_ms desc, r.environment_id, r.client, r.session_id`,
-    [...bindings, window[0]!, window[1]!],
+        order by max(occurred_at_ms) desc, environment_id, client, session_id limit ?
+     )
+     select u.environment_id, u.client, u.session_id, u.model_id,
+            min(u.occurred_at_ms) as first_ms, max(u.occurred_at_ms) as last_ms,
+            sum(${TOKEN_SUM.replace(/(\w+_tokens)/g, "u.$1")}) as tokens, sum(cast(u.cost as real)) as cost,
+            sum(u.message_count) as messages,
+            min(case when u.session_title is not null then printf('%020d', u.occurred_at_ms) || u.session_title end) as title
+       from recent r join usage_events u
+         on u.environment_id = r.environment_id and u.client = r.client and u.session_id = r.session_id
+      where u.occurred_at_ms >= ? and u.occurred_at_ms < ?${scope.replace("environment_id", "u.environment_id")}
+      group by u.environment_id, u.client, u.session_id, u.model_id
+      order by first_ms, u.model_id`,
+    [...window, Math.max(0, Math.floor(limit)), ...window],
   );
   if (signal?.aborted) throw new Error("Query cancelled");
-  const models = await db.getAllAsync<Record<string, unknown>>(
-    `${recent}
-     select u.environment_id, u.client, u.session_id, u.model_id, min(u.occurred_at_ms) as first_ms
-       from usage_events u join recent r
-         on r.environment_id = u.environment_id and r.client = u.client and r.session_id = u.session_id
-      where u.${where.replaceAll(" and ", " and u.")}
-      group by 1, 2, 3, 4 order by first_ms, u.model_id`,
-    [...bindings, ...window],
-  );
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const modelsBySession = new Map<string, string[]>();
-  for (const m of models) {
-    const key = sessionKey({
-      environmentId: String(m["environment_id"]),
-      client: String(m["client"]),
-      sessionId: String(m["session_id"]),
-    });
-    const list = modelsBySession.get(key) ?? [];
-    list.push(String(m["model_id"]));
-    modelsBySession.set(key, list);
+  const bySession = new Map<string, SessionRow & { titleKey: string | null }>();
+  for (const g of groups) {
+    const ids = { environmentId: String(g["environment_id"]), client: String(g["client"]), sessionId: String(g["session_id"]) };
+    const key = sessionKey(ids);
+    let row = bySession.get(key);
+    if (!row) {
+      row = { key, ...ids, title: null, titleKey: null, lastActivityMs: 0, models: [], tokens: 0, cost: 0, messages: 0 };
+      bySession.set(key, row);
+    }
+    row.models.push(String(g["model_id"]));
+    row.lastActivityMs = Math.max(row.lastActivityMs, Number(g["last_ms"]));
+    row.tokens += Number(g["tokens"] ?? 0);
+    row.cost += Number(g["cost"] ?? 0);
+    row.messages += Number(g["messages"] ?? 0);
+    const titleKey = (g["title"] as string | null) ?? null;
+    if (titleKey !== null && (row.titleKey === null || titleKey < row.titleKey)) row.titleKey = titleKey;
   }
-  return sessions.map((r) => {
-    const row = {
-      environmentId: String(r["environment_id"]),
-      client: String(r["client"]),
-      sessionId: String(r["session_id"]),
-    };
-    const key = sessionKey(row);
-    return {
-      key,
-      ...row,
-      title: (r["title"] as string | null) ?? null,
-      lastActivityMs: Number(r["last_ms"]),
-      models: modelsBySession.get(key) ?? [],
-      tokens: Number(r["tokens"] ?? 0),
-      cost: Number(r["cost"] ?? 0),
-      messages: Number(r["messages"] ?? 0),
-    };
-  });
+  return [...bySession.values()]
+    .map(({ titleKey, ...row }) => ({ ...row, title: titleKey === null ? null : titleKey.slice(20) }))
+    .sort((a, b) => b.lastActivityMs - a.lastActivityMs || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
 export interface QuotaCard {
@@ -522,39 +502,46 @@ export interface WindowOverview {
   cacheSavings: number | null;
 }
 
-interface SlotAggregate {
-  slot: number;
-  tokens: number;
-  cost: number;
-  inputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-}
-
 interface WindowAggregates {
   totals: Totals;
   sessions: number;
-  slots: SlotAggregate[];
   byClient: ClientShare[];
   cacheSavings: number | null;
 }
 
+/** Caches one minute's window reads; the caller-facing name is historical. */
+function cachedRead<T>(db: SQLiteDatabase, key: string, load: () => Promise<T>): Promise<T> {
+  let cache = eventCache.get(db);
+  if (!cache) {
+    cache = new Map();
+    eventCache.set(db, cache);
+  }
+  let pending = cache.get(key) as Promise<T> | undefined;
+  if (!pending) {
+    if (cache.size >= 8) cache.delete(cache.keys().next().value!);
+    pending = load();
+    cache.set(key, pending);
+    const current = cache;
+    const entry = pending;
+    void entry.catch(() => {
+      if (current.get(key) === entry) current.delete(key);
+    });
+  }
+  return pending;
+}
+
+/** Rolling ranges move each minute, so reads in one minute share a window. */
+const windowKey = (kind: string, fromMs: number, toMs: number, ...rest: string[]) =>
+  JSON.stringify([kind, Math.floor(fromMs / 60_000), Math.floor(toMs / 60_000), ...rest]);
+
 /**
- * One window's sums, computed by SQLite: 15-minute UTC slots for the series
- * (re-bucketed in JS for the reporting timezone, as queryGranularityMax does),
- * one row per agent for totals and shares, and per-model cache reads for
- * savings. Reads O(slots + agents + models) rows instead of every event.
+ * One window's sums, computed by SQLite: one row per agent for totals and
+ * shares, and per-model cache reads for savings. Independent of the metric,
+ * granularity and reporting timezone.
  */
 async function aggregateWindowUncached(db: SQLiteDatabase, fromMs: number, toMs: number): Promise<WindowAggregates> {
   const where = "occurred_at_ms >= ? and occurred_at_ms < ?";
   const bindings = [fromMs, toMs];
-  const slotRows = await db.getAllAsync<Record<string, unknown>>(
-    `select occurred_at_ms / ${SLOT_MS} as slot, sum(${TOKEN_SUM}) as tokens, sum(cast(cost as real)) as cost,
-            sum(input_tokens) as input_tokens, sum(cache_read_tokens) as cache_read_tokens,
-            sum(cache_write_tokens) as cache_write_tokens
-       from usage_events where ${where} group by slot order by slot`,
-    bindings,
-  );
   // A session key includes its agent, so per-agent session counts are disjoint
   // and their sum is the window's distinct session count.
   const clientRows = await db.getAllAsync<Record<string, unknown>>(
@@ -627,66 +614,50 @@ async function aggregateWindowUncached(db: SQLiteDatabase, fromMs: number, toMs:
         (Number(read.cache_read_tokens) / 1e6) * Math.max(0, price.input_cost_per_m - price.cache_read_cost_per_m);
     }
   }
-  return {
-    totals,
-    sessions,
-    slots: slotRows.map((r) => ({
-      slot: Number(r["slot"]),
-      tokens: Number(r["tokens"] ?? 0),
-      cost: Number(r["cost"] ?? 0),
-      inputTokens: Number(r["input_tokens"] ?? 0),
-      cacheReadTokens: Number(r["cache_read_tokens"] ?? 0),
-      cacheWriteTokens: Number(r["cache_write_tokens"] ?? 0),
-    })),
-    byClient,
-    cacheSavings,
-  };
+  return { totals, sessions, byClient, cacheSavings };
 }
 
-/** Queries in one minute share a window's aggregates (metric, granularity and
- * timezone only re-bucket them); rolling ranges revalidate each minute. */
-function aggregateWindow(db: SQLiteDatabase, fromMs: number, toMs: number): Promise<WindowAggregates> {
-  let cache = eventCache.get(db);
-  if (!cache) {
-    cache = new Map();
-    eventCache.set(db, cache);
-  }
-  const key = JSON.stringify([Math.floor(fromMs / 60_000), Math.floor(toMs / 60_000)]);
-  let pending = cache.get(key);
-  if (!pending) {
-    if (cache.size >= 4) cache.delete(cache.keys().next().value!);
-    pending = aggregateWindowUncached(db, fromMs, toMs);
-    cache.set(key, pending);
-    const current = cache;
-    void pending.catch(() => {
-      if (current.get(key) === pending) current.delete(key);
-    });
-  }
-  return pending;
-}
-
-/** Everything the restructured dashboard headline/strip/table needs, per window. */
-export async function queryWindowOverview(
+/**
+ * The window's chart buckets in the reporting timezone. When the zone keeps
+ * one offset across the days that hold data (no DST, e.g. the default
+ * Asia/Kolkata), SQLite groups straight into local hours or days. Otherwise it
+ * groups into 15-minute UTC slots, which every zone's offsets respect (D8).
+ * Either way JS sees a few rows per bucket, never one per event.
+ */
+async function windowSeriesUncached(
   db: SQLiteDatabase,
+  fromMs: number,
+  toMs: number,
   timeZone: string,
-  days: UsageWindowDays,
-  metric: "cost" | "tokens",
-  granularity: Granularity = "daily",
+  granularity: Granularity,
   signal?: AbortSignal,
-): Promise<WindowOverview> {
-  const now = Date.now();
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const window = await aggregateWindow(db, usageWindowStart(days, now), now + DAY_MS);
-  if (signal?.aborted) throw new Error("Query cancelled");
+): Promise<SeriesBucket[]> {
+  const where = "occurred_at_ms >= ? and occurred_at_ms < ?";
+  const span = await db.getFirstAsync<{ lo: number | null; hi: number | null }>(
+    `select min(occurred_at_ms) as lo, max(occurred_at_ms) as hi from usage_events where ${where}`,
+    [fromMs, toMs],
+  );
+  if (span?.lo === null || span?.lo === undefined || span.hi === null) return [];
+  const offset = constantZoneOffset(timeZone, Number(span.lo), Number(span.hi));
+  const local = offset !== null && Number(span.lo) + offset >= 0;
+  const width = local ? (granularity === "hourly" ? 3_600_000 : DAY_MS) : SLOT_MS;
+  const shift = local ? offset : 0;
+  const rows = await db.getAllAsync<Record<string, unknown>>(
+    `select (occurred_at_ms + ?) / ? as slot, sum(${TOKEN_SUM}) as tokens, sum(cast(cost as real)) as cost,
+            sum(input_tokens) as input_tokens, sum(cache_read_tokens) as cache_read_tokens,
+            sum(cache_write_tokens) as cache_write_tokens
+       from usage_events where ${where} group by slot order by slot`,
+    [shift, width, fromMs, toMs],
+  );
   const byKey = new Map<string, SeriesBucket>();
   const yieldIfNeeded = createYieldBudget(signal);
-  for (let i = 0; i < window.slots.length; i++) {
+  for (let i = 0; i < rows.length; i++) {
     if (i % 256 === 0) {
       const pause = yieldIfNeeded();
       if (pause) await pause;
     }
-    const slot = window.slots[i]!;
-    const key = bucketKey(slot.slot * SLOT_MS, timeZone, granularity);
+    const r = rows[i]!;
+    const key = bucketKey(Number(r["slot"]) * width - shift, timeZone, granularity);
     let bucket = byKey.get(key);
     if (bucket === undefined) {
       bucket = {
@@ -701,20 +672,48 @@ export async function queryWindowOverview(
       };
       byKey.set(key, bucket);
     }
-    bucket.tokens += slot.tokens;
-    bucket.cost += slot.cost;
-    bucket.inputTokens += slot.inputTokens;
-    bucket.cacheReadTokens += slot.cacheReadTokens;
-    bucket.cacheWriteTokens += slot.cacheWriteTokens;
+    bucket.tokens += Number(r["tokens"] ?? 0);
+    bucket.cost += Number(r["cost"] ?? 0);
+    bucket.inputTokens += Number(r["input_tokens"] ?? 0);
+    bucket.cacheReadTokens += Number(r["cache_read_tokens"] ?? 0);
+    bucket.cacheWriteTokens += Number(r["cache_write_tokens"] ?? 0);
   }
-  if (signal?.aborted) throw new Error("Query cancelled");
-  const series = [...byKey.values()]
+  return [...byKey.values()]
     .map((bucket) => ({ ...bucket, stacks: { All: bucket.tokens } }))
     .sort((a, b) => (a.key < b.key ? -1 : 1));
+}
+
+/** Everything the restructured dashboard headline/strip/table needs, per window. */
+export async function queryWindowOverview(
+  db: SQLiteDatabase,
+  timeZone: string,
+  days: UsageWindowDays,
+  metric: "cost" | "tokens",
+  granularity: Granularity = "daily",
+  signal?: AbortSignal,
+): Promise<WindowOverview> {
+  const now = Date.now();
+  const fromMs = usageWindowStart(days, now);
+  const toMs = now + DAY_MS;
+  if (signal?.aborted) throw new Error("Query cancelled");
+  // Switching Cost/Tokens reuses both reads; only the share order changes.
+  const [window, series] = await Promise.all([
+    cachedRead(db, windowKey("totals", fromMs, toMs), () => aggregateWindowUncached(db, fromMs, toMs)),
+    cachedRead(db, windowKey("series", fromMs, toMs, timeZone, granularity), () =>
+      windowSeriesUncached(db, fromMs, toMs, timeZone, granularity),
+    ),
+  ]);
+  if (signal?.aborted) throw new Error("Query cancelled");
   const byClient = [...window.byClient].sort((a, b) =>
     metric === "cost" ? b.cost - a.cost : b.tokens - a.tokens,
   );
-  return { totals: { ...window.totals }, sessions: window.sessions, series, byClient, cacheSavings: window.cacheSavings };
+  return {
+    totals: { ...window.totals },
+    sessions: window.sessions,
+    series: series.map((bucket) => ({ ...bucket, stacks: { ...bucket.stacks } })),
+    byClient,
+    cacheSavings: window.cacheSavings,
+  };
 }
 
 /** The metric's total over the window just before `days` (same length);

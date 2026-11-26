@@ -156,14 +156,19 @@ test("the SQL-side overview equals aggregating every event, in any zone", async 
   const reads = rows.filter((e) => e.modelId === "glm-4.7").reduce((sum, e) => sum + e.cacheReadTokens, 0);
   expect(priced.cacheSavings).toBeCloseTo((reads / 1e6) * 0.75, 9);
 
-  // Far fewer rows than events reach JS, and a second metric reuses the window.
+  // Far fewer rows than events reach JS, and the other metric reuses both reads.
   invalidateEventCache(fx.db);
-  const before = fx.readRows;
-  await queryWindowOverview(fx.db, "UTC", null, "tokens", "daily");
-  const read = fx.readRows - before;
-  expect(read).toBeLessThan(rows.length / 2);
-  await queryWindowOverview(fx.db, "Asia/Kolkata", null, "cost", "monthly");
-  expect(fx.readRows - before).toBe(read);
+  let before = fx.readRows;
+  await queryWindowOverview(fx.db, "America/New_York", null, "tokens", "daily");
+  const slotted = fx.readRows - before;
+  expect(slotted).toBeLessThan(rows.length / 2);
+  before = fx.readRows;
+  await queryWindowOverview(fx.db, "America/New_York", null, "cost", "daily");
+  expect(fx.readRows - before).toBe(0);
+  // A zone without DST groups straight into local days: one row per day.
+  before = fx.readRows;
+  const kolkata = await queryWindowOverview(fx.db, "Asia/Kolkata", null, "cost", "daily");
+  expect(fx.readRows - before).toBeLessThan(kolkata.series.length + 40);
 });
 
 test("SQL-grouped sessions match grouping every event", async () => {

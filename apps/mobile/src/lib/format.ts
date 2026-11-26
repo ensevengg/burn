@@ -43,7 +43,12 @@ function zoneOffsetExact(atMs: number, timeZone: string): number {
  * the dominant cost of bucketing tens of thousands of rows.
  */
 function zoneOffset(atMs: number, timeZone: string): number {
-  const day = Math.floor(atMs / DAY_MS);
+  const offset = dayOffset(Math.floor(atMs / DAY_MS), timeZone);
+  return Number.isNaN(offset) ? zoneOffsetExact(atMs, timeZone) : offset;
+}
+
+/** The zone's offset for a whole UTC day; NaN on a transition day. */
+function dayOffset(day: number, timeZone: string): number {
   const key = `${timeZone}|${day}`;
   let offset = dayOffsetCache.get(key);
   if (offset === undefined) {
@@ -53,7 +58,26 @@ function zoneOffset(atMs: number, timeZone: string): number {
     if (dayOffsetCache.size > 50_000) dayOffsetCache.clear();
     dayOffsetCache.set(key, offset);
   }
-  return Number.isNaN(offset) ? zoneOffsetExact(atMs, timeZone) : offset;
+  return offset;
+}
+
+/**
+ * The zone's one UTC offset (ms) across every UTC day from `fromMs` to
+ * `toMs`, or null when it changes (DST) or the span is implausibly long.
+ * Uses the same per-day cache as bucketing, so it costs no extra Intl calls
+ * for days that hold data. Lets SQLite group straight into local hours/days.
+ */
+export function constantZoneOffset(timeZone: string, fromMs: number, toMs: number): number | null {
+  const first = Math.floor(fromMs / DAY_MS);
+  const last = Math.floor(toMs / DAY_MS);
+  if (last < first || last - first > 20_000) return null;
+  let offset: number | null = null;
+  for (let day = first; day <= last; day++) {
+    const current = dayOffset(day, timeZone);
+    if (Number.isNaN(current) || (offset !== null && current !== offset)) return null;
+    offset = current;
+  }
+  return offset;
 }
 
 /** Calendar parts of an instant in the given IANA zone. */
