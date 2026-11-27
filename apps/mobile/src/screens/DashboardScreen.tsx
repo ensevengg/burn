@@ -23,7 +23,7 @@ import {
 } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp, useSyncStatus } from "../lib/app-context";
-import { setDashboardView, type DashboardView } from "../lib/settings";
+import type { DashboardView } from "../lib/settings";
 import { useTheme } from "../lib/theme-context";
 import { useNow } from "../lib/use-now";
 import { fillSeries, rollupYears } from "../lib/series";
@@ -51,13 +51,9 @@ const RANGE_WORDS: Record<UsageRangeId, string> = {
 };
 
 export function DashboardScreen() {
-  const { db, savedDashboardView } = useApp();
-  const [metric, setMetricState] = useState<Metric>(savedDashboardView.metric);
-  const [rangeId, setRangeState] = useState<UsageRangeId>(savedDashboardView.range);
-  // Remembered for the next launch; a failed save only forgets the choice.
-  const remember = (view: DashboardView) => {
-    if (db !== null) void setDashboardView(db, view).catch(() => {});
-  };
+  const { dashboardView, rememberDashboardView: remember } = useApp();
+  const [metric, setMetricState] = useState<Metric>(dashboardView.current.metric);
+  const [rangeId, setRangeState] = useState<UsageRangeId>(dashboardView.current.range);
   const setMetric = (next: Metric) => {
     setMetricState(next);
     remember({ metric: next, range: rangeId as DashboardView["range"] });
