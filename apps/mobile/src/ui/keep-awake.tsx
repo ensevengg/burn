@@ -37,6 +37,9 @@ function clockTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+const WRITE_WORDS = { action: "change it", shown: "its state" };
+const READ_WORDS = { action: "read it", shown: "its state" };
+
 export function KeepAwakePanel({
   machine,
   online: reachable,
@@ -65,7 +68,7 @@ export function KeepAwakePanel({
 
   const apply = (minutes: number) => {
     setFailure(null);
-    write.mutate(minutes, { onError: (err) => setFailure(controlFailure(err, machineName, "change it")) });
+    write.mutate(minutes, { onError: (err) => setFailure(controlFailure(err, machineName, WRITE_WORDS)) });
   };
 
   if (state.data === undefined) {
@@ -74,7 +77,7 @@ export function KeepAwakePanel({
         <Text style={[type.eyebrow, { color: C.muted }]}>Keep awake</Text>
         {state.isError || reachable === false ? (
           <Text style={[type.muted, { color: C.warn, marginTop: spacing.s }]} numberOfLines={2}>
-            {state.isError ? controlFailure(state.error, machineName) : `${machineName} is offline.`}
+            {state.isError ? controlFailure(state.error, machineName, READ_WORDS) : `${machineName} is offline.`}
           </Text>
         ) : (
           <Skeleton style={[styles.skeleton, { backgroundColor: C.panelAlt }]} />
