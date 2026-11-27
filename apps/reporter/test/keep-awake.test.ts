@@ -5,7 +5,7 @@ import { detectKeepAwakeDriver, holdArgs, KeepAwakeController, type AwakeHold, t
 import { createLiveFetch, type LiveDeps } from "../src/serve.js";
 
 /** A fake inhibitor: each hold records its length and can be ended early. */
-function fakeDriver(options: { failWith?: string } = {}) {
+function fakeDriver(options: { failWith?: string; neverReady?: boolean } = {}) {
   const holds: { seconds: number; stopped: boolean; end: () => void }[] = [];
   const driver: KeepAwakeDriver = {
     backend: "systemd-inhibit",
@@ -15,7 +15,9 @@ function fakeDriver(options: { failWith?: string } = {}) {
       const record = { seconds, stopped: false, end: () => end({ code: 0, stderr: "" }) };
       holds.push(record);
       if (options.failWith !== undefined) end({ code: 1, stderr: options.failWith });
+      const failing = options.failWith !== undefined || options.neverReady === true;
       return {
+        ready: failing ? new Promise<void>(() => {}) : Promise.resolve(),
         exited,
         stop: () => {
           record.stopped = true;
@@ -31,7 +33,7 @@ describe("keep awake (ADR 0007)", () => {
   test("holds for the asked time, extends without a gap, releases on 0", async () => {
     let now = Date.parse("2026-11-26T10:00:00Z");
     const { driver, holds } = fakeDriver();
-    const controller = new KeepAwakeController({ detect: async () => driver, now: () => now, settleMs: 1 });
+    const controller = new KeepAwakeController({ detect: async () => driver, now: () => now });
     expect((await controller.state()).until).toBeNull();
 
     const first = await controller.set(60);
@@ -51,7 +53,7 @@ describe("keep awake (ADR 0007)", () => {
 
   test("a hold that ends by itself (timer or killed) reads as off", async () => {
     const { driver, holds } = fakeDriver();
-    const controller = new KeepAwakeController({ detect: async () => driver, settleMs: 1 });
+    const controller = new KeepAwakeController({ detect: async () => driver });
     await controller.set(5);
     holds[0]!.end();
     await Bun.sleep(1);
@@ -60,14 +62,32 @@ describe("keep awake (ADR 0007)", () => {
 
   test("an inhibitor that refuses to start is reported, not shown as awake", async () => {
     const { driver } = fakeDriver({ failWith: "Access denied" });
-    const controller = new KeepAwakeController({ detect: async () => driver, settleMs: 50 });
+    const controller = new KeepAwakeController({ detect: async () => driver });
     await expect(controller.set(30)).rejects.toThrow("Access denied");
     expect((await controller.state()).until).toBeNull();
   });
 
+  test("a hold that never confirms is stopped and reported", async () => {
+    const { driver, holds } = fakeDriver({ neverReady: true });
+    const controller = new KeepAwakeController({ detect: async () => driver, startTimeoutMs: 5 });
+    await expect(controller.set(30)).rejects.toThrow("did not start in time");
+    expect(holds[0]!.stopped).toBe(true);
+    expect((await controller.state()).until).toBeNull();
+  });
+
+  test("closing on shutdown releases the hold and refuses new ones", async () => {
+    const { driver, holds } = fakeDriver();
+    const controller = new KeepAwakeController({ detect: async () => driver });
+    await controller.set(60);
+    controller.close();
+    expect(holds[0]!.stopped).toBe(true);
+    await expect(controller.set(60)).rejects.toThrow("stopping");
+    expect(holds).toHaveLength(1);
+  });
+
   test("out-of-range requests never start a hold", async () => {
     const { driver, holds } = fakeDriver();
-    const controller = new KeepAwakeController({ detect: async () => driver, settleMs: 1 });
+    const controller = new KeepAwakeController({ detect: async () => driver });
     for (const minutes of [-1, 1.5, 721]) await expect(controller.set(minutes)).rejects.toThrow();
     expect(holds).toEqual([]);
     expect(() => parseKeepAwakeRequest({ minutes: 721 })).toThrow();
@@ -75,13 +95,14 @@ describe("keep awake (ADR 0007)", () => {
     expect(parseKeepAwakeRequest({ minutes: 0 })).toEqual({ minutes: 0 });
   });
 
-  test("every backend's hold is time-limited and shell-free", () => {
+  test("every backend's hold is time-limited", () => {
     for (const backend of ["systemd-inhibit", "caffeinate", "windows-execution-state"] as const) {
       const [command, args] = holdArgs(backend, 5400.7);
-      expect(command).not.toContain(" ");
       expect(args.join(" ")).toContain("5400");
     }
     expect(holdArgs("systemd-inhibit", 60)[1]).toContain("--what=sleep:idle");
+    // Windows reports readiness only after the call succeeded.
+    expect(holdArgs("windows-execution-state", 60)[1].at(-1)).toMatch(/exit 3 \}; \[Console\]::Out\.WriteLine\('burn-awake'\)/);
   });
 
   test("WSL and unknown systems are never offered", async () => {
@@ -122,7 +143,7 @@ describe("keep-awake endpoint", () => {
 
   test("off by default; enabled it is advertised and switchable", async () => {
     const { driver, holds } = fakeDriver();
-    const controller = () => new KeepAwakeController({ detect: async () => driver, settleMs: 1 });
+    const controller = () => new KeepAwakeController({ detect: async () => driver });
     const off = createLiveFetch(deps(CONFIG, controller()));
     const offPing = (await (await off(new Request("http://machine/ping"))).json()) as { capabilities: string[] };
     expect(offPing.capabilities).not.toContain("keep-awake");

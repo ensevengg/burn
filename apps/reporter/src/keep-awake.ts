@@ -17,10 +17,15 @@ import { platform } from "node:os";
 import { ControlError, runCommand, type CommandRunner } from "./power-mode.js";
 
 export interface AwakeHold {
+  /** Resolves once sleep is actually held off. */
+  ready: Promise<void>;
   /** Resolves when the hold process ends, with stderr for diagnosis. */
   exited: Promise<{ code: number | null; stderr: string }>;
   stop(): void;
 }
+
+/** What Windows' hold prints once SetThreadExecutionState has succeeded. */
+const READY_MARKER = "burn-awake";
 
 export interface KeepAwakeDriver {
   backend: KeepAwakeBackend;
@@ -51,15 +56,37 @@ export function holdArgs(backend: KeepAwakeBackend, seconds: number): [string, s
           "$k = Add-Type -Name Power -Namespace Burn -PassThru -MemberDefinition " +
             "'[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint flags);'; " +
             "if ($k::SetThreadExecutionState([uint32]2147483649) -eq 0) { exit 3 }; " +
+            `[Console]::Out.WriteLine('${READY_MARKER}'); [Console]::Out.Flush(); ` +
             `Start-Sleep -Seconds ${whole}`,
         ],
       ];
   }
 }
 
+/**
+ * systemd-inhibit and caffeinate hold from the moment they run, so surviving a
+ * short settle is proof enough. PowerShell needs seconds to start and compile
+ * its P/Invoke, so Windows waits for its marker instead.
+ */
+const SETTLE_MS = 400;
+
 function spawnHold(backend: KeepAwakeBackend, seconds: number): AwakeHold {
   const [command, args] = holdArgs(backend, seconds);
-  const child = spawn(command, args, { shell: false, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  const marked = backend === "windows-execution-state";
+  const child = spawn(command, args, {
+    shell: false,
+    stdio: ["ignore", marked ? "pipe" : "ignore", "pipe"],
+    windowsHide: true,
+  });
+  const ready = marked
+    ? new Promise<void>((resolve) => {
+        let out = "";
+        child.stdout?.on("data", (chunk: Buffer) => {
+          out = (out + chunk.toString()).slice(-200);
+          if (out.includes(READY_MARKER)) resolve();
+        });
+      })
+    : new Promise<void>((resolve) => setTimeout(resolve, SETTLE_MS));
   let stderr = "";
   child.stderr?.on("data", (chunk: Buffer) => {
     if (stderr.length < 2_000) stderr += chunk.toString();
@@ -69,6 +96,7 @@ function spawnHold(backend: KeepAwakeBackend, seconds: number): AwakeHold {
     child.once("close", (code) => resolve({ code, stderr: stderr.trim() }));
   });
   return {
+    ready,
     exited,
     stop: () => {
       if (child.exitCode === null && child.signalCode === null) child.kill();
@@ -103,8 +131,8 @@ export async function detectKeepAwakeDriver(
 export interface KeepAwakeControllerDeps {
   detect?: () => Promise<KeepAwakeDriver | null>;
   now?: () => number;
-  /** How long a fresh hold must survive before it counts as started. */
-  settleMs?: number;
+  /** How long a fresh hold may take to start before it counts as failed. */
+  startTimeoutMs?: number;
   osKind?: string;
 }
 
@@ -114,6 +142,7 @@ export class KeepAwakeController {
   private current: { hold: AwakeHold; untilMs: number } | null = null;
   private writing: Promise<unknown> = Promise.resolve();
   private exitHook = false;
+  private closed = false;
   private readonly now: () => number;
 
   constructor(private readonly deps: KeepAwakeControllerDeps = {}) {
@@ -148,8 +177,15 @@ export class KeepAwakeController {
     this.current = null;
   }
 
+  /** Daemon shutdown: drop the hold and refuse new ones. */
+  close(): void {
+    this.closed = true;
+    this.release();
+  }
+
   set(minutes: number): Promise<KeepAwakeState> {
     const run = async (): Promise<KeepAwakeState> => {
+      if (this.closed) throw new ControlError("the reporter is stopping", 503);
       if (!Number.isSafeInteger(minutes) || minutes < 0 || minutes > KEEP_AWAKE_MAX_MINUTES)
         throw new ControlError(`minutes must be 0–${KEEP_AWAKE_MAX_MINUTES}`, 400);
       const driver = await this.resolveDriver();
@@ -161,13 +197,26 @@ export class KeepAwakeController {
       // Start the new hold before dropping the old one, so extending never
       // leaves a gap in which the machine could fall asleep.
       const hold = driver.hold(minutes * 60);
-      const early = await Promise.race([
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
         hold.exited,
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), this.deps.settleMs ?? 400)),
+        hold.ready.then(() => "ready" as const),
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(resolve, this.deps.startTimeoutMs ?? 15_000, "timeout");
+        }),
       ]);
-      if (early !== null) {
-        const reason = early.stderr || `exited ${early.code ?? "before starting"}`;
+      clearTimeout(timer);
+      if (outcome !== "ready") {
+        hold.stop();
+        const reason =
+          outcome === "timeout"
+            ? "the inhibitor did not start in time"
+            : outcome.stderr || `exited ${outcome.code ?? "before starting"}`;
         throw new ControlError(`could not hold sleep off: ${reason.slice(0, 300)}`, 502);
+      }
+      if (this.closed) {
+        hold.stop();
+        throw new ControlError("the reporter is stopping", 503);
       }
       this.current?.hold.stop();
       const entry = { hold, untilMs: this.now() + minutes * 60_000 };

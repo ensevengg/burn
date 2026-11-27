@@ -572,8 +572,15 @@ export async function superviseLiveServer(
   const selfCheck = options.selfCheck ?? ((url: string) =>
     fetch(`${url}/ping`, { signal: AbortSignal.timeout(5_000) }).then((res) => res.ok, () => false));
   let failedChecks = 0;
-  // One history across rebinds: the phone's 24-hour health view survives.
-  const deps = { ...options.deps, metrics: options.deps?.metrics ?? new SystemMetricHistory() };
+  // One history and one set of controllers across rebinds: the phone's
+  // 24-hour health view survives, and an active keep-awake hold stays owned.
+  const deps: Omit<LiveDeps, "config"> = {
+    ...options.deps,
+    metrics: options.deps?.metrics ?? new SystemMetricHistory(),
+  };
+  if (config.controls?.powerMode) deps.powerMode ??= new PowerModeController();
+  if (config.controls?.keepAwake) deps.keepAwake ??= new KeepAwakeController({ osKind: config.osKind });
+  const release = () => deps.keepAwake?.close();
   const base = {
     deps,
     quiet: true,
@@ -582,7 +589,7 @@ export async function superviseLiveServer(
   const first = options.bind ? options.bind : await detect();
   let live = await startLiveServer(config, { ...base, bind: first ?? "127.0.0.1" });
   options.onBound?.(live, options.bind !== undefined || first !== null);
-  if (options.bind) return { current: () => live, stop: () => live.stop() };
+  if (options.bind) return { current: () => live, stop: () => { live.stop(); release(); } };
   let busy = false;
   let stopped = false;
   const watcher = setInterval(() => {
@@ -619,6 +626,7 @@ export async function superviseLiveServer(
       stopped = true;
       clearInterval(watcher);
       live.stop();
+      release();
     },
   };
 }
