@@ -98,11 +98,10 @@ export function sessionKey(e: Pick<EventRow, "environmentId" | "client" | "sessi
   return JSON.stringify([e.environmentId, e.client, e.sessionId]);
 }
 
-/** Overview aggregates keyed by window. The name is historical: callers
- * evict it whenever mirrored events change. */
-const eventCache = new WeakMap<SQLiteDatabase, Map<string, Promise<unknown>>>();
+/** Window reads keyed by window; evicted whenever mirrored events change. */
+const windowReadCache = new WeakMap<SQLiteDatabase, Map<string, Promise<unknown>>>();
 export function invalidateEventCache(db: SQLiteDatabase): void {
-  eventCache.delete(db);
+  windowReadCache.delete(db);
 }
 
 export function groupKeyFor(event: EventRow, groupBy: "model" | "client" | "none"): string {
@@ -186,24 +185,6 @@ export function computeGranularityMax(
     if (value > max) max = value;
   }
   return max;
-}
-
-/**
- * Cache savings: what the cache-read discount saved vs paying uncached input
- * prices. Null when no price reference is loaded (machine pricing payload is a
- * spec'd follow-up — AGENTS.md).
- */
-export function computeCacheSavings(
-  events: EventRow[],
-  prices: Record<string, { input: number; cacheRead: number }>,
-): number {
-  let savings = 0;
-  for (const e of events) {
-    const price = prices[e.modelId];
-    if (price === undefined) continue;
-    savings += (e.cacheReadTokens / 1e6) * Math.max(0, price.input - price.cacheRead);
-  }
-  return savings;
 }
 
 export function buildSeries(
@@ -509,12 +490,12 @@ interface WindowAggregates {
   cacheSavings: number | null;
 }
 
-/** Caches one minute's window reads; the caller-facing name is historical. */
+/** Caches one minute's window reads. */
 function cachedRead<T>(db: SQLiteDatabase, key: string, load: () => Promise<T>): Promise<T> {
-  let cache = eventCache.get(db);
+  let cache = windowReadCache.get(db);
   if (!cache) {
     cache = new Map();
-    eventCache.set(db, cache);
+    windowReadCache.set(db, cache);
   }
   let pending = cache.get(key) as Promise<T> | undefined;
   if (!pending) {
@@ -630,7 +611,6 @@ async function windowSeriesUncached(
   toMs: number,
   timeZone: string,
   granularity: Granularity,
-  signal?: AbortSignal,
 ): Promise<SeriesBucket[]> {
   const where = "occurred_at_ms >= ? and occurred_at_ms < ?";
   const span = await db.getFirstAsync<{ lo: number | null; hi: number | null }>(
@@ -650,7 +630,8 @@ async function windowSeriesUncached(
     [shift, width, fromMs, toMs],
   );
   const byKey = new Map<string, SeriesBucket>();
-  const yieldIfNeeded = createYieldBudget(signal);
+  // Shared through the cache, so no single caller's signal may cancel it.
+  const yieldIfNeeded = createYieldBudget();
   for (let i = 0; i < rows.length; i++) {
     if (i % 256 === 0) {
       const pause = yieldIfNeeded();
