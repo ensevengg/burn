@@ -2,8 +2,8 @@
 import { expect, test } from "bun:test";
 import type { MachineEventInput } from "@burn/sync-api";
 import {
-  bucketEvents, eventTokens, queryClients, queryGranularityMax, queryModels, queryWorkspaces,
-  sessionKey, type EventRow,
+  bucketEvents, buildSeries, eventTokens, invalidateEventCache, queryClients, queryGranularityMax,
+  queryModels, querySessions, queryWindowOverview, queryWorkspaces, sessionKey, type EventRow,
 } from "../src/data/repository";
 import { mergePeerEvents } from "../src/lib/mirror-writes";
 import { mirrorFixture } from "./mirror-fixture";
@@ -119,4 +119,113 @@ test("the historical peak from 15-minute slots equals bucketing every event, in 
   }
   const empty = mirrorFixture();
   expect(await queryGranularityMax(empty.db, "UTC", "daily", "cost")).toBe(0);
+});
+
+test("the SQL-side overview equals aggregating every event, in any zone", async () => {
+  const { fx, rows } = await seeded();
+  for (const zone of ["Asia/Kolkata", "America/New_York", "Asia/Kathmandu", "Pacific/Chatham"]) {
+    for (const granularity of ["hourly", "daily", "monthly"] as const) {
+      const overview = await queryWindowOverview(fx.db, zone, null, "tokens", granularity);
+      const expected = buildSeries(rows, zone, granularity, "none");
+      expect(overview.series.map((b) => [b.key, b.label, b.tokens, b.inputTokens, b.cacheReadTokens, b.cacheWriteTokens]))
+        .toEqual(expected.map((b) => [b.key, b.label, b.tokens, b.inputTokens, b.cacheReadTokens, b.cacheWriteTokens]));
+      overview.series.forEach((b, i) => {
+        expect(b.cost).toBeCloseTo(expected[i]!.cost, 6);
+        expect(b.stacks).toEqual(expected[i]!.stacks);
+      });
+    }
+  }
+  const { totals, sessions, byClient, cacheSavings } = await queryWindowOverview(fx.db, "UTC", null, "cost");
+  expect(eventTokens(totals)).toBe(rows.reduce((sum, e) => sum + eventTokens(e), 0));
+  expect(totals.messages).toBe(rows.reduce((sum, e) => sum + e.messageCount, 0));
+  expect(totals.cost).toBeCloseTo(rows.reduce((sum, e) => sum + e.cost, 0), 6);
+  expect(totals.costCoverage).toBeCloseTo(rows.filter((e) => e.costIsComplete).length / rows.length, 12);
+  expect(sessions).toBe(new Set(rows.map(sessionKey)).size);
+  expect(cacheSavings).toBeNull();
+  for (const share of byClient) {
+    const own = rows.filter((e) => e.client === share.key);
+    expect(share.tokens).toBe(own.reduce((sum, e) => sum + eventTokens(e), 0));
+    expect(share.sessions).toBe(new Set(own.map(sessionKey)).size);
+  }
+  expect(byClient.map((c) => c.cost)).toEqual([...byClient.map((c) => c.cost)].sort((a, b) => b - a));
+
+  // Savings use per-model cache reads.
+  fx.native.exec("insert into model_prices (model_id, input_cost_per_m, cache_read_cost_per_m) values ('glm-4.7', 1, 0.25)");
+  invalidateEventCache(fx.db);
+  const priced = await queryWindowOverview(fx.db, "UTC", null, "cost");
+  const reads = rows.filter((e) => e.modelId === "glm-4.7").reduce((sum, e) => sum + e.cacheReadTokens, 0);
+  expect(priced.cacheSavings).toBeCloseTo((reads / 1e6) * 0.75, 9);
+
+  // Far fewer rows than events reach JS, and the other metric reuses both reads.
+  invalidateEventCache(fx.db);
+  let before = fx.readRows;
+  await queryWindowOverview(fx.db, "America/New_York", null, "tokens", "daily");
+  const slotted = fx.readRows - before;
+  expect(slotted).toBeLessThan(rows.length / 2);
+  before = fx.readRows;
+  await queryWindowOverview(fx.db, "America/New_York", null, "cost", "daily");
+  expect(fx.readRows - before).toBe(0);
+  // A zone without DST groups straight into local days: one row per day.
+  before = fx.readRows;
+  const kolkata = await queryWindowOverview(fx.db, "Asia/Kolkata", null, "cost", "daily");
+  expect(fx.readRows - before).toBeLessThan(kolkata.series.length + 40);
+});
+
+test("SQL-grouped sessions match grouping every event", async () => {
+  const { fx, rows } = await seeded();
+  fx.native.exec("update usage_events set session_title = 'T ' || session_id where rowid % 7 = 0");
+  const titled = (fx.native.query("select * from usage_events").all() as Record<string, unknown>[]);
+  const titles = new Map<string, { at: number; title: string }>();
+  for (const r of titled) {
+    if (r["session_title"] === null) continue;
+    const key = sessionKey({ environmentId: String(r["environment_id"]), client: String(r["client"]), sessionId: String(r["session_id"]) });
+    const at = Number(r["occurred_at_ms"]);
+    if (!titles.has(key) || titles.get(key)!.at > at) titles.set(key, { at, title: String(r["session_title"]) });
+  }
+  for (const environmentId of [null, "direct-a"]) {
+    const scoped = rows.filter((e) => environmentId === null || e.environmentId === environmentId);
+    const actual = await querySessions(fx.db, null, environmentId, 25);
+    const grouped = new Map<string, EventRow[]>();
+    for (const e of scoped) grouped.set(sessionKey(e), [...(grouped.get(sessionKey(e)) ?? []), e]);
+    const expected = [...grouped.entries()]
+      .map(([key, own]) => ({ key, last: Math.max(...own.map((e) => e.occurredAtMs)), own }))
+      .sort((a, b) => b.last - a.last)
+      .slice(0, 25);
+    expect(actual.map((row) => row.key)).toEqual(expected.map((row) => row.key));
+    for (const [i, row] of actual.entries()) {
+      const { own, last } = expected[i]!;
+      const ordered = [...own].sort((a, b) => a.occurredAtMs - b.occurredAtMs);
+      expect(row.lastActivityMs).toBe(last);
+      expect(row.tokens).toBe(own.reduce((sum, e) => sum + eventTokens(e), 0));
+      expect(row.messages).toBe(own.reduce((sum, e) => sum + e.messageCount, 0));
+      expect(row.cost).toBeCloseTo(own.reduce((sum, e) => sum + e.cost, 0), 6);
+      expect(row.models).toEqual([...new Set(ordered.map((e) => e.modelId))]);
+      expect(row.title).toBe(titles.get(row.key)?.title ?? null);
+    }
+  }
+  expect(await querySessions(fx.db, 1, null)).toEqual([]);
+});
+
+test("the prior window sums the same length just before the selected one", async () => {
+  const { periodChange, queryPreviousWindowTotal } = await import("../src/data/repository");
+  const fx = mirrorFixture();
+  const now = Date.now();
+  const day = 86_400_000;
+  const rows = [
+    { at: now - 2 * day, tokens: 100, cost: "0.10" }, // current 7d
+    { at: now - 8 * day, tokens: 40, cost: "0.04" }, // prior 7d
+    { at: now - 13.9 * day, tokens: 10, cost: "0.01" }, // prior 7d
+    { at: now - 15 * day, tokens: 999, cost: "9" }, // older than both
+  ];
+  const base = history(1)[0]!;
+  await mergePeerEvents(fx.db, "direct-a", "a",
+    rows.map((r, i) => ({ ...base, occurredAtMs: r.at, inputTokens: r.tokens, outputTokens: 0, cacheReadTokens: 0,
+      cacheWriteTokens: 0, reasoningTokens: 0, cost: r.cost, dedupKey: `p${i}` })), () => {});
+  expect(await queryPreviousWindowTotal(fx.db, 7, "tokens")).toBe(50);
+  expect(await queryPreviousWindowTotal(fx.db, 7, "cost")).toBeCloseTo(0.05, 9);
+  expect(await queryPreviousWindowTotal(fx.db, null, "cost")).toBeNull();
+  expect(periodChange(100, 50)).toBe(1);
+  expect(periodChange(25, 50)).toBe(-0.5);
+  expect(periodChange(5, 0)).toBeNull();
+  expect(periodChange(5, null)).toBeNull();
 });

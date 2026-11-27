@@ -5,7 +5,16 @@ import {
 import { AppState as NativeAppState } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { openDb, resetDb, kvSet, type SQLiteDatabase } from "./db";
-import { getMode, getReportingTimezone, setReportingTimezone, type AppMode } from "./settings";
+import {
+  DEFAULT_DASHBOARD_VIEW,
+  getDashboardView,
+  setDashboardView,
+  getMode,
+  getReportingTimezone,
+  setReportingTimezone,
+  type AppMode,
+  type DashboardView,
+} from "./settings";
 import { seedDemoData } from "./sync";
 import {
   pullDirectFromMachines, cancelDirectPull, addDirectMachine, discoverPeerMachines,
@@ -27,6 +36,11 @@ interface AppState {
   db: SQLiteDatabase | null;
   mode: AppMode;
   reportingTimezone: string;
+  /** The dashboard's last metric and range, loaded with the database (before
+   * any tab mounts). A ref, so a chip tap never re-renders other screens, and
+   * a remounted dashboard opens on the latest choice. */
+  dashboardView: { readonly current: DashboardView };
+  rememberDashboardView: (view: DashboardView) => void;
   enterDemo: () => Promise<void>;
   connectDirect: () => Promise<void>;
   addDirectMachine: (url: string) => Promise<{ slug: string; displayName: string }>;
@@ -67,6 +81,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [db, setDb] = useState<SQLiteDatabase | null>(null);
   const [mode, setMode] = useState<AppMode>("unconfigured");
   const [reportingTimezone, setTzState] = useState("Asia/Kolkata");
+  const dashboardView = useRef<DashboardView>(DEFAULT_DASHBOARD_VIEW);
   const [pairing, setPairing] = useState<string | null>(null);
   const [status, setStatus] = useState<SyncStatus>({
     lastSync: null, syncError: null, syncNotice: null,
@@ -104,9 +119,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const opened = await openDb();
       const currentMode = await getMode(opened);
       const tz = await getReportingTimezone(opened);
+      const view = await getDashboardView(opened);
       if (!active) return;
       setDb(opened);
       setTzState(tz);
+      dashboardView.current = view;
       setMode(currentMode);
     })().catch((err: Error) => {
       if (active) patchStatus({ syncError: err.message });
@@ -224,7 +241,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       invalidate();
     };
     return {
-      db, mode, reportingTimezone, sync, pairing, setPairing,
+      db, mode, reportingTimezone, dashboardView, sync, pairing, setPairing,
+      rememberDashboardView(view) {
+        dashboardView.current = view;
+        // A failed save only forgets the choice at the next launch.
+        if (db) void setDashboardView(db, view).catch(() => {});
+      },
       async enterDemo() {
         if (!db) return;
         await prepareReset();

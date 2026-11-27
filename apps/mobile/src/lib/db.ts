@@ -188,7 +188,7 @@ export async function wipeForReseed(db: SQLite.SQLiteDatabase): Promise<void> {
     await db.runAsync("delete from reconcile_sessions");
     await db.runAsync("delete from reconcile_new_events");
     await db.runAsync(
-      "delete from kv where key not in ('reporting_timezone', 'theme_mode')",
+      "delete from kv where key not in ('reporting_timezone', 'theme_mode', 'dashboard_view')",
     );
   });
 }

@@ -7,6 +7,7 @@ import {
   queryEnvironments,
   queryGranularityMax,
   queryModels,
+  queryPreviousWindowTotal,
   queryQuotas,
   querySessions,
   querySystems,
@@ -86,6 +87,15 @@ export function useWindowOverviewQuery(days: UsageWindowDays, metric: "cost" | "
     ["window-overview", reportingTimezone, days, metric, granularity],
     (db, signal) => queryWindowOverview(db, reportingTimezone, days, metric, granularity, signal),
     { keepPrevious: true },
+  );
+}
+
+/** The same-length window before the selected one, for "vs prior" text. */
+export function usePreviousWindowQuery(days: UsageWindowDays, metric: "cost" | "tokens", enabled = true) {
+  return useDbQuery(
+    ["previous-window", days, metric],
+    (db, signal) => queryPreviousWindowTotal(db, days, metric, signal),
+    { enabled },
   );
 }
 

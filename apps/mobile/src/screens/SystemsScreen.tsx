@@ -13,7 +13,8 @@ import { FadeIn, PressableScale, TweenText } from "../ui/motion";
 import { Sparkline } from "../ui/charts";
 import { Screen } from "../ui/screen";
 import { PowerModePanel } from "../ui/power-mode";
-import { supportsPowerMode } from "@burn/sync-api";
+import { KeepAwakePanel } from "../ui/keep-awake";
+import { supportsKeepAwake, supportsPowerMode } from "@burn/sync-api";
 
 type MetricKey = "cpuLoadPct" | "cpuTempC" | "ramUsedPct" | "ramTempC" | "gpuUtilPct" | "gpuTempC";
 
@@ -125,15 +126,25 @@ export function SystemsScreen() {
                 <MetricTile label="GPU temp" unit="°" samples={system.metrics} field="gpuTempC" warnAt={85} />
               </View>
               {/* A fresh probe wins; otherwise the stored capabilities keep the
-                  control visible (offline) for a machine unreachable at launch. */}
-              {supportsPowerMode(probe?.capabilities ?? system.capabilities) && (probe?.endpoint ?? system.endpoint) !== null && (
-                <PowerModePanel
-                  machine={{ environmentId: system.id, endpoint: (probe?.endpoint ?? system.endpoint)! }}
-                  // Data errors (e.g. a broken exporter) still mean the machine answers.
-                  online={probe === undefined ? null : probe.state === "live" || probe.state === "error"}
-                  machineName={system.displayName}
-                />
-              )}
+                  controls visible (offline) for a machine unreachable at launch. */}
+              {(() => {
+                const capabilities = probe?.capabilities ?? system.capabilities;
+                const endpoint = probe?.endpoint ?? system.endpoint;
+                if (endpoint === null) return null;
+                const machine = { environmentId: system.id, endpoint };
+                // Data errors (e.g. a broken exporter) still mean the machine answers.
+                const online = probe === undefined ? null : probe.state === "live" || probe.state === "error";
+                return (
+                  <>
+                    {supportsPowerMode(capabilities) && (
+                      <PowerModePanel machine={machine} online={online} machineName={system.displayName} />
+                    )}
+                    {supportsKeepAwake(capabilities) && (
+                      <KeepAwakePanel machine={machine} online={online} machineName={system.displayName} />
+                    )}
+                  </>
+                );
+              })()}
             </Card>
           </FadeIn>
         );
@@ -185,6 +196,23 @@ export function SystemsScreen() {
           </Card>
         </>
       )}
+      {/* Controls are opt-in per machine (ADR 0004, 0007); say how once. */}
+      {(() => {
+        const missing = reporting.filter((system) => {
+          const capabilities = liveMachines.find((m) => m.environmentId === system.id)?.capabilities ?? system.capabilities;
+          return !supportsKeepAwake(capabilities) || (system.osKind === "linux" && !supportsPowerMode(capabilities));
+        });
+        if (missing.length === 0) return null;
+        return (
+          <Text style={[type.muted, styles.controlsHint, { color: C.faint }]}>
+            {"More control: run "}
+            <Text style={styles.code}>burn-report controls enable keep-awake</Text>
+            {" (or "}
+            <Text style={styles.code}>power-mode</Text>
+            {`, Linux) on ${missing.length === 1 ? missing[0]!.displayName : "a machine"}, then restart its daemon.`}
+          </Text>
+        );
+      })()}
     </Screen>
   );
 }
@@ -201,5 +229,7 @@ const styles = StyleSheet.create({
   quietRow: { paddingVertical: 12 },
   quietTop: { flexDirection: "row", alignItems: "center", gap: 10 },
   quietDot: { width: 8, height: 8, borderRadius: 4, borderWidth: 1.5 },
+  controlsHint: { marginHorizontal: 24, marginTop: spacing.l, lineHeight: 17, textAlign: "center" },
+  code: { fontFamily: "monospace", fontSize: 11.5 },
   quietDetail: { marginTop: 6, marginLeft: 18, lineHeight: 17 },
 });

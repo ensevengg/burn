@@ -1,8 +1,14 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Animated, StyleSheet, Text, View } from "react-native";
 import { useNavigation, type NavigationProp, type ParamListBase } from "@react-navigation/native";
-import { useGranularityMaxQuery, useMachinesQuery, useQuotasQuery, useWindowOverviewQuery } from "../data/queries";
-import { eventTokens, type QuotaCard, type WindowOverview } from "../data/repository";
+import {
+  useGranularityMaxQuery,
+  useMachinesQuery,
+  usePreviousWindowQuery,
+  useQuotasQuery,
+  useWindowOverviewQuery,
+} from "../data/queries";
+import { eventTokens, periodChange, type QuotaCard, type WindowOverview } from "../data/repository";
 import {
   bucketTitle,
   formatCost,
@@ -17,6 +23,7 @@ import {
 } from "../lib/format";
 import { humanize } from "../lib/labels";
 import { useApp, useSyncStatus } from "../lib/app-context";
+import type { DashboardView } from "../lib/settings";
 import { useTheme } from "../lib/theme-context";
 import { useNow } from "../lib/use-now";
 import { fillSeries, rollupYears } from "../lib/series";
@@ -44,8 +51,17 @@ const RANGE_WORDS: Record<UsageRangeId, string> = {
 };
 
 export function DashboardScreen() {
-  const [metric, setMetric] = useState<Metric>("cost");
-  const [rangeId, setRangeId] = useState<UsageRangeId>("30");
+  const { dashboardView, rememberDashboardView: remember } = useApp();
+  const [metric, setMetricState] = useState<Metric>(dashboardView.current.metric);
+  const [rangeId, setRangeState] = useState<UsageRangeId>(dashboardView.current.range);
+  const setMetric = (next: Metric) => {
+    setMetricState(next);
+    remember({ metric: next, range: rangeId as DashboardView["range"] });
+  };
+  const setRangeId = (next: UsageRangeId) => {
+    setRangeState(next);
+    remember({ metric, range: next as DashboardView["range"] });
+  };
   return (
     <Screen title="Overview">
       <FadeIn>
@@ -143,6 +159,7 @@ function UsageHero({
   // so first paint never queues behind it.
   const overviewData = overview.data !== undefined && !overview.isPlaceholderData ? overview.data : undefined;
   const peak = useGranularityMaxQuery(range.granularity, metric, overviewData !== undefined && range.days !== null);
+  const previous = usePreviousWindowQuery(range.days, metric, overviewData !== undefined && range.days !== null);
   const [scrub, setScrub] = useState<number | null>(null);
 
   // Placeholder rows belong to the previous selection: keep showing the last
@@ -201,7 +218,17 @@ function UsageHero({
             {scrubSub ?? " "}
           </Text>
         ) : (
-          <HeroSub messages={shown.messages} sessions={shown.sessions} />
+          <HeroSub
+            messages={shown.messages}
+            sessions={shown.sessions}
+            // Only beside the window it was computed for, never a stale one.
+            change={
+              fresh !== null && previous.data !== undefined && !previous.isPlaceholderData
+                ? periodChange(fresh.total, previous.data)
+                : null
+            }
+            span={USAGE_RANGES[shown.rangeId].label}
+          />
         )}
         <View style={styles.chartWrap}>
           {shown === null ? (
@@ -245,14 +272,49 @@ function HeroNumber({
   );
 }
 
-function HeroSub({ messages, sessions }: { messages: number; sessions: number }) {
+function HeroSub({
+  messages,
+  sessions,
+  change,
+  span,
+}: {
+  messages: number;
+  sessions: number;
+  change: number | null;
+  span: string;
+}) {
   const { C } = useTheme();
   const shownMessages = useTweenedNumber(messages, 650);
   const shownSessions = useTweenedNumber(sessions, 650);
   return (
-    <Text style={[type.muted, { color: C.muted, marginTop: 4 }]} numberOfLines={1}>
-      {`${formatCount(shownMessages)} messages · ${formatCount(shownSessions)} sessions`}
-    </Text>
+    <View style={styles.heroSubRow}>
+      <Text style={[type.muted, { color: C.muted, flexShrink: 1 }]} numberOfLines={1}>
+        {`${formatCount(shownMessages)} messages · ${formatCount(shownSessions)} sessions`}
+      </Text>
+      {change !== null && <PeriodChange change={change} span={span} />}
+    </View>
+  );
+}
+
+/** "▲ 18% vs prior 30d". Neutral ink: more spend is not good or bad by itself. */
+function PeriodChange({ change, span }: { change: number; span: string }) {
+  const { C } = useTheme();
+  const flat = Math.abs(change) < 0.005;
+  const arrow = flat ? "→" : change > 0 ? "▲" : "▼";
+  const size = Math.abs(change);
+  const percent = size >= 10 ? `${Math.round(change + 1)}×` : `${size < 0.1 ? (size * 100).toFixed(1) : Math.round(size * 100)}%`;
+  return (
+    <FadeIn>
+      <Text
+        style={[styles.periodChange, { color: C.muted, backgroundColor: C.panelAlt }]}
+        numberOfLines={1}
+        accessibilityLabel={
+          flat ? `About the same as the prior ${span}` : `${change > 0 ? "Up" : "Down"} ${percent} on the prior ${span}`
+        }
+      >
+        {`${arrow} ${flat ? "flat" : percent} vs prior ${span}`}
+      </Text>
+    </FadeIn>
   );
 }
 
@@ -570,6 +632,16 @@ function MachineStrip() {
 }
 
 const styles = StyleSheet.create({
+  heroSubRow: { flexDirection: "row", alignItems: "center", gap: spacing.s, marginTop: 4 },
+  periodChange: {
+    fontSize: 11.5,
+    fontWeight: "600",
+    fontVariant: ["tabular-nums"],
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+    overflow: "hidden",
+  },
   hero: { paddingHorizontal: gutter, paddingTop: spacing.s },
   heroTop: { flexDirection: "row", alignItems: "center", gap: spacing.m, marginBottom: 6 },
   metricToggle: { width: 138 },

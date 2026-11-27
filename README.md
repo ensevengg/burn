@@ -80,7 +80,7 @@ bun run reporter -- install-service   # or `daemon` to run in this terminal only
 |---|---|
 | **Overview** | Spend or tokens, 24h to All. Drag the chart for any day. Agents, cache hits, limits. |
 | **Explore** | Models, agents, workspaces, sessions. Ranked. |
-| **Systems** | RAM, GPU, temps. 24h trends. Live fans and power mode on opted-in Linux machines. |
+| **Systems** | RAM, GPU, temps. 24h trends. Live fans and power mode on opted-in Linux machines. Keep a machine awake for a long agent run (1–8h, opt-in). |
 | **Machines** | Scan a QR code, tap the rest. Refresh or reconcile. |
 | **Settings** | Theme, timezone, disconnect. |
 
@@ -113,7 +113,7 @@ Deep dives: [transfer behavior](docs/connection-transfer-fixes.md) · [why Tails
 | Path | What |
 |---|---|
 | `apps/mobile` | Expo Android app |
-| `apps/reporter` | `burn-report` CLI and machine backend (read-only, plus opt-in power mode) |
+| `apps/reporter` | `burn-report` CLI and machine backend (read-only, plus opt-in power mode and keep awake) |
 | `crates/burn-events` | Pinned Rust exporter of priced tokscale records (JSONL) |
 | `packages/sync-api` | Transport, shared types, validation, mirror keys |
 | `docs` | Decisions, transfer behavior, audits |
@@ -129,7 +129,7 @@ bun run --cwd apps/mobile android   # local Android build; needs JDK + Android S
 - **Release:** `scripts/release.sh 0.2.0` bumps every version, runs the checks, tags and pushes. The tag builds the APK, both binaries for each platform and the installers into one GitHub release ([how](docs/adr/0006-one-tag-releases.md)).
 - **Rules:** [AGENTS.md](AGENTS.md)
 - **Why Tailscale-only:** [ADR 0003](docs/adr/0003-tailscale-only-backend.md)
-- **Why the one write endpoint:** [ADR 0004](docs/adr/0004-opt-in-machine-controls.md)
+- **Why the opt-in controls:** [ADR 0004](docs/adr/0004-opt-in-machine-controls.md) (power mode), [ADR 0007](docs/adr/0007-keep-awake-control.md) (keep awake). Enable each per machine: `burn-report controls enable power-mode` / `keep-awake`.
 
 ## Next up
 
